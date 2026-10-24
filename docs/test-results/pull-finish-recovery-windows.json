@@ -1,0 +1,37 @@
+{
+  "status": "passed",
+  "date": "2026-10-24T08:18:48.561Z",
+  "issue": "A pull whose payload passed full SHA-256 verification was marked FAILED when the separate SSH control connection closed before the finish cleanup acknowledgment; application and restart never ran.",
+  "changes": [
+    "Treat only SSH disconnect/timeout during the final read-job finish as a nonfatal cleanup loss after complete content verification; bound the cleanup wait to 15 seconds and release the control session immediately.",
+    "Persist the authenticated pinned generation for offline recovery; verify the dataset binding, original manifest and every payload file before staging PENDING_APPLY.",
+    "Keep partial/corrupt downloads, changed targets, application journals, permission errors and upload failures fatal.",
+    "Label file transfer progress separately from application and health-checked completion."
+  ],
+  "validation": {
+    "unit": {
+      "passed": 49,
+      "failed": 0,
+      "skipped": 0
+    },
+    "postChangeTargeted": {
+      "passed": 12,
+      "failed": 0,
+      "skipped": 0
+    },
+    "realOpenSshRsync": [
+      "Control process exits between rsync completion and local verification",
+      "Server disconnects after receiving finish without sending its acknowledgment",
+      "Permission rejection is fatal",
+      "Self-inconsistent downloaded content is fatal and never reaches finish",
+      "Password, Unicode paths, bare-PATH SSH, dataset pinning and changed-host rejection remain effective"
+    ],
+    "actualSillyTavern": "Isolated ST 1.19.0: legacy verified-download failure recovered offline, required confirmation, applied the original snapshot, restarted on the same port with a fresh nonce, and passed health checks without reconnecting.",
+    "offlineDelivery": "The exact inline repair command executed against a pristine pre-fix installed plugin fixture; integrity refusal and both UI copies verified; Bash syntax checked."
+  },
+  "limits": [
+    "The user Android device was not directly accessed or restarted.",
+    "The code changes are local and have not been pushed to GitHub.",
+    "No live VPS data or real local SillyTavern user data were modified by this fix."
+  ]
+}

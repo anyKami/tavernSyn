@@ -58,7 +58,7 @@ export async function install({ st, state, profile = 'default-user', repository 
         await fs.writeFile(path.join(directory, 'Start-TavernSyn.cmd'), script);
     } else {
         const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-        await fs.writeFile(path.join(directory, 'start-tavernsyn.sh'), `#!/data/data/com.termux/files/usr/bin/sh\ncd ${quote(directory)}\nexec ${quote(process.execPath)} ${quote(path.join(repository, 'helper/launcher.mjs'))} --state ${quote(state)}\n`, { mode: 0o700 });
+        await fs.writeFile(path.join(directory, 'start-tavernsyn.sh'), `#!/data/data/com.termux/files/usr/bin/sh\ncd ${quote(directory)} || exit 1\nexec ${quote(process.execPath)} ${quote(path.join(repository, 'helper/launcher.mjs'))} --state ${quote(state)} --open-browser yes "$@"\n`, { mode: 0o700 });
     }
     return { state, deviceId: (await readJson(deviceFile)).deviceId, install: directory, ...prepared };
 }

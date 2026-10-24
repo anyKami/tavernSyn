@@ -1,0 +1,44 @@
+{
+  "status": "passed",
+  "verifiedAt": "2026-10-24T11:51:05.234Z",
+  "issue": "The shujuku plugin package declarations did not match the shipped lock. npm ci aborted with EUSAGE during PREPARING, before data application.",
+  "fix": {
+    "files": [
+      "lib/dependencies.mjs",
+      "lib/snapshot.mjs"
+    ],
+    "behavior": [
+      "Only an explicit npm ci lock-mismatch EUSAGE triggers repair.",
+      "Remove invalid lock files exclusively inside a validated job candidate; regenerate the complete lock metadata without build scripts, then run npm ci with dev packages omitted.",
+      "Preserve the original lock kind when npm-shrinkwrap.json is used.",
+      "Keep the sealed download and VPS generation unchanged.",
+      "Record redacted npm output in the private job dependencies.log and report the plugin and npm error code to the UI."
+    ]
+  },
+  "validation": {
+    "existingRegressionChecks": 49,
+    "finalDependencyChecks": 5,
+    "android": {
+      "node": "v25.2.1",
+      "npm": "11.6.2",
+      "originalBadLockReproduced": true,
+      "freshBadLockRepaired": true,
+      "secondCiSucceeded": true,
+      "allProductionPluginsPassed": [
+        "JS-Slash-Runner",
+        "ST-BaiBai-Image",
+        "ST-Prompt-Template",
+        "shujuku"
+      ],
+      "originalDownloadSha256Verified": true,
+      "downloadFiles": 2782,
+      "controlledRestartPassed": true,
+      "httpStatus": 200,
+      "finalPhase": "PENDING_APPLY",
+      "error": null,
+      "applicationJournalPresent": false
+    }
+  },
+  "remaining": "Refresh the Android TavernSyn page and complete its existing overwrite confirmation before applying the verified download.",
+  "privacy": "Device identifiers, credentials and private payload contents omitted."
+}

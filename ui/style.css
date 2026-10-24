@@ -1,6 +1,6 @@
 #tavernsyn-panel .ts-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem}
 #tavernsyn-panel .ts-actions>.menu_button{display:flex;align-items:center;width:100%;min-width:0;box-sizing:border-box;margin:0;white-space:nowrap;justify-content:center;padding:.65em .8em}
-#tavernsyn-panel .ts-actions>.ts-resume-upload{grid-column:1/-1}
+#tavernsyn-panel .ts-actions>.ts-resume-upload,#tavernsyn-panel .ts-actions>.ts-resume-apply{grid-column:1/-1}
 #tavernsyn-panel .menu_button[hidden]{display:none}
 #tavernsyn-panel .ts-restore{width:auto;white-space:nowrap;display:inline-flex;margin:.65em 0;justify-content:center}
 #tavernsyn-panel .ts-recovery{display:block;overflow-wrap:anywhere}

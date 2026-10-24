@@ -1,6 +1,16 @@
-# 0.2.0 实现与验证
+# 0.2.1 实现与验证
 
 日期：2026-10-24。适配 SillyTavern 1.19.0，固定 commit `06bde939fb1e9c4c8d8641d810f0a916b5bce127`。
+
+## 0.2.1 修复与真机验证
+
+完整下载通过 SHA-256 校验后，结束只读任务时的 SSH 断开或回执超时不再阻止准备应用；其他权限与完整性错误仍失败。下载回执固定数据集、代次与清单，离线恢复会重新校验全部文件并拒绝已经进入应用的任务。文件传输 100% 与应用、重启后的同步完成分别显示。
+
+待应用的保存失败会解除界面忙碌状态并显示原因，可使用“继续应用已下载文件”重试。插件依赖仅对明确的 npm 锁不一致错误，在候选目录重新解析锁文件后安装；原始下载与 VPS 内容保留。准备完成后重新核对本机差异，自动保存引起的变化会刷新确认并要求再次确认；确认后的真实改动仍阻止覆盖。覆盖确认绑定当前页面，避免准备期间刷新页面后一直等待旧页面交接，并继续阻止其他活跃标签页。
+
+本机同步插件目录按实际大小写保留，不从 VPS 替换；手动恢复时先替换恢复副本中所属的同步代码目录，避免 Git 只读对象无法覆盖。Termux 入口保持终端前台运行，健康检查通过后调用 `termux-open-url`；切到浏览器时继续运行，关闭启动会话或使用 Termux 的 Exit 时退出酒馆。
+
+Android 真机 Node.js 25.2.1 已完成真实 VPS 快照的 2,782 个文件校验、插件依赖准备、覆盖确认、保存交接、应用和受控重启。任务为 `SUCCEEDED`，替换日志为 `committed`，新实例 HTTP 200 且 epoch 匹配，前端保留正常，一次恢复副本可用。另已验证普通 Termux 管理工具选项 4 自动打开浏览器，以及 Exit 后启动器和酒馆均退出、端口与锁释放。[真机报告](test-results/termux-sync-session-android.json)。这不代表已验证 Android 反向推送或系统强制回收。
 
 ## 实际实现
 
@@ -38,8 +48,10 @@ VPS 通过账号专属 SSH Match/ForceCommand 只接受固定入口及有限 JSO
 
 | 范围 | 结果 | 证据 |
 | --- | --- | --- |
+| 0.2.1 修复回归 | 发布检查 Windows 57 项全部通过，无跳过，包含真实 SSH/rsync 和安装器；真实酒馆隔离集成 22 项检查通过，覆盖当前页面交接与其他活跃页面拦截 | [0.2.1 发布检查](test-results/release-0.2.1-windows.json)，[隔离集成](test-results/implementation-windows.json)，`tests/confirmation.test.mjs`、`tests/dependencies.test.mjs`、`tests/download-recovery.test.mjs` |
+| Android Termux 真机 | 已验证完整快照校验、候选依赖修复、覆盖应用、健康重启、前端保留、浏览器返回和 Termux Exit 停止所属酒馆 | [报告](test-results/termux-sync-session-android.json)，[依赖修复](test-results/dependency-lock-repair-android.json) |
 | Windows 数据层/任务层 | 0.2.0 共 45 项通过；包含断线续传、任务绑定、浏览器打开参数、日志转发/文件留存、中文与空格路径的桌面快捷方式；真实 SSH/rsync 测试覆盖推送和拉取详细日志 | [0.2.0 发布检查](test-results/release-0.2.0-windows.json)，[启动与日志报告](test-results/launcher-features-windows.json)，[断线恢复报告](test-results/interruption-recovery-windows.json)，`tests/*.test.mjs` |
-| 本机安装入口 | Windows PowerShell 5.1 首装、中文/空格路径、重装保留、独立入口自动克隆（本地 Git 镜像）、运行中/活锁/待处理任务拒绝；Termux 入口 Bash 语法通过 | `tests/setup.test.mjs`；未在 Android 真机运行，不声称已完成安卓验收 |
+| 本机安装入口 | Windows PowerShell 5.1 首装、中文/空格路径、重装保留、独立入口自动克隆（本地 Git 镜像）、运行中/活锁/待处理任务拒绝；Termux 入口 Bash 语法及真机受控启动通过 | `tests/setup.test.mjs`；Android 全新安装流程仍待单独验收 |
 | VPS 存储与协议 | 实际 Ubuntu VPS 以 tavernsyn 账号通过全部 20 项测试，包含真实 flock、控制连接 EOF、传输仍活跃时拒绝接管、暂停数据保留、固定代次回收及只读文件发布；更新器配置测试另有 2 项通过 | `tests/test_vps.py`，`tests/test_vps_update.py`，[报告](test-results/interruption-recovery-windows.json) |
 | 真实密码 SSH | 真实 OpenSSH 客户端、测试 SSH 服务端和真实 rsync 完成双向传输；自动发现数据集、特殊字符密码、错误密码及主机身份变化均有验收 | `tests/password-ssh.test.mjs`；服务端为独立测试实现，不代替真实 Linux VPS |
 | 真实 rsync 3.5.1 | 中文/空格路径、不变文件零内容传输、块差异、删除、定向补传、模块上传/只读下载/拒绝写入 | [报告](test-results/rsync-windows.json) |
@@ -55,10 +67,10 @@ rsync 实例：2 MiB 文件中改变约 4 KiB，literal data 为 4,344 字节，
 
 2026-10-24 已部署 0.1.3：实际服务器入口摘要与测试包一致，20 项 Linux 测试通过；旧任务转为 paused，32 处未发布暂存权限已修复，更新时发布指针及上传文件保留。已用本机保存的密码通过真实 SSH 验证版本与暂停状态，并从受控启动器完成原完整快照续传：2,782 个文件、458,105,271 字节，实际新增 literal data 10,770 字节。设备状态为 `SUCCEEDED`，新连接再次核对 VPS 发布指针、基准、历史和错误清除；旧任务暂存保留，新任务已无占用。
 
-- Android Termux 真机的后台回收、依赖安装、页面恢复与双向同步。
+- Android Termux 的系统后台回收、全新安装和反向推送；已验证本次完整拉取应用、依赖准备及页面交接。
 - 真实 Linux SSH forced-command、flock 的断网恢复和并发压力；已通过的单次部署及协议检查不能代替这些测试。
 - 任意第三方插件、模块代理、浏览器数据库及独立后台写入进程。默认只保证已保存内容和有保存回执的设置/当前聊天。
 - 多用户/远程浏览器/HTTPS/任意启动参数，本版只支持绑定的单用户、本机 HTTP 和现有 config.yaml。
-- 实际 VPS→设备的完整拉取应用、外部依赖失败与真实断电仍需验收；已通过实际 Windows→VPS 原快照续传发布。
+- 实际 VPS→Windows 的完整拉取应用及真实断电仍需验收；已通过 Windows→VPS 原快照续传发布，以及 VPS 快照→Android 的完整应用。
 
-隔离测试不使用真实用户数据或 VPS。首次正式接入应按安装文档创建独立同步根，保留原迁移备份。
+隔离测试不使用真实用户数据或 VPS；真机报告单独记录用户授权的实际同步，不发布设备身份、凭据或文件内容。首次正式接入应按安装文档创建独立同步根，保留原迁移备份。

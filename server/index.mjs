@@ -118,6 +118,11 @@ export async function init(router) {
     for (const action of ['ready', 'page', 'confirm', 'cancel', 'resume-pending', 'resume-upload']) {
         router.post(`/${action}`, endpoint(async (req, res) => {
             requireThat(Object.keys(req.body).every(k => ['id', 'receipt', 'tab', 'ticket', 'token'].includes(k)), 'INPUT', '不接受未定义的任务参数。');
+            if (action === 'confirm' && managed && req.body.tab) {
+                requireThat(uuidPattern.test(req.body.tab), 'INPUT', '标签页标识无效。');
+                const others = [...managed.tabs].filter(([tab, time]) => tab !== req.body.tab && Date.now() - time < 15000);
+                requireThat(!others.length, 'OTHER_TABS', '请先关闭其他正在打开的酒馆标签页，再确认覆盖。');
+            }
             res.json(await helper(action, req.body));
         }));
     }

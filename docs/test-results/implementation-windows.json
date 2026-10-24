@@ -1,10 +1,10 @@
 {
   "status": "passed",
-  "date": "2026-10-24T02:20:33.143Z",
+  "date": "2026-10-24T13:26:52.292Z",
   "platform": "win32",
   "node": "v24.18.0",
-  "root": "%TEMP%\\tavernsyn-tests\\tavernsyn-e2e-Ng1BZr",
-  "port": 63561,
+  "root": "<isolated-test-directory>",
+  "port": 54585,
   "checks": [
     "Native authentication and CSRF reject unauthenticated/missing-token requests",
     "An authenticated non-admin account cannot access synchronization management",
@@ -16,6 +16,8 @@
     "Unmatched save nonce/digest cannot obtain a disk receipt",
     "Saved connection settings and password availability survive a real controlled restart",
     "Protected plugin push: save ACK, waiting document, graceful exit, frozen snapshot, same-port new-nonce restart, publish",
+    "Legacy SSH failure after complete download: offline SHA-256 recovery, original-generation confirmation, real ST same-port restart and successful application without reconnecting",
+    "Confirmation binds the save handoff to its current page and refuses another still-active TavernSyn tab",
     "Protected plugin pull: verified stage, unpushed-change confirmation, owned stop, journal apply, health check and recovery snapshot",
     "Push/pull phase, file count, verification, restart and completion logs reach both the live console and sync.log without logging the saved password",
     "Manual recovery restores pre-pull data through save ACK, owned stop and healthy same-port restart, then consumes the one-step backup",
@@ -34,5 +36,5 @@
     "Browser interaction unless separately recorded",
     "Third-party plugin coexistence"
   ],
-  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+  "publicationPrivacy": "Temporary test path anonymized; raw results stay with the isolated fixture."
 }

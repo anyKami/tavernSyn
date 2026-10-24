@@ -1,0 +1,51 @@
+{
+  "status": "passed",
+  "version": "0.2.1",
+  "date": "2026-10-24T14:21:06.394Z",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "unit": {
+    "total": 57,
+    "passed": 57,
+    "failed": 0,
+    "skipped": 0,
+    "realOpenSshAndRsync": true,
+    "installerReinstallPreservesUserData": true
+  },
+  "vpsPython": {
+    "total": 22,
+    "passed": 17,
+    "failed": 0,
+    "skipped": 5,
+    "skipReason": "Linux flock concurrency and read-only descriptor fsync require a Linux host."
+  },
+  "rsync": {
+    "status": "passed",
+    "checks": 8,
+    "version": "rsync  version 3.5.1  protocol version 33",
+    "date": "2026-10-24T14:18:27.127Z"
+  },
+  "actualSillyTavern": {
+    "status": "passed",
+    "checks": 22,
+    "date": "2026-10-24T13:26:52.292Z",
+    "transport": "MemoryTransport simulation; NOT real rsync/SSH/VPS"
+  },
+  "androidEvidence": {
+    "report": "termux-sync-session-android.json",
+    "verifiedAt": "2026-10-24T13:29:51.375Z",
+    "phase": "SUCCEEDED",
+    "applicationJournal": "committed",
+    "healthChecked": true,
+    "scope": "Previously verified Android pull/application and terminal/browser lifecycle; release version metadata alone changed afterward."
+  },
+  "versionIdentifiers": {
+    "package": "0.2.1",
+    "packageLock": "0.2.1",
+    "manifest": "0.2.1",
+    "vpsDispatcher": "0.2.1",
+    "vpsUpdater": "0.2.1",
+    "sshProtocol": 1
+  },
+  "privacy": "Local machine paths, device and operational identifiers, credentials and private user content omitted."
+}

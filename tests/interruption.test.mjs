@@ -96,6 +96,15 @@ test('structured VPS error distinguishes a live transfer from permission and upg
     control.close();
 });
 
+test('short cleanup timeout clears its waiter without extending a verified download indefinitely', async () => {
+    const child = new EventEmitter(); child.stdin = new PassThrough(); child.stderr = new PassThrough(); child.stdout = new PassThrough();
+    child.kill = () => {};
+    const control = new Control(child);
+    await assert.rejects(control.request('finish', { job: randomUUID() }, 10), { code: 'SSH_TIMEOUT' });
+    assert.equal(control.waiters.size, 0);
+    control.close();
+});
+
 test('failure to save local status still closes the remote control connection', async () => {
     const device = await fixture(); let closed = false;
     const remote = {

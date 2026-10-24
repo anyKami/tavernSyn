@@ -39,6 +39,10 @@ async function preserveFile(source, target) {
     if (!await exists(source)) return;
     await fs.mkdir(path.dirname(target), { recursive: true }); await fs.copyFile(source, target);
 }
+async function syncDirectories(root) {
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+    return entries.filter(entry => entry.isDirectory() && entry.name.toLowerCase() === 'tavernsyn').map(entry => entry.name);
+}
 export async function buildPlan(device, prepared, jobRoot) {
     const { candidate, metadata } = prepared;
     const settings = path.join(candidate, 'profile/settings.json'), localSettings = path.join(device.dataRoot, device.profile, 'settings.json');
@@ -51,10 +55,9 @@ export async function buildPlan(device, prepared, jobRoot) {
         if (await exists(next) && await exists(local)) await atomicJson(next, preserveSettings(await readJson(next), await readJson(local), policy.pointers));
     }
     // Synchronization code and local loader format never come from the remote mirror.
-    for (const rel of ['plugins/tavernsyn', 'public/scripts/extensions/third-party/tavernsyn']) {
-        const dst = path.join(candidate, rel.startsWith('plugins/') ? 'server-plugins/tavernsyn' : 'extensions/tavernsyn');
-        const src = path.join(device.install, ...rel.split('/'));
-        if (await exists(src)) await copyTree(src, dst);
+    for (const [relative, target] of [['plugins', 'server-plugins'], ['public/scripts/extensions/third-party', 'extensions']]) {
+        const root = path.join(device.install, ...relative.split('/'));
+        for (const name of await syncDirectories(root)) await copyTree(path.join(root, name), path.join(candidate, target, name));
     }
     await preserveFile(path.join(device.install, 'plugins/package.json'), path.join(candidate, 'server-plugins/package.json'));
     const document = device.YAML.parseDocument(await fs.readFile(device.yamlPath, 'utf8'));
@@ -133,9 +136,16 @@ export async function recoveryStatus(device) {
 }
 export async function preserveSyncCode(device, journal) {
     // Manual restore keeps the currently installed synchronization entry points.
+    await validatePlan(device, journal);
     for (const live of [path.join(device.install, 'plugins'), path.join(device.install, 'public/scripts/extensions/third-party')]) {
-        const step = journal.steps.find(item => item.live === live), source = path.join(live, 'tavernsyn');
-        if (step?.hadOld && await exists(source)) await copyTree(source, path.join(step.old, 'tavernsyn'));
+        const step = journal.steps.find(item => item.live === live);
+        if (step?.hadOld) for (const name of await syncDirectories(live)) {
+            const target = path.join(step.old, name);
+            // Git objects can be read-only. Replace this owned code directory rather
+            // than overwriting existing objects or retaining removed source files.
+            if (await exists(target)) await removeOwned(step.old, target);
+            await copyTree(path.join(live, name), target);
+        }
     }
 }
 export async function retireRecovery(device) {

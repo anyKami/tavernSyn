@@ -105,7 +105,7 @@ Tailscale ACL/grants 中也应仅允许目标设备访问 VPS SSH。本版 SSH �
 
 ## 已有密码 VPS 升级
 
-已使用密码登录的 VPS 升级到 0.2.0 时，在新代码目录运行下面命令（数据集 UUID 可从原 `FORMAT.json` 查看）。更新器先以同步账号运行 Linux 失败恢复测试，再取得独占维护锁，备份并更新 dispatcher 与该账号的 SSH 存活检查，暂停旧任务并保留全部上传内容。密码、已发布代次和发布指针保留。
+已使用密码登录的 VPS 升级到 0.2.1 时，在新代码目录运行下面命令（数据集 UUID 可从原 `FORMAT.json` 查看）。更新器先以同步账号运行 Linux 失败恢复测试，再取得独占维护锁，备份并更新 dispatcher 与该账号的 SSH 存活检查，暂停旧任务并保留全部上传内容。密码、已发布代次和发布指针保留。
 
 ```bash
 sudo python3 vps/update.py --root /srv/tavernsyn-sync --account tavernsyn --dataset 数据集UUID

@@ -1,0 +1,68 @@
+{
+  "status": "passed",
+  "verifiedAt": "2026-10-24T13:29:51.375Z",
+  "fixes": [
+    "Reinventory live shared data after dependency preparation.",
+    "Refresh stale overwrite confirmation without discarding the verified pull; require another explicit confirmation.",
+    "Bind confirmation and save handoff to the current browser page, while rejecting another active tab.",
+    "Preserve the exact case of local synchronization plugin directories and exclude their repositories from snapshots.",
+    "Preserve current sync code on manual recovery even when Git object files are read-only.",
+    "Run the Termux manager option 4 in its foreground terminal and open the browser only after successful health checks."
+  ],
+  "validation": {
+    "unit": {
+      "total": 57,
+      "passed": 54,
+      "failed": 0,
+      "skipped": 3
+    },
+    "windowsIntegration": {
+      "status": "passed",
+      "verifiedAt": "2026-10-24T13:26:52.292Z",
+      "checks": 22,
+      "transport": "MemoryTransport simulation; NOT real rsync/SSH/VPS"
+    },
+    "android": {
+      "node": "v25.2.1",
+      "job": "<redacted-job>",
+      "phase": "SUCCEEDED",
+      "error": null,
+      "pullCompleted": "2026-10-24T13:28:25.618Z",
+      "summary": {
+        "added": 407,
+        "changed": 28,
+        "deleted": 3314
+      },
+      "verifiedDownloadFiles": 2782,
+      "verifiedDownloadBytes": 458105271,
+      "applicationJournal": "committed",
+      "recoveryAvailable": true,
+      "httpStatus": 200,
+      "managed": true,
+      "epochMatches": true,
+      "previousChildExited": true,
+      "syncFrontendHttp": {
+        "manifest": 200,
+        "index": 200
+      },
+      "deployedSourcesMatchWorkspace": true,
+      "normalTermuxOption4OpenedBrowser": true,
+      "termuxNotificationExit": {
+        "launcherExited": true,
+        "serverExited": true,
+        "portReleased": true,
+        "locksRemoved": true
+      },
+      "finalLauncherOwnsTerminal": true,
+      "finalBrowserPagePhase": "同步完成",
+      "finalBrowserReturnedToTavern": true,
+      "ssh8022Available": true,
+      "preparedDependencyLockChanges": {
+        "added": 2,
+        "changed": 1
+      },
+      "userApprovedVpsReplacement": true
+    }
+  },
+  "privacy": "Device identifiers, process IDs, credentials and private file contents omitted."
+}

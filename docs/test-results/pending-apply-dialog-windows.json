@@ -1,0 +1,38 @@
+{
+  "status": "passed",
+  "date": "2026-10-24T08:36:16.626Z",
+  "issue": "PENDING_APPLY automatic continuation set starting=true before flush, but exceptions escaped without clearing starting or presenting their reason; the open modal had no actions and terminal rendering could not close it.",
+  "fix": [
+    "Handle save and resume API errors inside resumePending; clear the busy state in finally and show the error.",
+    "Keep terminal dialogs closed independently of the busy flag.",
+    "Provide an explicit retry button for retained downloads; preserve the controlled-launch requirement and all save/confirmation barriers."
+  ],
+  "validation": [
+    "Actual ui/index.js in the Codex in-app browser: failed save gate leaves the panel usable with the error displayed and no open modal.",
+    "Fixing the synthetic save gate and clicking continue enters the actual confirmation dialog with cancel and confirm actions.",
+    "A rejected resume API request also leaves a usable retry button; retry succeeds after the synthetic cause is cleared.",
+    "An unmanaged instance cannot continue application.",
+    "At a 375x812 viewport, the error and full-width continue button remain accessible.",
+    "The exact offline phone patch ran twice against legacy CRLF UI files, preserved the PENDING_APPLY record, and installed valid JavaScript and CSS."
+  ],
+  "limits": [
+    "Browser API/save replies were simulated; no real user data, credentials or VPS were accessed.",
+    "The phone itself has not been patched or restarted by this agent."
+  ],
+  "offlinePathRepair": {
+    "date": "2026-10-24T10:08:30.195Z",
+    "status": "passed",
+    "issue": "The phone did not have the assumed global frontend ui/index.js; the earlier command stopped during read/preflight before its write loop.",
+    "checks": [
+      "Auto-detect TavernSyn through manifests in the bound profile extensions, global extensions and system extension roots.",
+      "Renamed user extension works when the assumed global frontend is absent.",
+      "Missing entry/CSS files are restored from the existing local backend package.",
+      "An absent frontend is restored offline into the canonical global location.",
+      "Unknown occupied directories are refused before code writes.",
+      "The exact 27-line phone command was executed twice for each successful layout; the pending task record and unrelated plugins stayed unchanged."
+    ],
+    "limits": [
+      "The physical Android device was not accessed."
+    ]
+  }
+}

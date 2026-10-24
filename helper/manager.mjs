@@ -77,7 +77,22 @@ export class Manager {
         }
         if (action === 'confirm') {
             requireThat(this.job?.id === payload.id && this.job.phase === 'AWAITING_CONFIRMATION' && payload.token === this.job.confirmationToken, 'CONFIRMATION', '确认已过期，请重新预览。');
-            requireThat((await portableState(this.device)).digest === this.job.localDigest, 'CONFIRMATION', '确认期间本机数据发生变化，请重新执行同步。');
+            requireThat(payload.tab === undefined || (typeof payload.tab === 'string' && /^[a-f0-9-]{36}$/.test(payload.tab)), 'INPUT', '浏览器标签页标识无效。');
+            const local = await portableState(this.device);
+            if (local.digest !== this.job.localDigest && this.confirmationTarget) {
+                await this.write('AWAITING_CONFIRMATION', {
+                    localDigest: local.digest,
+                    confirmationToken: digest({ direction: this.job.direction, local: local.digest, remote: this.confirmationRemote }),
+                    summary: stateDifference(local, this.confirmationTarget),
+                    ...(payload.tab ? { tab: payload.tab } : {}),
+                    reason: `本机内容在等待期间有更新，已重新核对差异。请再次确认。${this.confirmationReason}`,
+                });
+                return { ok: false, refreshed: true };
+            }
+            requireThat(local.digest === this.job.localDigest, 'CONFIRMATION', '确认期间本机数据发生变化，请重新执行同步。');
+            // The browser may have reloaded while dependencies were prepared.
+            // Its confirmation owns the subsequent save/page handoff.
+            if (payload.tab && payload.tab !== this.job.tab) await this.write('AWAITING_CONFIRMATION', { tab: payload.tab });
             this.wake.confirm?.(); return { ok: true };
         }
         if (action === 'ready') {
@@ -170,9 +185,13 @@ export class Manager {
             if (['SUCCEEDED', 'PREVIEW'].includes((await readJson(marker)).phase)) await removeOwned(jobs, directory);
         }
     }
-    async confirm(reason, local, remote) {
+    async confirm(reason, local, remote, incoming = null) {
         const token = digest({ direction: this.job.direction, local: local.digest, remote });
-        await this.waitFor('confirm', 'AWAITING_CONFIRMATION', { reason, localDigest: local.digest, confirmationToken: token });
+        this.confirmationTarget = incoming; this.confirmationRemote = remote; this.confirmationReason = reason;
+        try {
+            await this.waitFor('confirm', 'AWAITING_CONFIRMATION', { reason, localDigest: local.digest, confirmationToken: token });
+            return this.job.localDigest;
+        } finally { this.confirmationTarget = null; this.confirmationRemote = null; this.confirmationReason = null; }
     }
     async saveAndStop() {
         await this.waitFor('ready', 'AWAITING_SAVE');
@@ -289,19 +308,24 @@ export class Manager {
                 await this.write('VERIFYING', { files: downloaded.manifest.files.length, bytes: downloaded.manifest.bytes, stats: downloaded.stats });
                 const metadata = await readJson(path.join(payload, 'environment.json'));
                 requireThat(metadata.sourceState?.digest && Array.isArray(metadata.sourceState.files), 'MANIFEST', '远端缺少便携数据基准。');
-                const local = await portableState(this.device);
-                const summary = stateDifference(local, metadata.sourceState);
+                let local = await portableState(this.device);
+                let summary = stateDifference(local, metadata.sourceState);
                 const remote = { generation: downloaded.generation, digest: downloaded.manifest.digest };
                 if (this.job.preview) { await this.cache(payload); await this.write('PREVIEW', { summary, remote, note: '以 VPS 为准替换当前设备共享内容；预览未应用。' }); return; }
                 await this.write('PREPARING', { summary, remote });
                 const prepared = await prepare(this.device, payload, downloaded.manifest, root);
+                // Dependency installation can take minutes while ST continues saving data.
+                local = await portableState(this.device);
+                summary = stateDifference(local, metadata.sourceState);
+                await this.write('PREPARING', { summary });
                 if (!this.lifecycle) { await this.write('PENDING_APPLY', { jobRoot: root, remote, localDigest: local.digest, reason: '当前酒馆未通过受控入口启动。已下载并校验；关闭酒馆后从 TavernSyn 入口启动以继续。' }); return; }
                 const reasons = [];
                 if (!baseline || baseline.local.digest !== local.digest) reasons.push('本机有尚未推送的修改，或这是首次拉取。');
                 if (summary.deleted > local.files.length * 0.4 || clearsCore(local, metadata.sourceState)) reasons.push('本次将大量删除共享文件，或清空某类聊天、角色或世界书。');
                 if (metadata.warnings?.length) reasons.push(`远端设置含 ${metadata.warnings.length} 个设备绝对路径字段，请先核对设备字段保留策略；继续将按远端值同步。`);
-                if (reasons.length) await this.confirm(`${reasons.join('')}继续会以 VPS 为准替换共享内容，并保留一份恢复数据。`, local, remote.digest);
-                this.approvedLocal = local.digest;
+                this.approvedLocal = reasons.length
+                    ? await this.confirm(`${reasons.join('')}继续会以 VPS 为准替换共享内容，并保留一份恢复数据。`, local, remote.digest, metadata.sourceState)
+                    : local.digest;
                 try {
                     await this.saveAndStop();
                     requireThat((await portableState(this.device)).digest === this.approvedLocal, 'LOCAL_CHANGED', '确认后共享数据发生变化，保留下载并停止覆盖。');
@@ -332,7 +356,9 @@ export class Manager {
             // A rejected begin never owns a remote job. Preserve the exact frozen snapshot.
             try {
                 if (remoteBegun) await this.write(this.job.phase, { remoteJob: this.job.id,
-                    note: session?.hello.capabilities?.includes('paused-jobs')
+                    note: this.job.direction === 'pull'
+                        ? '下载任务中断，暂存文件已保留；文件传输进度不代表应用完成。完整下载可校验后继续应用，否则可恢复下载。'
+                        : session?.hello.capabilities?.includes('paused-jobs')
                         ? '传输中断，暂存数据已保留。连接结束后 VPS 会释放占用；可继续上次上传，或重新推送最新内容。'
                         : '暂存数据已保留。请更新 VPS 以启用断线释放；可继续上传同一快照。' });
             } finally { session?.control.close(); }

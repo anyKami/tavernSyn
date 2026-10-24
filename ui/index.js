@@ -55,7 +55,7 @@ const root = document.createElement('div'); root.id = 'tavernsyn-panel'; root.cl
 root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>TavernSyn 跨设备同步</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
 <div class="inline-drawer-content"><p class="ts-device"></p><p class="ts-phase" role="status">正在连接同步助手……</p>
 <div class="ts-actions"><button class="menu_button ts-push">推送到 VPS</button><button class="menu_button ts-pull">从 VPS 拉取</button>
-<button type="button" class="menu_button ts-resume-upload" hidden>继续上次上传</button></div>
+<button type="button" class="menu_button ts-resume-upload" hidden>继续上次上传</button><button type="button" class="menu_button ts-resume-apply" hidden>继续应用已下载文件</button></div>
 <button type="button" class="menu_button ts-restore" disabled>恢复上一版</button><small class="ts-recovery"></small>
 <p class="ts-detail"></p><small class="ts-history"></small><details class="ts-settings"><summary>设置与检查 · VPS 配置</summary>
 <form class="ts-config"><fieldset disabled><legend>VPS 连接</legend>
@@ -110,7 +110,11 @@ function render() {
     text('.ts-phase', localError ? '本次操作未开始，请处理提示' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : labels[status.phase] ?? status.phase);
     let detail = localError || status.error?.message || (status.phase === 'AWAITING_CONFIRMATION' ? status.reason : '') || status.note || '';
     if (status.summary) detail += `\n新增 ${status.summary.added}，修改 ${status.summary.changed}，删除 ${status.summary.deleted} 个文件。`;
-    if (status.progress) detail += `\n已处理 ${status.progress.percent}%（逻辑进度）`;
+    if (status.progress && ['UPLOADING', 'DOWNLOADING', 'FAILED'].includes(status.phase)) {
+        detail += status.phase === 'FAILED'
+            ? `\n中断前文件传输 ${status.progress.percent}%；同步尚未完成。`
+            : `\n文件传输 ${status.progress.percent}%（传输后还需校验${status.direction === 'pull' ? '、应用和启动检查' : '和发布'}）`;
+    }
     if (status.stats) detail += `\nrsync 已发送 ${bytes(status.stats.sentBytes)}，接收 ${bytes(status.stats.receivedBytes)}；不含 SSH/Tailscale 封装。`;
     text('.ts-detail', detail);
     const when = value => value ? new Date(value).toLocaleString() : '尚无';
@@ -126,7 +130,9 @@ function render() {
     form.querySelector('fieldset').disabled = !configLoaded || !terminal || starting || setupBusy;
     root.querySelector('.ts-restore').disabled ||= !status.managed || !status.recovery?.available || ['PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
     if (!status.managed && status.recovery?.available) text('.ts-recovery', '有恢复副本；请从 TavernSyn 入口启动酒馆后恢复。');
-    if (terminal && !starting && dialog.open) dialog.close();
+    root.querySelector('.ts-resume-apply').hidden = status.phase !== 'PENDING_APPLY';
+    root.querySelector('.ts-resume-apply').disabled ||= !status.managed;
+    if (terminal && dialog.open) dialog.close();
     else if (!terminal && !dialog.open) dialog.showModal();
 }
 function showError(error) { starting = false; localError = error.message; if (dialog.open) dialog.close(); render(); }
@@ -152,6 +158,17 @@ root.querySelector('.ts-resume-upload').onclick = async () => {
         status = { ...status, ...started, error: null, progress: null }; starting = false; render();
     } catch (error) { showError(error); }
 };
+async function resumePending() {
+    if (starting || setupBusy || status.phase !== 'PENDING_APPLY' || !status.managed) return;
+    resumed = true; starting = true; localError = ''; render();
+    try {
+        await flush();
+        const started = await api('resume-pending', { tab });
+        status = { ...status, ...started, reason: '', note: '', error: null, progress: null };
+    } catch (error) { showError(error); }
+    finally { starting = false; render(); }
+}
+root.querySelector('.ts-resume-apply').onclick = resumePending;
 root.querySelector('.ts-restore').onclick = () => begin('restore');
 root.querySelector('.ts-preview-push').onclick = () => begin('push', true);
 root.querySelector('.ts-preview-pull').onclick = () => begin('pull', true);
@@ -201,7 +218,12 @@ root.querySelector('.ts-check').onclick = async () => {
     finally { setupBusy = false; render(); }
 };
 dialog.querySelector('.ts-confirm').onclick = async () => {
-    try { await api('confirm', { id: status.id, token: status.confirmationToken }); } catch (error) { showError(error); }
+    const button = dialog.querySelector('.ts-confirm'); button.disabled = true;
+    try {
+        await api('confirm', { id: status.id, token: status.confirmationToken, tab });
+        localError = ''; status = await api('status'); render();
+    } catch (error) { showError(error); }
+    finally { button.disabled = false; }
 };
 dialog.querySelector('.ts-cancel').onclick = async () => {
     try { await api('cancel', { id: status.id }); } catch (error) { showError(error); }
@@ -211,8 +233,7 @@ async function poll() {
         status = await api('status'); if (!starting) render();
         if (!status.configured && !configLoaded) { root.querySelector('.ts-settings').open = true; loadConfiguration(); }
         if (status.phase === 'PENDING_APPLY' && status.managed && !resumed) {
-            resumed = true; starting = true; if (!dialog.open) dialog.showModal(); await flush();
-            await api('resume-pending', { tab }); starting = false;
+            await resumePending();
         }
         if (status.phase === 'AWAITING_SAVE' && status.tab === tab && !handlingSave) {
             handlingSave = true;

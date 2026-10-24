@@ -63,12 +63,12 @@ export class Control {
         child.once('close', () => { stderr.end(); this.closed = true; this.fail(new SyncError('SSH', 'SSH 连接已结束，请检查 Tailscale、账号密码和 VPS 密码登录配置；服务器身份改变也会阻止连接。')); });
     }
     fail(error) { for (const pending of this.waiters.values()) { clearTimeout(pending.timer); pending.reject(error); } this.waiters.clear(); }
-    request(op, fields = {}) {
+    request(op, fields = {}, timeoutMs = 30 * 60 * 1000) {
         requireThat(!this.closed, 'SSH', 'SSH 控制连接已关闭。');
         this.log(`VPS 请求：${op}`);
         const id = ++this.sequence;
         return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => { this.waiters.delete(id); reject(new SyncError('SSH_TIMEOUT', '等待 VPS 响应超时，保留任务以便恢复。')); }, 30 * 60 * 1000);
+            const timer = setTimeout(() => { this.waiters.delete(id); reject(new SyncError('SSH_TIMEOUT', '等待 VPS 响应超时，保留任务以便恢复。')); }, timeoutMs);
             this.waiters.set(id, { resolve, reject, timer, op });
             this.child.stdin.write(`${JSON.stringify({ id, op, ...fields })}\n`);
         });
@@ -188,10 +188,15 @@ export async function pull(session, device, job, payload, onProgress, onBegin) {
     const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: env.jobBound === true });
     await onBegin?.(begun);
     const manifest = validateManifest(begun.manifest);
+    requireThat(uuidPattern.test(begun.generation), 'REMOTE_PROTOCOL', 'VPS 下载代次无效。');
     session.log?.(`VPS 下载清单：${manifest.files.length} 个文件，${manifest.bytes} 字节；固定代次 ${begun.generation}`);
     if (begun.phase === 'done') {
         await verify(payload, manifest);
         await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
+        await atomicJson(path.join(path.dirname(payload), 'download.json'), {
+            format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest,
+        });
+        control.close();
         return { ...begun, manifest, stats: { note: '先前完成的下载已重新校验，本次没有传输文件。' } };
     }
     await enoughSpace(device.state, manifest.bytes);
@@ -210,6 +215,15 @@ export async function pull(session, device, job, payload, onProgress, onBegin) {
     await partialCleanup(payload); await verify(payload, manifest);
     session.log?.('下载文件 SHA-256 全量校验通过');
     await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
-    await control.request('finish', { job });
+    await atomicJson(path.join(path.dirname(payload), 'download.json'), {
+        format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest,
+    });
+    // finish only releases a read job. A lost cleanup ACK cannot invalidate bytes
+    // already checked against the manifest pinned by this authenticated session.
+    try { await control.request('finish', { job }, 15_000); }
+    catch (error) {
+        if (!['SSH', 'SSH_TIMEOUT'].includes(error.code)) throw error;
+        session.log?.('VPS 结束回执未收到；下载文件已全量校验，继续准备应用。控制连接关闭后 VPS 会释放占用。');
+    } finally { control.close(); }
     return { ...begun, manifest, stats };
 }

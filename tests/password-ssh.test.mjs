@@ -58,8 +58,9 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     const password = ' synthetic 密码 \'"$`\\ ! ';
     await configureDevice(device, 'configure', { host: '100.100.100.100', user: 'tavernsyn', password });
     const serverPayload = path.join(device.root, 'server-payload'); await fs.mkdir(serverPayload);
-    let dataset = randomUUID(), current = null, active = null, rsyncConfig, toolEnv, server, serverOpen = false, authAttempts = 0;
+    let dataset = randomUUID(), current = null, active = null, rsyncConfig, toolEnv, server, serverOpen = false, authAttempts = 0, finishMode = 'normal';
     const connections = new Set(), children = new Set(), commands = [];
+    const operations = [];
     async function startServer(port = 0) {
         server = new ssh2.Server({ hostKeys: [hostKey()] }, client => {
             connections.add(client); client.on('close', () => connections.delete(client)); client.on('error', () => {});
@@ -91,7 +92,7 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
                         while ((index = buffer.indexOf('\n')) !== -1) {
                             const line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
                             queue = queue.then(async () => {
-                                const message = JSON.parse(line); let result;
+                                const message = JSON.parse(line); operations.push(message.op); let result;
                                 if (message.op === 'hello') result = { protocol: 1, capabilities: ['paused-jobs', 'job-bound-rsync'], dataset, current };
                                 else if (message.op === 'begin') {
                                     assert.equal(message.jobBound, true);
@@ -107,7 +108,13 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
                                     await verify(serverPayload, message.manifest);
                                     current = { generation: active.job, digest: message.manifest.digest, manifest: message.manifest };
                                     result = { generation: current.generation, digest: current.digest };
-                                } else if (message.op === 'finish') result = { phase: 'done' };
+                                } else if (message.op === 'finish') {
+                                    if (finishMode === 'disconnect') { client.destroy(); return; }
+                                    if (finishMode === 'reject') {
+                                        channel.write(`${JSON.stringify({ id: message.id, ok: false, code: 'PERMISSION', error: 'synthetic permission failure' })}\n`); return;
+                                    }
+                                    result = { phase: 'done' };
+                                }
                                 else throw Error('Unexpected test protocol operation');
                                 channel.write(`${JSON.stringify({ id: message.id, ok: true, result })}\n`);
                             }).catch(() => { channel.exit(1); channel.end(); });
@@ -165,6 +172,34 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     assert.ok(transferLog.some(line => line.includes('校验通过')));
     assert.ok(!transferLog.join('\n').includes(password));
     assert.ok(authAttempts >= 4);
+    // Reproduce a closed control SSH while real rsync has delivered all files.
+    session = await connect(device, localEnvironment);
+    const closedSession = session, closedLog = [];
+    session.log = line => { closedLog.push(line); if (line === 'rsync 下载结束') closedSession.control.child.kill(); };
+    const closedTarget = path.join(device.root, 'closed-control/download');
+    const closedPull = await pull(session, device, randomUUID(), closedTarget);
+    await verify(closedTarget, manifest);
+    assert.equal(closedPull.manifest.digest, manifest.digest); assert.equal(session.control.closed, true);
+    assert.ok(closedLog.some(line => line.includes('继续准备应用')));
+    assert.equal((await readJson(path.join(device.root, 'closed-control/manifest.json'))).digest, manifest.digest);
+    assert.equal((await readJson(path.join(device.root, 'closed-control/download.json'))).generation, current.generation);
+    session.control.close();
+    // Also cover a lost ACK after the server receives finish, and keep real
+    // permission errors and corrupt downloads fatal.
+    finishMode = 'disconnect';
+    session = await connect(device, localEnvironment);
+    const lostTarget = path.join(device.root, 'lost-ack/download');
+    await pull(session, device, randomUUID(), lostTarget); await verify(lostTarget, manifest); session.control.close();
+    finishMode = 'reject'; session = await connect(device, localEnvironment);
+    await assert.rejects(pull(session, device, randomUUID(), path.join(device.root, 'rejected/download')), { code: 'PERMISSION' });
+    session.control.close(); finishMode = 'normal';
+    await fs.writeFile(path.join(serverPayload, 'profile/settings.json'), '{"corrupt":true}');
+    session = await connect(device, localEnvironment);
+    const finishes = operations.filter(op => op === 'finish').length;
+    await assert.rejects(pull(session, device, randomUUID(), path.join(device.root, 'corrupt/download')), { code: 'INTEGRITY' });
+    assert.equal(operations.filter(op => op === 'finish').length, finishes, 'corrupt content must not reach finish');
+    session.control.close();
+    await fs.copyFile(path.join(payload, 'profile/settings.json'), path.join(serverPayload, 'profile/settings.json'));
     // Exercise Termux/POSIX's bare PATH command with real rsync, even on Windows/MSYS2.
     // There deliberately is no ssh executable in the process working directory.
     assert.equal(await exists(path.resolve('ssh')), false);
