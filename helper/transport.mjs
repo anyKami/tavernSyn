@@ -17,6 +17,11 @@ function quoted(value) {
     requireThat(typeof value === 'string' && !/["\r\n\x00`$]/.test(value), 'SSH_CONFIG', 'SSH 路径含不支持的特殊字符。');
     return `"${value}"`;
 }
+export async function rsyncShell(ssh, config, posix, platform = process.platform) {
+    // A bare executable is searched on PATH, not relative to SillyTavern's cwd.
+    const executable = platform === 'win32' || ssh.includes('/') ? await posix(ssh) : ssh;
+    return `${quoted(executable)} -F ${quoted(await posix(config))}`;
+}
 export function parseStats(output) {
     const number = label => Number(output.match(new RegExp(`${label}: ([\\d,]+)`))?.[1]?.replaceAll(',', '') ?? 0);
     return { sentBytes: number('Total bytes sent'), receivedBytes: number('Total bytes received'),
@@ -102,7 +107,7 @@ export async function environment(device) {
     await fs.writeFile(config, contents, { mode: 0o600 });
     const authEnv = { SSH_ASKPASS: await posix(askpass), SSH_ASKPASS_REQUIRE: 'force', DISPLAY: 'tavernsyn:0',
         TAVERNSYN_PASSWORD_FILE: remote.passwordFile, LC_ALL: 'C' };
-    return { rsync, ssh, posix, config: await posix(config), rsh: `${quoted(await posix(ssh))} -F ${quoted(await posix(config))}`, remote, authEnv, deviceId: device.deviceId };
+    return { rsync, ssh, posix, config: await posix(config), rsh: await rsyncShell(ssh, config, posix), remote, authEnv, deviceId: device.deviceId };
 }
 export async function connect(device, makeEnvironment = environment, log = () => {}) {
     log(`准备 SSH/rsync，连接 ${device.remote?.user ?? 'tavernsyn'}@${device.remote?.host ?? ''}`);

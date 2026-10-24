@@ -7,6 +7,7 @@
 ## 环境与连接错误
 
 - 缺少 rsync/SSH：Windows 使用同一套 MSYS2 工具，检查 `device.json` 的 `tools`；Termux 安装原生包。
+- Termux 显示 `Failed to exec .../SillyTavern/ssh: No such file or directory`，但 SSH 检查连接成功：更新设备端 TavernSyn 并重启。旧代码错误地把 PATH 中的 `ssh` 命令拼成了酒馆目录里的文件；修复同时适用于推送和拉取，无需修改 VPS 或重新填写密码。
 - 主机身份不匹配：首次连接会自动记住服务器身份，变化后拒绝连接。通过可信 VPS 控制台核对后，仅删除设备 `credentials/known_hosts` 中对应地址的旧记录，再检查连接。
 - SSH 账号不可登录：确认同步账号密码正确，旧版 VPS 已运行 `vps/enable-password.sh`，并检查 Tailscale 来源及 ACL。专用账号仍禁止交互式 shell，只通过界面检查连接。
 - VPS 空数据：先从有完整数据的设备推送。未发布镜像不能拉取。

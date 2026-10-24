@@ -11,7 +11,7 @@ import { PROJECT } from '../lib/device.mjs';
 import { atomicJson, exists, readJson, run } from '../lib/io.mjs';
 import { configureDevice } from '../lib/connection.mjs';
 import { scan, difference, verify } from '../lib/manifest.mjs';
-import { connect, environment, push, pull } from '../helper/transport.mjs';
+import { connect, environment, push, pull, rsyncShell } from '../helper/transport.mjs';
 import { fixture, temporary } from './fixtures.mjs';
 
 // PEM fixtures avoid intermittent malformed OpenSSH output from ssh2's test key generator.
@@ -127,10 +127,15 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     };
     t.after(stopServer);
     const port = await startServer();
+    let pathSsh = false;
     const localEnvironment = async currentDevice => {
         const env = await environment(currentDevice);
         const file = path.join(device.state, 'ssh_config');
         await fs.writeFile(file, (await fs.readFile(file, 'utf8')).replace('HostName 100.100.100.100', 'HostName 127.0.0.1').replace('Port 22', `Port ${port}`));
+        if (pathSsh) {
+            env.rsh = await rsyncShell('ssh', file, env.posix, 'android');
+            if (process.platform === 'win32') env.authEnv.PATH = path.dirname(device.tools.ssh) + path.delimiter + process.env.PATH;
+        }
         toolEnv = env; rsyncConfig = await env.posix(path.join(device.root, 'rsync.conf'));
         return env;
     };
@@ -160,6 +165,19 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     assert.ok(transferLog.some(line => line.includes('校验通过')));
     assert.ok(!transferLog.join('\n').includes(password));
     assert.ok(authAttempts >= 4);
+    // Exercise Termux/POSIX's bare PATH command with real rsync, even on Windows/MSYS2.
+    // There deliberately is no ssh executable in the process working directory.
+    assert.equal(await exists(path.resolve('ssh')), false);
+    pathSsh = true;
+    session = await connect(device, localEnvironment);
+    await fs.writeFile(path.join(payload, 'profile/PATH-only.txt'), 'resolved outside the SillyTavern working directory');
+    const pathManifest = await scan(payload);
+    assert.equal((await push(session, device, randomUUID(), payload, pathManifest)).digest, pathManifest.digest);
+    session.control.close();
+    session = await connect(device, localEnvironment);
+    const pathTarget = path.join(device.root, 'PATH-download');
+    await pull(session, device, randomUUID(), pathTarget); await verify(pathTarget, pathManifest);
+    session.control.close(); pathSsh = false;
     const pinned = device.remote.dataset; dataset = randomUUID();
     await assert.rejects(connect(device, localEnvironment), { code: 'REMOTE_DATASET' });
     assert.equal(device.remote.dataset, pinned); dataset = pinned;

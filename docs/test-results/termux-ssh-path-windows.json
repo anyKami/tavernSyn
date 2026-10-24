@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-24",
+  "version": "0.2.0",
+  "status": "passed",
+  "nodeTestsPassed": 45,
+  "issue": "rsync resolved the PATH command ssh as an executable inside the SillyTavern working directory",
+  "fix": "Keep a bare SSH command on PATH for POSIX/Termux; convert explicit executable paths and Windows MSYS2 paths as before",
+  "checks": [
+    "Real OpenSSH password login and rsync push/pull with an explicit Windows MSYS2 SSH executable",
+    "Real rsync push/pull using a bare PATH SSH command built through the Android/POSIX branch, with no ssh executable in the working directory",
+    "Unicode data and SSH configuration paths with spaces and a single quote",
+    "Wrong password and changed-host rejection remain effective"
+  ],
+  "executionPlatform": "Windows with actual MSYS2 OpenSSH/rsync and a loopback SSH fixture server",
+  "limits": ["Not yet reproduced on the user's Android device; real VPS data were not accessed"]
+}
