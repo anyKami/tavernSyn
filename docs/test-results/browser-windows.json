@@ -1,0 +1,24 @@
+{
+  "status": "passed",
+  "date": "2026-10-23",
+  "browser": "Codex in-app Chromium browser via CUA",
+  "fixture": "Actual SillyTavern 1.19.0, synthetic profile and independent port",
+  "transport": "MemoryTransport only. No real VPS, SSH or Tailscale authentication in this browser test.",
+  "checks": [
+    "Native extension panel loads and shows device, two direction buttons, status and sync times",
+    "Browser push obtains disk save receipt, navigates to waiting document, restarts and returns to root page",
+    "Browser pull downloads, verifies, applies and returns automatically; unchanged local state needs no abnormal overwrite prompt",
+    "Unsent draft blocks synchronization; draft remains visible and prior sync time is unchanged",
+    "Error text remains visible during subsequent status polling",
+    "Connection check shows success through the explicitly simulated adapter",
+    "Final layout visually checked: both main buttons horizontal and readable, details and history wrap normally",
+    "Push preview completes with added/changed/deleted counts, does not navigate or restart and preserves last successful sync times"
+  ],
+  "fixesFromBrowserTest": [
+    "Override inherited minimum-content menu button widths",
+    "Keep action errors visible instead of replacing them on every poll",
+    "Use current phase note after success instead of old overwrite reason",
+    "Keep saving status while the first save receipt is pending"
+  ],
+  "notVerified": ["Real network host-key authentication", "Android browser lifecycle", "Third-party plugin module proxy coexistence"]
+}

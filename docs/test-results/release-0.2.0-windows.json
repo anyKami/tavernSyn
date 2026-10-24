@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "date": "2026-10-24",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "status": "passed",
+  "versionConsistency": ["package.json", "package-lock.json", "manifest.json", "vps/dispatcher.py", "vps/update.py"],
+  "nodeTests": { "passed": 45, "failed": 0, "skipped": 0 },
+  "pythonTests": { "passed": 17, "failed": 0, "linuxOnlySkipped": 5 },
+  "realRsyncChecks": 8,
+  "actualSillyTavernFixtureChecks": 20,
+  "fixtureTransport": "MemoryTransport simulation; real SSH/rsync covered separately by password-ssh.test.mjs",
+  "notes": [
+    "The full Node suite passed after using distinct synthetic addresses in the target-change test.",
+    "One initial cold fixture startup timed out during parallel checks; the sequential integration rerun passed all 20 checks.",
+    "Public report writers now anonymize temporary test paths. Original test and deployment records retain their original version labels."
+  ],
+  "limits": ["Android device acceptance", "0.2.0 deployment on the user's live VPS", "actual VPS-to-device full pull application"]
+}

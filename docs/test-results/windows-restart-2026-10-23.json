@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "sourceRevision": "06bde939fb1e9c4c8d8641d810f0a916b5bce127",
+  "platform": "win32",
+  "node": "v25.8.2",
+  "port": 62141,
+  "checks": [
+    "Actual plugin router rejects unauthenticated request: 403",
+    "Actual plugin POST inherits CSRF: missing token 403; valid session/token 200",
+    "Plugin-specific admin check rejects authenticated non-admin: 403",
+    "Wrong IPC instance nonce rejected",
+    "Simulated unmanaged identity refuses restart: 409 (no PID or port killing)",
+    "Maintenance gate rejects new request 503 and lets existing request finish 200 before drain ACK",
+    "Drain timeout remains in maintenance; shutdown refused; same child stays alive until explicit resume",
+    "Child invokes ST SIGTERM listener; async server plugin exit hook completes; parent observes exit 0",
+    "Same fixture/config/port restarted; health verifies new boot nonce and applied synthetic revision 2",
+    "All fixture children exited gracefully; no real user data read or modified"
+  ],
+  "untested": [
+    "Browser button flow",
+    "Android Termux",
+    "rsync/SSH/VPS",
+    "Crash rollback",
+    "Uncooperative third-party plugins"
+  ],
+  "checkedDate": "2026-10-23"
+}

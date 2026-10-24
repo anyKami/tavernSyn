@@ -1,0 +1,9 @@
+{
+  "date": "2026-10-23",
+  "platform": "win32",
+  "node": "v25.8.2",
+  "nodeTests": { "command": "node --test tests/core.test.mjs", "passed": 14, "failed": 0, "skipped": 0 },
+  "vpsStoreTests": { "command": "python -m unittest discover -s tests -p test_vps.py -v", "passed": 9, "failed": 0, "skipped": 1, "skipReason": "Linux flock/SSH concurrency requires a Linux host" },
+  "setupCli": ["Fixture installation and Windows ACL", "Portable MSYS2 official runtime download and SHA256 verification", "Per-device key generation in fixture control directory", "Explicit synthetic host public key registration", "Device connection configuration without network access"],
+  "notes": "Tests use synthetic directories. No real user profile or existing VPS deployment was modified. VPS file locks are mocked in store tests on Windows."
+}

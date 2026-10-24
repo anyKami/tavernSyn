@@ -1,0 +1,27 @@
+{
+  "version": "0.1.1",
+  "status": "passed",
+  "date": "2026-10-23",
+  "platform": "win32",
+  "fixture": "<test-workspace>/tavernsyn-e2e-BLAFOQ",
+  "browser": "Codex in-app browser; Edge click dispatch timed out, no test results claimed for Edge",
+  "transport": "MemoryTransport; not real SSH/Tailscale/VPS",
+  "checks": [
+    "VPS form loads saved host, dedicated account, dataset, public key and trusted server fingerprint",
+    "Root account is refused visibly; valid saved settings take effect without restart",
+    "Connection check succeeds through the isolated transport adapter",
+    "Push and pull each show direction confirmation; cancelling leaves synchronization timestamps unchanged",
+    "Cancelling dialog keeps the extensions drawer visible",
+    "Confirmed pull completes browser save receipt, manifest-bound overwrite confirmation, wait page and restart",
+    "Recovery button enables with a timestamp after pull",
+    "Manual restore requires confirmation, completes save/owned restart, and returns to the main page",
+    "Successful restore consumes the recovery option and disables the button",
+    "Connection form remains available with its saved values after manual restore"
+  ],
+  "untested": [
+    "Real VPS authorization and SSH transfer",
+    "Android device",
+    "Arbitrary third-party plugin coexistence"
+  ],
+  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+}

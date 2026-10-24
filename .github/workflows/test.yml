@@ -1,0 +1,29 @@
+name: Test
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare pinned SillyTavern fixture dependencies
+        run: |
+          git clone https://github.com/SillyTavern/SillyTavern.git "$RUNNER_TEMP/SillyTavern"
+          git -C "$RUNNER_TEMP/SillyTavern" checkout 06bde939fb1e9c4c8d8641d810f0a916b5bce127
+          npm --prefix "$RUNNER_TEMP/SillyTavern" ci --omit=dev --no-audit --no-fund
+          sudo apt-get update
+          sudo apt-get install -y rsync
+      - name: Unit, Linux locks, rsync and actual server lifecycle
+        env:
+          SILLYTAVERN_SOURCE: ${{ runner.temp }}/SillyTavern
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test tests/*.test.mjs
+          python -m unittest discover -s tests -p 'test_vps*.py' -v
+          node tests/rsync.mjs
+          node tests/integration.mjs

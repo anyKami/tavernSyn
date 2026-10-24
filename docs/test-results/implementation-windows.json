@@ -1,0 +1,38 @@
+{
+  "status": "passed",
+  "date": "2026-10-24T02:20:33.143Z",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "root": "%TEMP%\\tavernsyn-tests\\tavernsyn-e2e-Ng1BZr",
+  "port": 63561,
+  "checks": [
+    "Native authentication and CSRF reject unauthenticated/missing-token requests",
+    "An authenticated non-admin account cannot access synchronization management",
+    "Password configuration enforces admin/CSRF, does not echo the saved password and updates parent/child without restart",
+    "Real index.html receives an early epoch script without modifying the installed source",
+    "Existing browser cache validators, range requests and HEAD cannot reuse a stale HTML epoch; ordinary static assets keep conditional caching",
+    "Stale-page writes are refused before reaching core settings handlers",
+    "Browser-loaded Cocktail+ scripts and reviewed modules load without a custom header; other API requests and writes remain epoch-protected",
+    "Unmatched save nonce/digest cannot obtain a disk receipt",
+    "Saved connection settings and password availability survive a real controlled restart",
+    "Protected plugin push: save ACK, waiting document, graceful exit, frozen snapshot, same-port new-nonce restart, publish",
+    "Protected plugin pull: verified stage, unpushed-change confirmation, owned stop, journal apply, health check and recovery snapshot",
+    "Push/pull phase, file count, verification, restart and completion logs reach both the live console and sync.log without logging the saved password",
+    "Manual recovery restores pre-pull data through save ACK, owned stop and healthy same-port restart, then consumes the one-step backup",
+    "Full code under plugins/tavernsyn stays local across push, pull and recovery; stdout/stderr stay live through controlled restarts and are also saved to server.log",
+    "Aborted HTTP handler is marked uncertain and refuses automatic stop; fixture-only acknowledgement follows its proven completion",
+    "Native plugin loading failure rejects startup health; owned child exits before repair and restart",
+    "Explicit terminal close exits through native cleanup even after an aborted HTTP request; the closing lifecycle cannot restart",
+    "Abrupt launcher loss stops its actual ST child, frees the port and permits a second launch with automatic dead-lock recovery",
+    "A synthetic hanging plugin cleanup cannot keep the server alive after terminal close; the bounded exit retains recovery data",
+    "All actual fixture children exited; no real user data accessed or changed"
+  ],
+  "transport": "MemoryTransport simulation; NOT real rsync/SSH/VPS",
+  "untested": [
+    "Android Termux",
+    "Linux SSH dispatcher under real rsync load",
+    "Browser interaction unless separately recorded",
+    "Third-party plugin coexistence"
+  ],
+  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+}

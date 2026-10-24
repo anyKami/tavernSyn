@@ -1,0 +1,23 @@
+{
+  "name": "tavernsyn",
+  "version": "0.2.0",
+  "private": true,
+  "description": "SillyTavern 跨设备同步：受控重启、校验镜像和设备配置保留",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:vps": "python -m unittest discover -s tests -p \"test_vps*.py\" -v",
+    "test:integration": "node tests/integration.mjs",
+    "install:device": "node bin/install.mjs",
+    "setup:device": "node bin/setup-device.mjs",
+    "start": "node helper/launcher.mjs",
+    "verify:restart": "node probes/restart-probe.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "ssh2": "^1.17.0"
+  }
+}

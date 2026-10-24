@@ -1,0 +1,17 @@
+{
+  "workingDirectory": "D:\\SillyTavern",
+  "checkedAt": "2026-10-24T10:07:41.8988383+08:00",
+  "launcherPid": 69288,
+  "desktopShortcut": "%USERPROFILE%\\Desktop\\TavernSyn.lnk",
+  "defaultBrowserLaunchReported": true,
+  "target": "D:\\SillyTavern\\Start-TavernSyn.cmd",
+  "managed": true,
+  "status": "passed",
+  "launchFromActualShortcut": true,
+  "syncLog": "<device-state>\\sync.log",
+  "nodeTestsPassed": 45,
+  "actualSillyTavernFixturePassed": true,
+  "realSshRsyncPushPullLogChecked": true,
+  "notes": "Desktop shortcut and default-browser launch checked on the real installation. Push/pull detailed logs verified with real OpenSSH/rsync fixtures and an isolated actual SillyTavern restart fixture.",
+  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+}

@@ -1,0 +1,12 @@
+{
+  "display_name": "TavernSyn 跨设备同步",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "ui/index.js",
+  "css": "ui/style.css",
+  "author": "TavernSyn contributors",
+  "version": "0.2.0",
+  "homePage": "https://github.com/anyKami/tavernSyn",
+  "auto_update": false
+}

@@ -1,0 +1,80 @@
+{
+  "status": "passed",
+  "date": "2026-10-24",
+  "platform": "win32",
+  "version": "rsync  version 3.5.1  protocol version 33",
+  "root": "D:\\TavernSyn\\.tmp\\rsync-92CeN1",
+  "results": [
+    {
+      "test": "initial transfer with Chinese/spaced Windows paths",
+      "stats": {
+        "sentBytes": 2097838,
+        "receivedBytes": 57,
+        "literalBytes": 2097159,
+        "matchedBytes": 0,
+        "transferredFiles": 2,
+        "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+      }
+    },
+    {
+      "test": "unchanged files transmit no file contents",
+      "stats": {
+        "sentBytes": 88,
+        "receivedBytes": 15,
+        "literalBytes": 0,
+        "matchedBytes": 0,
+        "transferredFiles": 0,
+        "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+      }
+    },
+    {
+      "test": "large modified file uses block deltas",
+      "stats": {
+        "sentBytes": 407,
+        "receivedBytes": 8732,
+        "literalBytes": 4344,
+        "matchedBytes": 2092808,
+        "transferredFiles": 1,
+        "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+      }
+    },
+    {
+      "test": "deleted source file removed only from isolated stage"
+    },
+    {
+      "test": "same-size/mtime corruption detected by SHA256 and fixed with targeted rsync"
+    },
+    {
+      "test": "real rsync daemon-over-process upload accepts production option allowlist",
+      "stats": {
+        "sentBytes": 2093736,
+        "receivedBytes": 42,
+        "literalBytes": 2097152,
+        "matchedBytes": 0,
+        "transferredFiles": 1,
+        "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+      }
+    },
+    {
+      "test": "real read-only daemon download mirrors local stage",
+      "stats": {
+        "sentBytes": 45,
+        "receivedBytes": 79,
+        "literalBytes": 0,
+        "matchedBytes": 0,
+        "transferredFiles": 0,
+        "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+      }
+    },
+    {
+      "test": "read-only published module refuses uploads and remains intact"
+    }
+  ],
+  "untested": [
+    "SSH host-key authentication",
+    "Tailscale transfer",
+    "Real Linux dispatcher/flock",
+    "Android"
+  ],
+  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+}

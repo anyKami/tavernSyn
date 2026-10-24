@@ -1,0 +1,22 @@
+{
+  "status": "passed",
+  "date": "2026-10-24T01:48:14.062Z",
+  "checks": [
+    "Resume button is a full-width grid row beneath push/pull",
+    "Desktop 1280 px and narrow 375 px browser previews keep text on one line",
+    "SUCCEEDED state removes the resume button from both screenshot and accessibility tree",
+    "node --check ui/index.js",
+    "Both installed UI copies and actual HTTP resources match the source"
+  ],
+  "preview": {
+    "desktop": ".tmp/resume-button-desktop.png",
+    "narrow": ".tmp/resume-button-mobile.png"
+  },
+  "installed": [
+    "D:\\SillyTavern\\plugins\\tavernsyn\\ui",
+    "D:\\SillyTavern\\public\\scripts\\extensions\\third-party\\tavernsyn\\ui"
+  ],
+  "backup": "D:\\TavernSyn\\.local\\resume-button-before-05f04ecd-8966-49b2-83eb-84d869bf3ba1",
+  "note": "Real UI and SillyTavern CSS with isolated mocked status; no sync action sent",
+  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+}

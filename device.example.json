@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "install": "D:/SillyTavern",
+  "profile": "default-user",
+  "deviceId": "00000000-0000-4000-8000-000000000001",
+  "deviceName": "我的电脑",
+  "restoreDependencies": true,
+  "npmCli": "C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js",
+  "tools": { "rsync": "D:/TavernSyn-runtime/usr/bin/rsync.exe", "ssh": "D:/TavernSyn-runtime/usr/bin/ssh.exe" },
+  "remote": {
+    "host": "100.100.100.100", "user": "tavernsyn", "dataset": "",
+    "passwordFile": "D:/TavernSyn-device/credentials/ssh-password.json", "knownHostsFile": "D:/TavernSyn-device/credentials/known_hosts"
+  },
+  "preserveSettings": [], "preserveJson": [], "extraRoots": [], "healthChecks": []
+}

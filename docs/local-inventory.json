@@ -1,0 +1,227 @@
+{
+  "date": "2026-10-23",
+  "sourceRoot": "D:\\SillyTavern",
+  "sillyTavernVersion": "1.19.0",
+  "branch": "release",
+  "commit": "06bde939fb1e9c4c8d8641d810f0a916b5bce127",
+  "node": "v25.8.2",
+  "platform": "win32",
+  "config": {
+    "dataRoot": "D:\\SillyTavern\\data",
+    "enableUserAccounts": false,
+    "enableServerPlugins": false
+  },
+  "dataDirectories": [
+    {
+      "directory": "default-user",
+      "files": 225,
+      "bytes": 30333050,
+      "links": 0
+    },
+    {
+      "directory": "_cache",
+      "files": 8,
+      "bytes": 12441640,
+      "links": 0
+    },
+    {
+      "directory": "_css",
+      "files": 1,
+      "bytes": 31,
+      "links": 0
+    },
+    {
+      "directory": "_errors",
+      "files": 4,
+      "bytes": 1565,
+      "links": 0
+    },
+    {
+      "directory": "_storage",
+      "files": 1,
+      "bytes": 151,
+      "links": 0
+    },
+    {
+      "directory": "_uploads",
+      "files": 0,
+      "bytes": 0,
+      "links": 0
+    },
+    {
+      "directory": "_webpack",
+      "files": 4,
+      "bytes": 13896562,
+      "links": 0
+    }
+  ],
+  "profileDirectories": [
+    {
+      "directory": "assets",
+      "files": 0,
+      "bytes": 0,
+      "links": 0
+    },
+    {
+      "directory": "backgrounds",
+      "files": 23,
+      "bytes": 11755047,
+      "links": 0
+    },
+    {
+      "directory": "backups",
+      "files": 19,
+      "bytes": 1828554,
+      "links": 0
+    },
+    {
+      "directory": "characters",
+      "files": 31,
+      "bytes": 14316484,
+      "links": 0
+    },
+    {
+      "directory": "chats",
+      "files": 0,
+      "bytes": 0,
+      "links": 0
+    },
+    {
+      "directory": "context",
+      "files": 34,
+      "bytes": 24794,
+      "links": 0
+    },
+    {
+      "directory": "extensions",
+      "files": 0,
+      "bytes": 0,
+      "links": 0
+    },
+    {
+      "directory": "group chats",
+      "files": 0,
+      "bytes": 0,
+      "links": 0
+    },
+    {
+      "directory": "groups",
+      "files": 0,
+      "bytes": 0,
+      "links": 0
+    },
+    {
+      "directory": "instruct",
+      "files": 38,
+      "bytes": 30518,
+      "links": 0
+    },
+    {
+      "directory": "KoboldAI Settings",
+      "files": 6,
+      "bytes": 2637,
+      "links": 0
+    },
+    {
+      "directory": "movingUI",
+      "files": 1,
+      "bytes": 53,
+      "links": 0
+    },
+    {
+      "directory": "NovelAI Settings",
+      "files": 24,
+      "bytes": 14173,
+      "links": 0
+    },
+    {
+      "directory": "OpenAI Settings",
+      "files": 1,
+      "bytes": 8000,
+      "links": 0
+    },
+    {
+      "directory": "QuickReplies",
+      "files": 1,
+      "bytes": 1983,
+      "links": 0
+    },
+    {
+      "directory": "reasoning",
+      "files": 5,
+      "bytes": 619,
+      "links": 0
+    },
+    {
+      "directory": "sysprompt",
+      "files": 14,
+      "bytes": 3729,
+      "links": 0
+    },
+    {
+      "directory": "TextGen Settings",
+      "files": 6,
+      "bytes": 16109,
+      "links": 0
+    },
+    {
+      "directory": "themes",
+      "files": 5,
+      "bytes": 6168,
+      "links": 0
+    },
+    {
+      "directory": "thumbnails",
+      "files": 4,
+      "bytes": 36107,
+      "links": 0
+    },
+    {
+      "directory": "user",
+      "files": 2,
+      "bytes": 4219,
+      "links": 0
+    },
+    {
+      "directory": "User Avatars",
+      "files": 1,
+      "bytes": 51868,
+      "links": 0
+    },
+    {
+      "directory": "vectors",
+      "files": 0,
+      "bytes": 0,
+      "links": 0
+    },
+    {
+      "directory": "worlds",
+      "files": 5,
+      "bytes": 2102718,
+      "links": 0
+    }
+  ],
+  "globalFrontendExtensions": [
+    {
+      "directory": "JS-Slash-Runner",
+      "files": 331,
+      "bytes": 24457191,
+      "links": 0
+    },
+    {
+      "directory": "ST-Prompt-Template",
+      "files": 287,
+      "bytes": 106278947,
+      "links": 0
+    }
+  ],
+  "serverPluginDirectories": [],
+  "dependencies": {
+    "rsyncInPath": false,
+    "sshFound": true,
+    "gitFound": true,
+    "nodeFound": true
+  },
+  "privacy": "Only directory names, counts and non-secret runtime metadata are recorded; no settings, chat content or credentials.",
+  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+}

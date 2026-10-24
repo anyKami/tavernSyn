@@ -1,0 +1,75 @@
+{
+  "date": "2026-10-24",
+  "version": "0.1.3",
+  "status": "passed",
+  "localTests": {
+    "nodePassed": 40,
+    "pythonPassed": 17,
+    "pythonLinuxOnlySkipped": 5
+  },
+  "linuxVpsTests": {
+    "passed": 20,
+    "account": "tavernsyn",
+    "realFlockAndControlEof": true,
+    "readonlyFileFsync": true
+  },
+  "realOpenSshAndRsync": {
+    "passwordLogin": true,
+    "jobBoundTransport": true,
+    "pushPullFixture": true
+  },
+  "realSillyTavernFixture": "passed; transport is MemoryTransport simulation",
+  "actualDeployment": {
+    "local": "D:/SillyTavern/plugins/tavernsyn",
+    "vpsRoot": "/srv/tavernsyn-sync",
+    "vpsDispatcherSha256": "1f2424fa2d1a53dad409b2c42a68962dcf72818c449b2b70a8eaa9b9942a5f46",
+    "vpsBackup": "<redacted-backup-directory>",
+    "oldTaskPaused": true,
+    "payloadsPreserved": true,
+    "publishedPointersUnchangedDuringUpdate": true,
+    "repairedStageModes": 32,
+    "savedPasswordProtocolCheck": "passed"
+  },
+  "checks": [
+    "A live control or rsync process prevents another task from taking over",
+    "Control EOF parks an unfinished task after the real transfer lock releases",
+    "A crashed control session's retained record is parked on the next operation",
+    "Interrupted bytes seed a new upload without hardlinks or deleting the old snapshot",
+    "Late rsync connections cannot connect to a different task",
+    "Paused downloads pin their original published generation",
+    "An obsolete upload cannot overwrite a newer publication",
+    "UI resume reuses the verified frozen snapshot without stopping live ST again",
+    "A local status write failure still closes the VPS control connection"
+  ],
+  "realDataResume": {
+    "status": "passed",
+    "verifiedAt": "2026-10-24T01:42:25.489Z",
+    "version": "0.1.3",
+    "job": "<redacted-job-id>",
+    "files": 2782,
+    "bytes": 458105271,
+    "remote": {
+      "generation": "<redacted-job-id>",
+      "digest": "<redacted-manifest-digest>"
+    },
+    "noActiveRemoteJob": true,
+    "errorCleared": true,
+    "baselineAndHistoryMatch": true,
+    "stats": {
+      "sentBytes": 110067,
+      "receivedBytes": 139661,
+      "literalBytes": 10770,
+      "matchedBytes": 75331636,
+      "transferredFiles": 181,
+      "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+    },
+    "snapshotRemainsLocal": true,
+    "noLocalOperationLock": true
+  },
+  "untested": [
+    "Android background suspension",
+    "physical power loss",
+    "sustained concurrent SSH stress"
+  ],
+  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+}

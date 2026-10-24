@@ -1,0 +1,26 @@
+#tavernsyn-panel .ts-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem}
+#tavernsyn-panel .ts-actions>.menu_button{display:flex;align-items:center;width:100%;min-width:0;box-sizing:border-box;margin:0;white-space:nowrap;justify-content:center;padding:.65em .8em}
+#tavernsyn-panel .ts-actions>.ts-resume-upload{grid-column:1/-1}
+#tavernsyn-panel .menu_button[hidden]{display:none}
+#tavernsyn-panel .ts-restore{width:auto;white-space:nowrap;display:inline-flex;margin:.65em 0;justify-content:center}
+#tavernsyn-panel .ts-recovery{display:block;overflow-wrap:anywhere}
+#tavernsyn-panel details>.menu_button{width:auto;min-width:6em;white-space:nowrap;display:inline-flex;justify-content:center}
+#tavernsyn-panel p{margin:.7em 0}
+#tavernsyn-panel .ts-detail,.ts-dialog .ts-detail,#tavernsyn-panel .ts-history{white-space:pre-wrap;overflow-wrap:anywhere}
+#tavernsyn-panel details{margin-top:1em}
+#tavernsyn-panel summary{cursor:pointer}
+#tavernsyn-panel .ts-config fieldset{border:1px solid #8885;border-radius:8px;margin:.8em 0;padding:.8em;min-width:0}
+#tavernsyn-panel .ts-config label{display:block;margin:.7em 0}
+#tavernsyn-panel .ts-config .text_pole{display:block;width:100%;box-sizing:border-box;margin-top:.35em}
+#tavernsyn-panel .ts-config-actions{display:flex;flex-wrap:wrap;gap:.5em}
+#tavernsyn-panel .ts-config-actions .menu_button{width:auto;white-space:normal;justify-content:center;margin:0;min-width:7em}
+#tavernsyn-panel .ts-hint{font-size:.85em;opacity:.85}
+#tavernsyn-panel .ts-dataset,#tavernsyn-panel .ts-config-result{overflow-wrap:anywhere}
+.ts-dialog{background:var(--SmartThemeBlurTintColor,#20242d);color:var(--SmartThemeBodyColor,#eee);border:1px solid #8885;border-radius:12px;box-sizing:border-box;padding:24px;width:min(520px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:85vh;overflow:auto}
+.ts-dialog::backdrop{background:#000a}
+.ts-dialog h3{margin:0 0 1rem}
+.ts-dialog .ts-detail{line-height:1.6}
+.ts-dialog-actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:.65rem;margin-top:1.25rem}
+.ts-dialog-actions>.menu_button{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:auto;min-width:7em;margin:0;padding:.5em 1em;white-space:normal;text-align:center}
+.ts-dialog button[hidden]{display:none}
+@media(max-width:480px){.ts-dialog{padding:20px}.ts-dialog-actions>.menu_button{flex:1 1 0;min-width:0}}

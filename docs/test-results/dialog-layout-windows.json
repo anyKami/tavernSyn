@@ -1,0 +1,19 @@
+{
+  "status": "passed",
+  "date": "2026-10-23",
+  "platform": "win32",
+  "desktop": "1280 px viewport: action buttons share a baseline, align right, no dialog overflow",
+  "mobile": "375 px iframe viewport: equal-width buttons, no clipping",
+  "checks": [
+    "Actual ui/index.js and SillyTavern style.css in a mock API preview",
+    "Direction prompt opens without starting a sync",
+    "Cancel is the first action and retains initial focus",
+    "node --check ui/index.js"
+  ],
+  "installed": [
+    "D:\\SillyTavern\\plugins\\tavernsyn\\ui",
+    "D:\\SillyTavern\\public\\scripts\\extensions\\third-party\\tavernsyn\\ui"
+  ],
+  "note": "Visual layout validation; no live VPS operation was performed",
+  "publicationPrivacy": "Local paths and operational identifiers have been anonymized; test results and original version labels are retained."
+}
