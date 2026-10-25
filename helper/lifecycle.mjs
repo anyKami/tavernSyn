@@ -90,11 +90,19 @@ export class Lifecycle {
         const timer = setTimeout(() => child.kill(), 10000);
         try { await this.exit; await this.outputDrained; } finally { clearTimeout(timer); }
     }
-    async stop() {
+    async stop({ interruptOnDrain = false, onInterrupt = () => {} } = {}) {
         if (this.stopped) { await this.outputDrained; return; }
-        const drained = await this.command('pause');
-        requireThat(drained.ok && !drained.active && !drained.uncertain, 'DRAIN', '请求未能安全排空，酒馆保持运行。');
-        await this.command('shutdown');
+        try {
+            const drained = await this.command('pause');
+            requireThat(drained.ok && !drained.active && !drained.uncertain, 'DRAIN', '请求未能安全排空，酒馆保持运行。');
+            await this.command('shutdown');
+        } catch (error) {
+            // Only the saved, handed-off synchronization path opts into this.
+            // Never replace an unknown IPC/ownership failure with an interruption.
+            if (!interruptOnDrain || error.code !== 'DRAIN') throw error;
+            await onInterrupt(error);
+            await this.command('interrupt-shutdown');
+        }
         let timeout;
         const limit = new Promise((_resolve, reject) => { timeout = setTimeout(() => reject(new SyncError('STOP_TIMEOUT', '酒馆退出钩子尚未结束，未强制杀进程。')), 45000); });
         let exit;

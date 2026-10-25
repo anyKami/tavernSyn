@@ -416,7 +416,7 @@ class Store:
             current = self.current()
             active = self.active()
             pending = {k: active[k] for k in ("job", "direction", "phase")} if active and active["device"] == device and active["phase"] not in ("done", "aborted") else None
-            return {"protocol": 1, "version": "0.2.3", "capabilities": ["paused-jobs", "job-bound-rsync"], "dataset": self.format["dataset"],
+            return {"protocol": 1, "version": "0.2.4", "capabilities": ["paused-jobs", "job-bound-rsync"], "dataset": self.format["dataset"],
                     "current": {k: current[k] for k in ("generation", "digest")} if current else None, "pending": pending}
         if op == "begin":
             return self.begin(message, device)

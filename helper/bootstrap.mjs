@@ -16,7 +16,7 @@ requireThat(process.send && process.env.TAVERNSYN_NONCE, 'OWNERSHIP', 'Bootstrap
 const nonce = process.env.TAVERNSYN_NONCE;
 const state = { paused: false, active: 0, uncertain: false, stopping: false };
 const drain = createDrainTracker(state);
-const pending = new Map(), servers = new Set();
+const pending = new Map(), servers = new Set(), sockets = new Set();
 const reply = (message, value) => { if (process.connected) process.send({ channel: 'tavernsyn', type: 'reply', id: message.id, nonce, ...value }); };
 const pluginErrors = [];
 const originalError = console.error;
@@ -96,7 +96,11 @@ for (const module of [http, https]) {
             decorateHtml(request, response);
             listener(request, response);
         };
-        const server = original.apply(this, args); servers.add(server); return server;
+        const server = original.apply(this, args); servers.add(server);
+        server.on('connection', socket => {
+            sockets.add(socket); socket.once('close', () => sockets.delete(socket));
+        });
+        return server;
     };
 }
 process.on('message', async message => {
@@ -118,6 +122,14 @@ process.on('message', async message => {
         else if (message.op === 'shutdown') {
             requireThat(state.paused && !state.active && !state.uncertain && !state.stopping && process.listenerCount('SIGTERM'), 'DRAIN', '存在未结束或状态不明的请求，拒绝停机。');
             state.stopping = true; for (const server of servers) server.close(); reply(message, { ok: true }); process.emit('SIGTERM');
+        } else if (message.op === 'interrupt-shutdown') {
+            requireThat(state.paused && !state.stopping && process.listenerCount('SIGTERM'), 'DRAIN', '未进入受控停机阶段，拒绝中断请求。');
+            state.stopping = true;
+            for (const server of servers) server.close();
+            for (const socket of sockets) socket.destroy();
+            // Preserve uncertain diagnostics. Only a confirmed native process
+            // exit can clear this instance; never turn cancellation into success.
+            reply(message, { ok: true }); process.emit('SIGTERM');
         } else if (message.op === 'receipt') {
             const receipt = runtime.receipts.get(message.receipt);
             requireThat(receipt && Date.now() - receipt.created < 120000, 'SAVE_ACK', '保存回执已过期，请重新保存。');

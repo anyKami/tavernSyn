@@ -1,10 +1,10 @@
 {
   "status": "passed",
-  "date": "2026-10-25T00:09:17.264Z",
+  "date": "2026-10-25T12:31:58.951Z",
   "platform": "win32",
   "node": "v24.18.0",
   "root": "<isolated-test-directory>",
-  "port": 52983,
+  "port": 52752,
   "checks": [
     "Native authentication and CSRF reject unauthenticated/missing-token requests",
     "An authenticated non-admin account cannot access synchronization management",
@@ -23,7 +23,8 @@
     "Push/pull phase, file count, verification, restart and completion logs reach both the live console and sync.log without logging the saved password",
     "Manual recovery restores pre-pull data through save ACK, owned stop and healthy same-port restart, then consumes the one-step backup",
     "Full code under plugins/tavernsyn stays local across push, pull and recovery; stdout/stderr stay live through controlled restarts and are also saved to server.log",
-    "Aborted HTTP handler is marked uncertain and refuses automatic stop; fixture-only acknowledgement follows its proven completion",
+    "An uncertain handler still rejects a strict stop without clearing its diagnostics",
+    "A real hanging POST plus uncertain request is disconnected after saved handoff, native exit is confirmed, and the same push publishes and restarts successfully",
     "Native plugin loading failure rejects startup health; owned child exits before repair and restart",
     "Explicit terminal close exits through native cleanup even after an aborted HTTP request; the closing lifecycle cannot restart",
     "Abrupt launcher loss stops its actual ST child, frees the port and permits a second launch with automatic dead-lock recovery",

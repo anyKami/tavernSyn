@@ -1,0 +1,29 @@
+{
+  "date": "2026-10-25",
+  "release": "0.2.4",
+  "status": "passed",
+  "platform": "Windows",
+  "automatedTests": { "passed": 99, "failed": 0, "skipped": 0 },
+  "newLifecycleTests": { "passed": 8, "failed": 0 },
+  "actualSillyTavernIntegration": {
+    "passedChecks": 24,
+    "version": "1.19.0",
+    "scenario": "A hanging real POST connection and a historical aborted handler coexist before normal saved-page handoff",
+    "connectionDisconnected": true,
+    "nativeExitCode": 0,
+    "samePushSucceeded": true,
+    "restartedInstanceHealthy": true,
+    "uncertainCountersManuallyReset": false,
+    "transport": "MemoryTransport simulation, not a real VPS"
+  },
+  "failureChecks": [
+    "Ordinary stop remains strict",
+    "IPC and ownership failures cannot request interruption",
+    "Failed save receipt cannot request interruption",
+    "A changed save receipt after shutdown stops synchronization",
+    "Abnormal exit is rejected",
+    "Cleanup timeout stops synchronization without killing the old process",
+    "Native exit and output flush are required before stop completes"
+  ],
+  "android": "Shared implementation; no new physical-device synchronization verification"
+}

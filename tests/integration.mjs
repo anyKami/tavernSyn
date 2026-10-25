@@ -46,7 +46,7 @@ export async function init(router){
  console.log('TAVERN_SYN_FIXTURE_STDOUT'); console.error('TAVERN_SYN_FIXTURE_STDERR');
  router.use((req,res,next)=>req.user?.profile?.admin?next():res.sendStatus(403));
  router.get('/slow',async(_req,res)=>{process.send?.({channel:'fixture',event:'started'});await new Promise(r=>setTimeout(r,250));res.json({ok:true});process.send?.({channel:'fixture',event:'finished'});});
- router.post('/ack-known-completed-test',(_req,res)=>{globalThis.tavernsynRuntime.state.uncertain=false;res.json({ok:true});});
+ router.post('/pending',(_req,res)=>{res.type('text/plain');res.write('waiting');});
  router.post('/hang-exit',(_req,res)=>{globalThis.tavernsynRuntime.state.fixtureHangExit=true;res.json({ok:true});});
 }
 export async function exit(){if(globalThis.tavernsynRuntime.state.fixtureHangExit)await new Promise(()=>{});}
@@ -276,8 +276,31 @@ try {
     const uncertainDrain = (await api('status')).drain;
     assert.equal(uncertainDrain.uncertain, true);
     assert.ok(!JSON.stringify(uncertainDrain).includes('sync-test-probe/slow'));
-    const ack = await request('/api/plugins/sync-test-probe/ack-known-completed-test', { method: 'POST', body: {} }); assert.equal(ack.status, 200); await ack.text();
-    checks.push('Aborted HTTP handler is marked uncertain and refuses automatic stop; fixture-only acknowledgement follows its proven completion');
+    checks.push('An uncertain handler still rejects a strict stop without clearing its diagnostics');
+    // Reproduce both an active POST and a historical aborted request. Only the
+    // normal save + page handoff may opt into interrupting this old instance.
+    let pendingRequest;
+    const pendingResponse = new Promise((resolve, reject) => {
+        pendingRequest = http.request(device.origin + '/api/plugins/sync-test-probe/pending', { method: 'POST', headers: {
+            Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; '), 'x-tavernsyn-epoch': epoch,
+            'x-csrf-token': csrf, 'content-type': 'application/json', 'content-length': '2',
+        } }, res => { res.once('data', () => resolve(res)); res.on('error', () => {}); });
+        pendingRequest.on('error', reject); pendingRequest.end('{}');
+    });
+    await pendingResponse;
+    const disconnected = new Promise(resolve => pendingRequest.once('close', resolve));
+    const oldChild = lifecycle.child, oldExit = lifecycle.exit;
+    try {
+        await api('start', { direction: 'push', tab, preview: false });
+        const confirmation = await phase(manager, 'AWAITING_CONFIRMATION', 60000);
+        await api('confirm', { id: confirmation.id, tab, token: confirmation.confirmationToken });
+        await handoff();
+        await Promise.race([disconnected, delay(5000).then(() => { throw new Error('Blocked POST was not disconnected'); })]);
+        assert.equal((await oldExit).code, 0); assert.notEqual(lifecycle.child.pid, oldChild.pid);
+        assert.equal((await api('status')).drain.uncertain, false);
+        assert.ok((await fs.readFile(path.join(state, 'sync.log'), 'utf8')).includes('正在中断旧实例连接并正常关闭酒馆'));
+    } finally { pendingRequest.destroy(); }
+    checks.push('A real hanging POST plus uncertain request is disconnected after saved handoff, native exit is confirmed, and the same push publishes and restarts successfully');
     if (process.argv.includes('--browser')) {
         // Synthetic fixture only. Allows a separate browser test to exercise the actual installed UI.
         await atomicJson(path.join(root, 'browser.json'), { origin: device.origin, state, fixture, root });

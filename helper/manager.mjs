@@ -199,7 +199,9 @@ export class Manager {
         await this.waitFor('page', 'WAITING_PAGE');
         await this.write('QUIESCING');
         await this.lifecycle.verifyReceipt(this.receipt);
-        await this.lifecycle.stop();
+        await this.lifecycle.stop({ interruptOnDrain: true, onInterrupt: () => this.write('QUIESCING', {
+            note: '请求未排空，正在中断旧实例连接并正常关闭酒馆；等待清理完成后继续同步。',
+        }) });
         await this.lifecycle.verifyReceipt(this.receipt);
     }
     async cache(payload) {
