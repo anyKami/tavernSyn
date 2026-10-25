@@ -10,6 +10,7 @@ import { hashFile, portablePath } from '../lib/manifest.mjs';
 import { connect } from '../helper/transport.mjs';
 import { configuration, configureDevice, withDeviceLock } from '../lib/connection.mjs';
 import { recoveryStatus } from '../helper/apply.mjs';
+import { progressDetail } from '../ui/progress.js';
 
 export const info = { id: 'tavernsyn', name: 'TavernSyn', description: '跨设备同步与受控重启' };
 let lease;
@@ -83,7 +84,7 @@ export async function init(router) {
     };
     router.get('/status', endpoint(async (_req, res) => {
         const history = await exists(path.join(device.state, 'history.json')) ? await readJson(path.join(device.state, 'history.json')) : {};
-        res.json({ ...await helper('status'), managed: !!managed, deviceName: device.deviceName, host: device.remote?.host ?? '', configured: (await helper('configuration')).configured, epoch: nonce, history, recovery: await helper('recovery') });
+        res.json({ ...await helper('status'), managed: !!managed, deviceName: device.deviceName, host: device.remote?.host ?? '', configured: (await helper('configuration')).configured, epoch: nonce, history, recovery: await helper('recovery'), ...(managed?.drain ? { drain: managed.drain.summary() } : {}) });
     }));
     router.post('/check', endpoint(async (_req, res) => res.json(await helper('check'))));
     router.get('/configuration', endpoint(async (_req, res) => res.json(await helper('configuration'))));
@@ -140,7 +141,7 @@ function releaseLease() {
 }
 export async function exit() { releaseLease(); }
 function waitPage(config) {
-    return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TavernSyn 同步</title><style>body{font:17px system-ui;background:#171b22;color:#eee;max-width:640px;margin:15vh auto;padding:24px}button{padding:12px}pre{white-space:pre-wrap;color:#b7c7da}</style><h1>正在同步酒馆</h1><p id="state">正在交接任务，请保留此页面。</p><pre id="detail"></pre><button id="back" hidden>返回酒馆</button><script>(${waitingDocument.toString()})(${JSON.stringify(config)})</script></html>`;
+    return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TavernSyn 同步</title><style>body{font:17px system-ui;background:#171b22;color:#eee;max-width:640px;margin:15vh auto;padding:24px}button{padding:12px}pre{white-space:pre-wrap;color:#b7c7da}</style><h1>正在同步酒馆</h1><p id="state">正在交接任务，请保留此页面。</p><pre id="detail"></pre><button id="back" hidden>返回酒馆</button><script>const progressDetail = ${progressDetail.toString()}; (${waitingDocument.toString()})(${JSON.stringify(config)})</script></html>`;
 }
 function waitingDocument(config) {
     const base = '/api/plugins/tavernsyn/';
@@ -153,7 +154,7 @@ function waitingDocument(config) {
             const status = await response.json();
             if (status.id !== config.id) { document.getElementById('state').textContent = '任务已改变，请返回酒馆检查。'; document.getElementById('back').hidden = false; return; }
             document.getElementById('state').textContent = labels[status.phase] || '正在同步';
-            document.getElementById('detail').textContent = status.error?.message || status.note || (status.progress ? `${status.progress.percent}%` : '');
+            document.getElementById('detail').textContent = [status.error?.message || status.note || '', progressDetail(status)].filter(Boolean).join('\n');
             if (status.phase === 'SUCCEEDED') { location.replace('/'); return; }
             if (['FAILED', 'RECOVERY_REQUIRED', 'PENDING_APPLY'].includes(status.phase)) { document.getElementById('back').hidden = false; return; }
         } catch { document.getElementById('state').textContent = '酒馆正在应用或重启，等待重新连接……'; }

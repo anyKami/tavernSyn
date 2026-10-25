@@ -50,8 +50,9 @@ export class Manager {
         return this.job;
     }
     progress = value => {
-        if (Date.now() - this.progressTime < 500) return;
-        this.progressTime = Date.now(); this.write(this.job.phase, { progress: value }).catch(() => {});
+        if (value.stage !== 'transferred' && Date.now() - this.progressTime < 500) return;
+        this.progressTime = Date.now();
+        return this.write(this.job.phase, { progress: value, ...(value.stats ? { stats: value.stats } : {}) }).catch(() => {});
     };
     async action(action, payload = {}) {
         if (action === 'status') return this.status();

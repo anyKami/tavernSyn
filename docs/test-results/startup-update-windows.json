@@ -1,0 +1,107 @@
+{
+  "status": "passed",
+  "version": "0.2.2",
+  "verifiedAt": "2026-10-25T00:12:41.921Z",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "unit": {
+    "total": 86,
+    "passed": 86,
+    "failed": 0,
+    "skipped": 0
+  },
+  "startupRegression": {
+    "passed": 12,
+    "scope": [
+      "actual annotated Git release checkout and pinned tag object",
+      "backend and case-preserved frontend replacement",
+      "unchanged settings, credentials and device identity",
+      "offline and pending-operation protection",
+      "local code fingerprint protection",
+      "rollback at all four rename boundaries",
+      "interrupted-update recovery even with skip-update",
+      "same-process launcher ownership",
+      "actual Windows cmd entry",
+      "real Bash menu option 4 through update and launch",
+      "existing-service epoch verification and reuse",
+      "subsequent manual ff-only update after a verified tag checkout"
+    ]
+  },
+  "installerRegression": {
+    "passed": 5,
+    "windowsPowerShell51": true,
+    "reinstallPreservesData": true,
+    "fullGeneratedWindowsEntry": true
+  },
+  "sillyTavernIntegration": {
+    "status": "passed",
+    "checks": 23,
+    "verifiedAt": "2026-10-25T00:09:17.264Z",
+    "transport": "MemoryTransport simulation; NOT real rsync/SSH/VPS"
+  },
+  "vpsPython": {
+    "total": 22,
+    "passed": 17,
+    "skipped": 5,
+    "skipReason": "Linux-specific flock and descriptor checks"
+  },
+  "actualLocalInstall": {
+    "installedVersion": "0.2.2",
+    "frontendVersion": "0.2.2",
+    "startupMatches": true,
+    "deviceConfigurationUnchanged": true,
+    "settingsUnchanged": true,
+    "passwordUnchanged": true,
+    "codeFingerprintMatches": true
+  },
+  "android": {
+    "managerIntegration": "validated with real Bash and Git fixtures",
+    "installerHook": true,
+    "physicalDeviceConnected": false,
+    "physicalInstallRetested": false,
+    "notes": "Earlier Termux runtime verification is recorded separately; this release does not claim a fresh physical-device installation."
+  },
+  "privacy": "Machine paths, device and process identifiers, secrets and private user content omitted.",
+  "drainRegression": {
+    "passed": 8,
+    "scope": [
+      "reviewed bodyless core and user file reads",
+      "JSON-only ephemeral heartbeat",
+      "unknown plugin and write cancellations remain blocking",
+      "strict raw path and multipart upload guards",
+      "bounded diagnostics without request contents or user filenames"
+    ]
+  },
+  "uploadRecoveryRegression": {
+    "unitPassed": 9,
+    "realOpenSshRsync": true,
+    "scenarios": [
+      "control disconnect after successful file transfer",
+      "lost commit acknowledgement",
+      "resume-only ownership, generation and publication-base checks",
+      "new dataset rejected during reauthentication",
+      "permission and integrity errors remain fatal",
+      "bounded retry without removing locks",
+      "idle exit code recorded without pending requests",
+      "actual transfer statistics survive a later failure",
+      "logical progress is not used as upload percentage"
+    ]
+  },
+  "actualVpsResume": {
+    "status": "passed",
+    "verifiedAt": "2026-10-25T00:13:06.220Z",
+    "files": 2807,
+    "bytes": 488847063,
+    "stats": {
+      "sentBytes": 103809,
+      "receivedBytes": 562,
+      "literalBytes": 0,
+      "matchedBytes": 0,
+      "transferredFiles": 0,
+      "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+    },
+    "receiptMatchesSavedSnapshot": true,
+    "independentSshHelloMatches": true,
+    "serviceLeftRunning": true
+  }
+}

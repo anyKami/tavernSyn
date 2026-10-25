@@ -34,7 +34,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer -SillyTavernPath 
 
 安装器备份 `config.yaml`，只启用服务端插件并安装自己的前后端入口，生成 `Start-TavernSyn.cmd`，保留原启动脚本。设备控制目录 ACL 仅允许当前用户、SYSTEM 和管理员访问。重新运行保留设备 ID、账号密码和 VPS 配置；发现运行中的实例、端口占用或待处理同步任务会停止安装。
 
-双击 `Start-TavernSyn.cmd` 后，会先等待所属酒馆通过启动检查，再自动用默认浏览器打开本机地址；同步过程中酒馆重启不会重复打开网页。启动窗口同时显示酒馆输出和推送/拉取日志，包括阶段、文件变更、传输统计、SHA-256 校验与错误原因。酒馆原始输出保存在控制目录 `server.log`，同步详细日志保存在同目录 `sync.log`（时间为北京时间）；日志不记录密码或同步文件正文。
+双击 `Start-TavernSyn.cmd` 后，先检查 GitHub 的 `vX.Y.Z` 稳定版本标签；有更高版本时更新本机 TavernSyn 后端及配套前端，再启动酒馆。酒馆通过健康检查后自动打开浏览器；同步过程中的受控重启不会重复开网页。独立的 `TavernSyn-Startup.mjs` 放在酒馆根目录，重新安装时会同时生成，避免只更新前端而后端仍使用旧版本。
+
+版本检查通常最多等待 8 秒，下载新版本最多等待 60 秒。网络不可用或更新失败并成功恢复原代码时继续启动已有版本；运行中、有待应用任务、发现本机代码修改时保留当前代码。更新过程中断会保留记录，下次启动先恢复；恢复失败时停止启动。仅更新 TavernSyn 代码，不更新 SillyTavern 本体，不移动用户数据、账号密码或设备配置。需要额外后端依赖的新版本会提示手动运行安装器。
+
+可用 `Start-TavernSyn.cmd --skip-update` 跳过本次检查。已在运行的受控酒馆会核对实例标识后复用并打开页面；要应用新版本，先关闭原启动窗口再启动。原代码保留一版在酒馆根目录 `.tavernsyn-previous-code`，与同步数据的“恢复上一版”分别管理。
+
+启动窗口同时显示酒馆输出和推送/拉取日志，包括阶段、文件变更、传输统计、SHA-256 校验与错误原因。酒馆原始输出保存在控制目录 `server.log`，同步详细日志保存在同目录 `sync.log`（时间为北京时间）；日志不记录密码或同步文件正文。
 
 可右键启动脚本「发送到 → 桌面快捷方式」，也可在酒馆目录运行下面命令生成或更新带酒馆图标的桌面入口。快捷方式绑定原启动脚本及酒馆工作目录，双击后保留日志窗口。
 
@@ -69,7 +75,11 @@ curl -fL https://raw.githubusercontent.com/anyKami/tavernSyn/main/install.sh -o 
 bash "$TMPDIR/tavernsyn-install.sh" "$HOME/SillyTavern"
 ```
 
-安装结束后运行显示的 `start-tavernsyn.sh`，浏览器继续打开原本机地址。可将该入口用于 Termux:Widget。保持 Termux 前台并按系统设置允许后台运行；Android 可能回收进程，任务依靠日志恢复，唤醒锁不构成存活保证。**尚无 Android 真机验收；脚本仅完成语法与共享安装逻辑验证。**
+安装结束后运行显示的 `start-tavernsyn.sh`，使用与 Windows 相同的稳定版本检查、代码更新和受控启动流程，并在健康检查通过后打开浏览器。`bash start-tavernsyn.sh --skip-update` 可跳过本次版本检查。可将入口用于 Termux:Widget；关闭启动会话或使用 Termux 的 Exit 会停止所属酒馆，切到浏览器时保持运行。
+
+安装器会检查 `$HOME/install.sh`。发现兼容的 **ClewdR & SillyTavern 管理工具** 时，自动将选项 **4** 接到此入口，保留 ClewdR 及其他菜单操作；重复安装会更新同一段集成代码。识别到原管理工具的自动下载 `.bashrc` 行时，会改为优先运行本地已集成的工具，避免登录时被下载覆盖。未安装该工具或菜单格式无法识别时保留原文件，使用独立启动脚本即可。
+
+此前已验证 Android 真机的受控拉取、重启及 Exit 行为；本次启动自更新与安装时集成另有隔离回归检查。Android 系统可能回收后台进程，仍需依靠日志恢复；唤醒锁不构成存活保证。
 
 安装器会寻找系统 npm 的 JS 入口；若依赖恢复提示缺少 npm，在设备配置设置 `npmCli`，Termux 通常是 `$PREFIX/lib/node_modules/npm/bin/npm-cli.js`。
 
@@ -105,7 +115,7 @@ Tailscale ACL/grants 中也应仅允许目标设备访问 VPS SSH。本版 SSH �
 
 ## 已有密码 VPS 升级
 
-已使用密码登录的 VPS 升级到 0.2.1 时，在新代码目录运行下面命令（数据集 UUID 可从原 `FORMAT.json` 查看）。更新器先以同步账号运行 Linux 失败恢复测试，再取得独占维护锁，备份并更新 dispatcher 与该账号的 SSH 存活检查，暂停旧任务并保留全部上传内容。密码、已发布代次和发布指针保留。
+已使用密码登录的 VPS 升级到 0.2.2 时，在新代码目录运行下面命令（数据集 UUID 可从原 `FORMAT.json` 查看）。更新器先以同步账号运行 Linux 失败恢复测试，再取得独占维护锁，备份并更新 dispatcher 与该账号的 SSH 存活检查，暂停旧任务并保留全部上传内容。密码、已发布代次和发布指针保留。
 
 ```bash
 sudo python3 vps/update.py --root /srv/tavernsyn-sync --account tavernsyn --dataset 数据集UUID
@@ -144,6 +154,6 @@ node bin/configure.mjs --state "D:/TavernSyn-device" --host 100.100.100.100 --us
 
 关闭 `Start-TavernSyn.cmd` 所在终端窗口，或按 Ctrl+C，即可停止它启动的酒馆。启动器异常退出时，酒馆也会在失去连接后退出；再次启动会检查端口和旧进程，只自动清理已死进程的锁。同步时关闭终端会中断任务，恢复记录保留，见[故障与恢复](recovery.md)。
 
-关闭酒馆和助手，更新仓库后重新运行同一条 `install.ps1` / `install.sh`。账号密码、同步基准和恢复数据保留。助手不热更新。受控进程通过环境关闭前后端插件自动更新以固定同步版本，不改全局更新偏好。
+生成的入口会在启动前更新 TavernSyn 稳定版本；已有旧入口需要先关闭酒馆，更新仓库并重新运行一次 `install.ps1` / `install.sh` 以接入此功能。也可以继续手动安装；账号密码、同步基准和恢复数据保留。运行中的助手不热更新。受控进程仍通过环境关闭酒馆内其他前后端插件的自动更新以固定同步快照，不改全局更新偏好。
 
 卸载前正常关闭并备份控制目录，移除前端 `third-party/tavernsyn`、后端 `plugins/tavernsyn` 和生成的启动入口，再用原启动方式。关闭服务端插件开关前确认其他插件是否依赖它，不要把安装前整个配置覆盖回近期修改过的配置。

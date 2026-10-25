@@ -9,6 +9,7 @@ import { recoverStopped } from './recover.mjs';
 import { PROJECT, loadDevice } from '../lib/device.mjs';
 import { configuration } from '../lib/connection.mjs';
 import { repositoryPath } from '../lib/repository.mjs';
+import { integrateTermuxManager } from './integrate-termux-manager.mjs';
 import { atomicJson, cliOptions, exists, inside, noLinks, readJson, requireThat, run } from '../lib/io.mjs';
 
 async function windowsTools(directory) {
@@ -60,8 +61,10 @@ export async function setupDevice(options) {
         await run('rsync', ['--version']); await run('ssh', ['-V']);
     }
     const current = await configuration(device);
+    const manager = process.env.PREFIX?.endsWith('/com.termux/files/usr')
+        ? await integrateTermuxManager({ install: st }) : null;
     const launcher = path.join(st, process.platform === 'win32' ? 'Start-TavernSyn.cmd' : 'start-tavernsyn.sh');
-    return { ...installed, launcher, configured: current.configured };
+    return { ...installed, launcher, configured: current.configured, ...(manager ? { manager } : {}) };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     setupDevice(cliOptions()).then(result => {

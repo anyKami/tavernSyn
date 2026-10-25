@@ -185,6 +185,28 @@ try {
     assert.equal(wrong.status, 409);
     checks.push('Unmatched save nonce/digest cannot obtain a disk receipt');
     const ui = await request('/scripts/extensions/third-party/tavernsyn/ui/index.js'); assert.equal(ui.status, 200); await ui.text();
+    // A tab navigation can cancel an in-flight sendFile. Reproduce the real socket
+    // close before a large static response finishes, then use the normal push path.
+    const staticFile = path.join(fixture, 'public/img/tavernsyn-abort-fixture.bin');
+    await fs.writeFile(staticFile, Buffer.alloc(32 * 1024 * 1024, 7));
+    await new Promise((resolve, reject) => {
+        const req = http.get(device.origin + '/img/tavernsyn-abort-fixture.bin?private-query-must-not-appear', {
+            headers: { Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; ') },
+        }, res => {
+            assert.equal(res.statusCode, 200);
+            res.once('data', () => { res.destroy(); req.destroy(); resolve(); });
+            res.once('error', () => {});
+        });
+        req.once('error', reject);
+    });
+    let drain;
+    for (let i = 0; i < 50; i++) {
+        drain = (await api('status')).drain;
+        if (drain.safeAborts) break;
+        await delay(20);
+    }
+    assert.ok(drain.safeAborts >= 1); assert.equal(drain.uncertain, false);
+    await fs.unlink(staticFile);
     const tab = randomUUID(); await api('tabs', { tab });
     const oldEpoch = lifecycle.nonce;
     await receipt(); await api('start', { direction: 'push', tab, preview: false }); await handoff();
@@ -194,6 +216,7 @@ try {
     assert.equal((await api('configuration')).passwordSaved, true);
     checks.push('Saved connection settings and password availability survive a real controlled restart');
     checks.push('Protected plugin push: save ACK, waiting document, graceful exit, frozen snapshot, same-port new-nonce restart, publish');
+    checks.push('A canceled real static sendFile does not poison drain; the following normal push safely stops, publishes and restarts');
     assert.ok(!remote.last.manifest.files.some(file => /^(server-plugins|extensions)\/tavernsyn\//i.test(file.path)));
     assert.equal((await request('/api/settings/save', { method: 'POST', body: settings, useEpoch: oldEpoch })).status, 409);
     await fs.writeFile(path.join(fixture, 'data/default-user/worlds/local-only.json'), '{"entries":{}}');
@@ -247,8 +270,12 @@ try {
     const started = fixtureEvent('started'), finished = fixtureEvent('finished');
     const abandoned = http.get(device.origin + '/api/plugins/sync-test-probe/slow', { headers: { Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; '), 'x-tavernsyn-epoch': epoch } }); abandoned.on('error', () => {});
     await started; abandoned.destroy(); await finished;
-    await assert.rejects(lifecycle.stop(), { code: 'DRAIN' }); assert.equal(lifecycle.stopped, false);
+    await assert.rejects(lifecycle.stop(), error => error.code === 'DRAIN' && error.message.includes('GET /api/plugins/*'));
+    assert.equal(lifecycle.stopped, false);
     await lifecycle.resume();
+    const uncertainDrain = (await api('status')).drain;
+    assert.equal(uncertainDrain.uncertain, true);
+    assert.ok(!JSON.stringify(uncertainDrain).includes('sync-test-probe/slow'));
     const ack = await request('/api/plugins/sync-test-probe/ack-known-completed-test', { method: 'POST', body: {} }); assert.equal(ack.status, 200); await ack.text();
     checks.push('Aborted HTTP handler is marked uncertain and refuses automatic stop; fixture-only acknowledgement follows its proven completion');
     if (process.argv.includes('--browser')) {

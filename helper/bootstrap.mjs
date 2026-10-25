@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import { browserEpoch, isReadOnlyScript } from './epoch.mjs';
+import { createDrainTracker } from './drain.mjs';
 import { loadDevice } from '../lib/device.mjs';
 import { requireThat } from '../lib/io.mjs';
 import { checkCompatibility } from '../adapters/release-1.19.mjs';
@@ -14,6 +15,7 @@ await checkCompatibility(device.install);
 requireThat(process.send && process.env.TAVERNSYN_NONCE, 'OWNERSHIP', 'Bootstrap 必须由受控启动器创建。');
 const nonce = process.env.TAVERNSYN_NONCE;
 const state = { paused: false, active: 0, uncertain: false, stopping: false };
+const drain = createDrainTracker(state);
 const pending = new Map(), servers = new Set();
 const reply = (message, value) => { if (process.connected) process.send({ channel: 'tavernsyn', type: 'reply', id: message.id, nonce, ...value }); };
 const pluginErrors = [];
@@ -22,7 +24,7 @@ console.error = function (...args) {
     if (/^(Plugin loading failed\.|Failed to load plugin)/.test(String(args[0]))) pluginErrors.push('native-plugin-load-failed');
     originalError.apply(console, args);
 };
-const runtime = globalThis.tavernsynRuntime = { device, nonce, state, pluginErrors, receipts: new Map(), tabs: new Map(),
+const runtime = globalThis.tavernsynRuntime = { device, nonce, state, drain, pluginErrors, receipts: new Map(), tabs: new Map(),
     helper(action, payload = {}) {
         const id = randomUUID();
         return new Promise((resolve, reject) => {
@@ -90,10 +92,7 @@ for (const module of [http, https]) {
                 response.writeHead(409, { 'content-type': 'application/json' }); response.end('{"error":"TAVERNSYN_STALE_PAGE","message":"请刷新页面后重试。"}'); return;
             }
             if (state.paused) { response.writeHead(503, { 'retry-after': '2' }); response.end('TavernSyn 正在安全重启'); return; }
-            state.active++;
-            let finished = false;
-            response.once('finish', () => { if (!finished) { finished = true; state.active--; } });
-            response.once('close', () => { if (!finished) { finished = true; state.active--; state.uncertain = true; } });
+            drain.track(request, response);
             decorateHtml(request, response);
             listener(request, response);
         };
@@ -113,7 +112,8 @@ process.on('message', async message => {
         if (message.op === 'pause') {
             state.paused = true; const deadline = Date.now() + 15000;
             while (state.active && Date.now() < deadline) await delay(20);
-            reply(message, { ok: !state.active && !state.uncertain, active: state.active, uncertain: state.uncertain });
+            const error = drain.failure();
+            reply(message, { ok: !error, active: state.active, uncertain: state.uncertain, ...(error ? { error } : {}) });
         } else if (message.op === 'resume') { state.paused = false; reply(message, { ok: true }); }
         else if (message.op === 'shutdown') {
             requireThat(state.paused && !state.active && !state.uncertain && !state.stopping && process.listenerCount('SIGTERM'), 'DRAIN', '存在未结束或状态不明的请求，拒绝停机。');

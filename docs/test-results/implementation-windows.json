@@ -1,10 +1,10 @@
 {
   "status": "passed",
-  "date": "2026-10-24T13:26:52.292Z",
+  "date": "2026-10-25T00:09:17.264Z",
   "platform": "win32",
   "node": "v24.18.0",
   "root": "<isolated-test-directory>",
-  "port": 54585,
+  "port": 52983,
   "checks": [
     "Native authentication and CSRF reject unauthenticated/missing-token requests",
     "An authenticated non-admin account cannot access synchronization management",
@@ -16,6 +16,7 @@
     "Unmatched save nonce/digest cannot obtain a disk receipt",
     "Saved connection settings and password availability survive a real controlled restart",
     "Protected plugin push: save ACK, waiting document, graceful exit, frozen snapshot, same-port new-nonce restart, publish",
+    "A canceled real static sendFile does not poison drain; the following normal push safely stops, publishes and restarts",
     "Legacy SSH failure after complete download: offline SHA-256 recovery, original-generation confirmation, real ST same-port restart and successful application without reconnecting",
     "Confirmation binds the save handoff to its current page and refuses another still-active TavernSyn tab",
     "Protected plugin pull: verified stage, unpushed-change confirmation, owned stop, journal apply, health check and recovery snapshot",

@@ -9,6 +9,7 @@ import { atomicJson, cliOptions, exists, inside, noLinks, readJson, requireThat,
 import { copyTree } from '../lib/manifest.mjs';
 import { checkCompatibility } from '../adapters/release-1.19.mjs';
 import { prepareRepository, repositoryPath } from '../lib/repository.mjs';
+import { codeFingerprint, termuxLauncher, windowsLauncher } from './startup.mjs';
 
 export async function install({ st, state, profile = 'default-user', repository }) {
     requireThat(st && path.isAbsolute(st), 'INSTALL', '请使用 --st 指定酒馆完整路径。');
@@ -48,17 +49,16 @@ export async function install({ st, state, profile = 'default-user', repository 
     await fs.mkdir(front, { recursive: true });
     await fs.copyFile(path.join(repository, 'manifest.json'), path.join(front, 'manifest.json'));
     await copyTree(path.join(repository, 'ui'), path.join(front, 'ui'));
-    await atomicJson(path.join(repository, '.tavernsyn-install.json'), { state });
+    await atomicJson(path.join(repository, '.tavernsyn-install.json'), { state, codeFingerprint: await codeFingerprint(repository) });
     document.set('enableServerPlugins', true);
     const tempConfig = path.join(directory, 'config.tavernsyn-install.tmp');
     await fs.writeFile(tempConfig, document.toString()); await fs.rename(tempConfig, configFile);
+    await fs.copyFile(new URL('./startup.mjs', import.meta.url), path.join(directory, 'TavernSyn-Startup.mjs'));
     if (process.platform === 'win32') {
-        for (const value of [process.execPath, repository, state]) requireThat(!/["%\r\n!]/.test(value), 'INSTALL', '启动路径含批处理不支持的字符。');
-        const script = `@echo off\r\nchcp 65001 >nul\r\npushd "%~dp0"\r\nif /I "%~1"=="--desktop-shortcut" goto desktop_shortcut\r\nset NODE_ENV=production\r\n"${process.execPath}" "${path.join(repository, 'helper/launcher.mjs')}" --state "${state}" --open-browser yes\r\nset "tavernsyn_exit=%ERRORLEVEL%"\r\npopd\r\nif not "%tavernsyn_exit%"=="0" pause\r\nexit /b %tavernsyn_exit%\r\n:desktop_shortcut\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${path.join(repository, 'bin/create-desktop-shortcut.ps1')}" -LauncherPath "%~f0"\r\nset "tavernsyn_exit=%ERRORLEVEL%"\r\npopd\r\nif not "%tavernsyn_exit%"=="0" pause\r\nexit /b %tavernsyn_exit%\r\n`;
+        const script = windowsLauncher({ node: process.execPath, repository, state });
         await fs.writeFile(path.join(directory, 'Start-TavernSyn.cmd'), script);
     } else {
-        const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-        await fs.writeFile(path.join(directory, 'start-tavernsyn.sh'), `#!/data/data/com.termux/files/usr/bin/sh\ncd ${quote(directory)} || exit 1\nexec ${quote(process.execPath)} ${quote(path.join(repository, 'helper/launcher.mjs'))} --state ${quote(state)} --open-browser yes "$@"\n`, { mode: 0o700 });
+        await fs.writeFile(path.join(directory, 'start-tavernsyn.sh'), termuxLauncher({ node: process.execPath, install: directory, state }), { mode: 0o700 });
     }
     return { state, deviceId: (await readJson(deviceFile)).deviceId, install: directory, ...prepared };
 }

@@ -129,7 +129,7 @@ def main():
                 os.fchmod(stream.fileno(), 0o600)
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         before = pointers(root)
-        backup = Path("/var/backups") / ("tavernsyn-0.2.1-" + time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8])
+        backup = Path("/var/backups") / ("tavernsyn-0.2.2-" + time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8])
         backup.mkdir(mode=0o700)
         (backup / "linux-tests.log").write_text(tests, encoding="utf-8")
         for file in (target, config):
@@ -164,7 +164,7 @@ h=s.command({"op":"hello"},j["device"] if j else "00000000-0000-4000-8000-000000
 print(json.dumps({"hello":h,"repairedStageModes":changed}))'''
             probe = json.loads(run(["runuser", "-u", args.account, "--", "/usr/bin/python3", "-B", "-c", code, str(target), str(root)]))
             check(pointers(root) == before, "Published pointers changed unexpectedly")
-            check(probe["hello"].get("version") == "0.2.1", "New dispatcher did not pass protocol check")
+            check(probe["hello"].get("version") == "0.2.2", "New dispatcher did not pass protocol check")
             run(["systemctl", "reload", "ssh"])
         except BaseException:
             replace(target, (backup / target.name).read_bytes(), 0o755)
@@ -175,7 +175,7 @@ print(json.dumps({"hello":h,"repairedStageModes":changed}))'''
                      "import os,sys; p=sys.argv[1]; t=p+'.rollback'; open(t,'w').write(sys.stdin.read()); os.replace(t,p)",
                      str(active_file)], input=(backup / "active-before.json").read_text())
             raise
-        result = dict(status="updated", version="0.2.1", dataset=args.dataset, root=str(root), backup=str(backup),
+        result = dict(status="updated", version="0.2.2", dataset=args.dataset, root=str(root), backup=str(backup),
                       dispatcherSha256=hashlib.sha256(dispatcher).hexdigest(), linuxTestsPassed=True,
                       publishedPointersUnchanged=True, payloadsPreserved=True, **probe)
         (backup / "RESULT.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

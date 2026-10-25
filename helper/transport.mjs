@@ -9,6 +9,7 @@ import { atomicJson, exists, noLinks, readJson, requireThat, run, SyncError, rem
 import { copyTree, difference, scan, validateManifest, verify } from '../lib/manifest.mjs';
 import { enoughSpace } from '../lib/content.mjs';
 import { rsyncOutputLog } from './sync-log.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const RSYNC_ARGS = ['-rt', '--compress', '--omit-dir-times', '--no-whole-file', '--delete-delay', '--partial-dir=.tavernsyn-partial', '--fsync', '--info=progress2,stats2', '--stats', '--itemize-changes', '--8-bit-output', '--outbuf=L', '--timeout=120', '--modify-window=0'];
 const ALIAS = 'tavernsyn-vps';
@@ -31,7 +32,7 @@ export function parseStats(output) {
 export class Control {
     constructor(child, log = () => {}) {
         this.child = child; this.waiters = new Map(); this.buffer = ''; this.sequence = 0; this.closed = false;
-        this.log = log;
+        this.log = log; this.started = Date.now(); this.intentional = false; this.exitLogged = false;
         child.stdin.on('error', () => {});
         const stderr = rsyncOutputLog(line => this.log(`SSH: ${line.slice('rsync: '.length)}`));
         child.stderr.setEncoding('utf8'); child.stderr.on('data', text => stderr.write(text)); child.stderr.once('end', () => stderr.end());
@@ -59,8 +60,17 @@ export class Control {
                 } catch { this.fail(new SyncError('REMOTE_PROTOCOL', 'VPS 返回了无法识别的控制消息。')); }
             }
         });
-        child.once('error', () => this.fail(new SyncError('SSH', '无法启动 SSH。')));
-        child.once('close', () => { stderr.end(); this.closed = true; this.fail(new SyncError('SSH', 'SSH 连接已结束，请检查 Tailscale、账号密码和 VPS 密码登录配置；服务器身份改变也会阻止连接。')); });
+        child.once('error', () => { this.closed = true; this.fail(new SyncError('SSH', '无法启动 SSH。')); });
+        const exited = (code, signal) => {
+            this.closed = true;
+            if (!this.exitLogged) {
+                this.exitLogged = true;
+                this.log(`SSH 控制进程${this.intentional ? '主动结束' : '退出'}：退出码 ${Number.isInteger(code) ? code : '无'}，信号 ${signal ?? '无'}，存续 ${Math.round((Date.now() - this.started) / 1000)} 秒。`);
+            }
+            this.fail(new SyncError('SSH', 'SSH 连接已结束，请检查 Tailscale、账号密码和 VPS 密码登录配置；服务器身份改变也会阻止连接。'));
+        };
+        child.once('exit', exited);
+        child.once('close', (code, signal) => { stderr.end(); exited(code, signal); });
     }
     fail(error) { for (const pending of this.waiters.values()) { clearTimeout(pending.timer); pending.reject(error); } this.waiters.clear(); }
     request(op, fields = {}, timeoutMs = 30 * 60 * 1000) {
@@ -73,7 +83,7 @@ export class Control {
             this.child.stdin.write(`${JSON.stringify({ id, op, ...fields })}\n`);
         });
     }
-    close() { this.child.stdin.end(); this.child.kill(); }
+    close() { this.intentional = true; this.child.stdin.end(); this.child.kill(); }
 }
 export async function environment(device) {
     const remote = await checkRemoteConfig(device), tools = device.tools ?? {};
@@ -127,7 +137,15 @@ export async function connect(device, makeEnvironment = environment, log = () =>
             env.remote.dataset = hello.dataset; device.remote.dataset = hello.dataset;
         }
         log(`SSH 连接成功；数据集 ${hello.dataset}；当前代次 ${hello.current?.generation ?? '尚未发布'}`);
-        return { control, env, hello, log };
+        // Reconnect to the original, authenticated target even if a caller later
+        // changes the mutable device object. Keep the original publication base.
+        const pinned = { ...device, remote: { ...env.remote, dataset: hello.dataset } };
+        const session = { control, env, hello, log, async reconnect() {
+            session.control.close();
+            const fresh = await connect(pinned, makeEnvironment, session.log);
+            session.control = fresh.control; session.env = fresh.env;
+        } };
+        return session;
     } catch (error) { control.close(); throw error; }
 }
 async function partialCleanup(root) {
@@ -165,6 +183,7 @@ async function transfer(env, direction, job, payload, onProgress, correction, lo
     return parseStats(result.stdout);
 }
 function addStats(first, second) {
+    if (!first) return second;
     if (!second) return first;
     return { ...first, ...Object.fromEntries(['sentBytes', 'receivedBytes', 'literalBytes', 'matchedBytes', 'transferredFiles'].map(k => [k, first[k] + second[k]])), corrected: true };
 }
@@ -172,16 +191,57 @@ export async function push(session, device, job, payload, manifest, onProgress, 
     validateManifest(manifest); const { control, env } = session;
     const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'push', base: session.hello.current?.digest ?? null, jobBound: env.jobBound === true });
     await onBegin?.(begun);
-    if (['done', 'finalizing'].includes(begun.phase)) return control.request('commit', { job, manifest });
-    let stats = await transfer(env, 'push', job, payload, onProgress, undefined, session.log);
-    const diff = await control.request('inspect', { job, manifest });
-    session.log?.(`VPS 内容校验：待补传 ${diff.changed.length} 个文件，额外 ${diff.extra.length} 个文件`);
-    requireThat(!diff.extra.length, 'INTEGRITY', '上传目录仍含额外文件，拒绝发布。');
-    if (diff.changed.length) stats = addStats(stats, await transfer(env, 'push', job, payload, onProgress, diff.changed, session.log));
-    session.log?.('逐文件 SHA-256 校验后发布 VPS 快照');
-    const published = await control.request('commit', { job, manifest });
-    requireThat(published.digest === manifest.digest, 'REMOTE_PROTOCOL', 'VPS 发布回执与源快照不匹配。');
-    return { ...published, stats };
+    let stats;
+    if (!['done', 'finalizing'].includes(begun.phase)) {
+        stats = await transfer(env, 'push', job, payload, onProgress, undefined, session.log);
+        await onProgress?.({ stage: 'transferred', stats });
+    }
+    return finalizeUpload(session, device, job, payload, manifest, stats, onProgress, begun.phase);
+}
+
+// Upload bytes remain useful when the independent control SSH exits. Reclaim
+// only this retained job; begin/resume and commit enforce ownership and base.
+export async function finalizeUpload(session, device, job, payload, manifest, stats, onProgress, phase = 'transfer') {
+    let recoveries = 0;
+    const dataset = session.hello.dataset ?? device.remote.dataset;
+    const base = session.hello.current?.digest ?? null;
+    for (;;) {
+        try {
+            if (!['done', 'finalizing'].includes(phase)) {
+                const diff = await session.control.request('inspect', { job, manifest });
+                session.log?.(`VPS 内容校验：待补传 ${diff.changed.length} 个文件，额外 ${diff.extra.length} 个文件`);
+                requireThat(!diff.extra.length, 'INTEGRITY', '上传目录仍含额外文件，拒绝发布。');
+                if (diff.changed.length) {
+                    stats = addStats(stats, await transfer(session.env, 'push', job, payload, onProgress, diff.changed, session.log));
+                    await onProgress?.({ stage: 'transferred', stats });
+                }
+            }
+            session.log?.('逐文件 SHA-256 校验后发布 VPS 快照');
+            const published = await session.control.request('commit', { job, manifest });
+            requireThat(published.digest === manifest.digest, 'REMOTE_PROTOCOL', 'VPS 发布回执与源快照不匹配。');
+            return { ...published, stats };
+        } catch (error) {
+            if (!['SSH', 'SSH_TIMEOUT'].includes(error.code) || recoveries >= 2 || typeof session.reconnect !== 'function') throw error;
+            recoveries++;
+            session.log?.(`上传后的 SSH 控制连接中断，正在重连并核验同一任务（${recoveries}/2）；保留已上传文件。`);
+            await session.reconnect();
+            let resumed;
+            for (let attempt = 0; ; attempt++) {
+                try {
+                    resumed = await session.control.request('begin', { job, dataset, direction: 'push', base, jobBound: true, resumeOnly: true });
+                    break;
+                } catch (retryError) {
+                    if (retryError.code !== 'BUSY' || attempt >= 4) throw retryError;
+                    await delay(Math.min(2000, 500 * 2 ** attempt));
+                }
+            }
+            requireThat(resumed.job === job && resumed.generation === job
+                && ['transfer', 'finalizing', 'done'].includes(resumed.phase) && (resumed.base ?? null) === base,
+            'REMOTE_PROTOCOL', 'VPS 续接回执与原上传任务不一致，已停止发布。');
+            phase = resumed.phase;
+            session.log?.(`SSH 已恢复同一上传任务：${phase}；继续校验与发布。`);
+        }
+    }
 }
 export async function pull(session, device, job, payload, onProgress, onBegin) {
     const { control, env } = session;
@@ -212,6 +272,7 @@ export async function pull(session, device, job, payload, onProgress, onBegin) {
     const correction = [...diff.missing, ...diff.changed];
     session.log?.(`本机内容校验：缺失 ${diff.missing.length}，不一致 ${diff.changed.length}，额外 ${diff.extra.length} 个文件`);
     if (correction.length) stats = addStats(stats, await transfer(env, 'pull', job, payload, onProgress, correction, session.log));
+    await onProgress?.({ stage: 'transferred', stats });
     await partialCleanup(payload); await verify(payload, manifest);
     session.log?.('下载文件 SHA-256 全量校验通过');
     await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);

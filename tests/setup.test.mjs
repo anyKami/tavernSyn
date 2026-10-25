@@ -19,7 +19,8 @@ async function fixture() {
     const st = path.join(root, 'Silly Tavern 测试'), state = path.join(root, 'device');
     await fs.mkdir(st); await fs.mkdir(path.join(st, 'data/default-user'), { recursive: true });
     await fs.symlink(path.join(ST, 'node_modules'), path.join(st, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
-    for (const file of ['package.json', 'src/server-main.js', 'src/server-startup.js', 'src/plugin-loader.js', 'public/scripts/st-context.js']) {
+    for (const file of ['package.json', 'src/server-main.js', 'src/server-startup.js', 'src/plugin-loader.js', 'src/users.js',
+        'src/middleware/userCss.js', 'src/middleware/webpack-serve.js', 'public/scripts/st-context.js']) {
         await fs.mkdir(path.dirname(path.join(st, file)), { recursive: true }); await fs.copyFile(path.join(ST, file), path.join(st, file));
     }
     const port = await new Promise(resolve => { const server = net.createServer(); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); });
@@ -100,10 +101,12 @@ test('fresh setup needs no device keys; reinstall preserves the saved password, 
     const repository = path.join(options.st, 'plugins/tavernsyn');
     assert.equal(result.repository, repository);
     assert.equal((await readJson(path.join(repository, '.tavernsyn-install.json'))).state, options.state);
-    assert.ok((await fs.readFile(result.launcher, 'utf8')).includes(path.join(repository, 'helper/launcher.mjs')));
+    assert.ok((await fs.readFile(result.launcher, 'utf8')).includes('TavernSyn-Startup.mjs'));
+    assert.ok(await exists(path.join(options.st, 'TavernSyn-Startup.mjs')));
     if (process.platform === 'win32') {
         const batch = await fs.readFile(result.launcher, 'utf8');
-        assert.ok(batch.includes('--open-browser yes')); assert.ok(batch.includes('--desktop-shortcut'));
+        assert.ok(batch.includes('--state')); assert.ok(batch.includes('--desktop-shortcut'));
+        assert.match((await readJson(path.join(repository, '.tavernsyn-install.json'))).codeFingerprint, /^[a-f0-9]{64}$/);
         assert.ok(await exists(path.join(repository, 'bin/create-desktop-shortcut.ps1')));
     }
     assert.ok(await exists(path.join(options.st, 'public/scripts/extensions/third-party/tavernsyn/ui/index.js')));
@@ -125,7 +128,7 @@ test('fresh setup needs no device keys; reinstall preserves the saved password, 
                 GIT_CONFIG_KEY_1: 'protocol.file.allow', GIT_CONFIG_VALUE_1: 'always',
             } });
         assert.ok(await exists(path.join(clone, '.git')));
-        assert.ok((await fs.readFile(path.join(downloadedOptions.st, 'Start-TavernSyn.cmd'), 'utf8')).includes(path.join(clone, 'helper/launcher.mjs')));
+        assert.ok((await fs.readFile(path.join(downloadedOptions.st, 'Start-TavernSyn.cmd'), 'utf8')).includes('TavernSyn-Startup.mjs'));
         // Reuse an installed clone when the entry script is downloaded separately.
         await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', downloaded,
             '-SillyTavernPath', options.st, '-StatePath', options.state]);

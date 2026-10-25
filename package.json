@@ -1,6 +1,6 @@
 {
   "name": "tavernsyn",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "SillyTavern 跨设备同步：受控重启、校验镜像和设备配置保留",
   "type": "module",

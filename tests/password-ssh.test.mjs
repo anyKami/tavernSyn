@@ -46,7 +46,7 @@ test('VPS SSH account rules permit password sync only inside Tailscale and prese
     assert.match(admin, /^forcecommand none$/m); assert.doesNotMatch(admin, /^denyusers \*$/m);
 });
 
-test('real SSH password login, automatic dataset, rsync push/pull and changed-host rejection', { timeout: 60000 }, async t => {
+test('real SSH password login, automatic dataset, rsync push/pull and changed-host rejection', { timeout: 120000 }, async t => {
     const runtime = process.env.TAVERNSYN_TEST_RUNTIME ?? path.join(PROJECT, '.local/msys64');
     if (process.platform === 'win32' && !await exists(path.join(runtime, 'usr/bin/ssh.exe'))) {
         t.skip('Set TAVERNSYN_TEST_RUNTIME to an existing MSYS2 runtime to exercise Windows OpenSSH'); return;
@@ -59,6 +59,7 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     await configureDevice(device, 'configure', { host: '100.100.100.100', user: 'tavernsyn', password });
     const serverPayload = path.join(device.root, 'server-payload'); await fs.mkdir(serverPayload);
     let dataset = randomUUID(), current = null, active = null, rsyncConfig, toolEnv, server, serverOpen = false, authAttempts = 0, finishMode = 'normal';
+    let inspectMode = 'normal', commitMode = 'normal', nextDataset;
     const connections = new Set(), children = new Set(), commands = [];
     const operations = [];
     async function startServer(port = 0) {
@@ -96,17 +97,30 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
                                 if (message.op === 'hello') result = { protocol: 1, capabilities: ['paused-jobs', 'job-bound-rsync'], dataset, current };
                                 else if (message.op === 'begin') {
                                     assert.equal(message.jobBound, true);
-                                    active = message;
+                                    if (message.resumeOnly) {
+                                        assert.equal(active?.job, message.job); assert.equal(message.dataset, dataset);
+                                        assert.equal(message.base, active.base);
+                                    } else {
+                                        active = { ...message, phase: 'transfer', generation: message.direction === 'push' ? message.job : current.generation };
+                                    }
                                     await fs.writeFile(path.join(device.root, 'rsync.conf'), [
                                         'use chroot = no', 'log file = /dev/null', 'timeout = 120', 'incoming chmod = Du+rwx,Fu+rw', '[payload]',
                                         `path = ${await toolEnv.posix(serverPayload)}`, 'list = false',
                                         `read only = ${message.direction === 'push' ? 'false' : 'true'}`, '',
                                     ].join('\n'));
-                                    result = { job: message.job, phase: 'transfer', generation: current?.generation ?? message.job, ...(message.direction === 'pull' ? { manifest: current.manifest } : {}) };
-                                } else if (message.op === 'inspect') result = difference(message.manifest, await scan(serverPayload));
+                                    result = { job: message.job, phase: active.phase, generation: active.generation, base: active.base, ...(message.direction === 'pull' ? { manifest: current.manifest } : {}) };
+                                } else if (message.op === 'inspect') {
+                                    if (inspectMode === 'disconnect') {
+                                        inspectMode = 'normal'; if (nextDataset) { dataset = nextDataset; nextDataset = undefined; }
+                                        client.destroy(); return;
+                                    }
+                                    result = difference(message.manifest, await scan(serverPayload));
+                                }
                                 else if (message.op === 'commit') {
                                     await verify(serverPayload, message.manifest);
                                     current = { generation: active.job, digest: message.manifest.digest, manifest: message.manifest };
+                                    active.phase = 'done';
+                                    if (commitMode === 'disconnect') { commitMode = 'normal'; client.destroy(); return; }
                                     result = { generation: current.generation, digest: current.digest };
                                 } else if (message.op === 'finish') {
                                     if (finishMode === 'disconnect') { client.destroy(); return; }
@@ -172,16 +186,34 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     assert.ok(transferLog.some(line => line.includes('校验通过')));
     assert.ok(!transferLog.join('\n').includes(password));
     assert.ok(authAttempts >= 4);
+    // Reproduce loss after a successful real rsync and a lost commit ACK. Both
+    // must authenticate again, reclaim this job and avoid another rsync round.
+    for (const mode of ['inspect', 'commit']) {
+        await fs.writeFile(path.join(payload, `reconnect-${mode}.txt`), `synthetic ${mode} disconnect`);
+        const expected = await scan(payload), progress = [], recoveryLog = [];
+        session = await connect(device, localEnvironment, line => recoveryLog.push(line));
+        if (mode === 'inspect') inspectMode = 'disconnect'; else commitMode = 'disconnect';
+        const transfersBefore = commands.filter(command => command.startsWith('tavernsyn-rsync-v2 ')).length;
+        const resumed = await push(session, device, randomUUID(), payload, expected, value => progress.push(value));
+        assert.equal(resumed.digest, expected.digest); await verify(serverPayload, expected);
+        assert.equal(commands.filter(command => command.startsWith('tavernsyn-rsync-v2 ')).length - transfersBefore, 1);
+        assert.ok(progress.some(value => value.stage === 'transferred' && value.stats.sentBytes > 0));
+        assert.ok(recoveryLog.some(line => line.includes('SSH 已恢复同一上传任务')));
+        assert.ok(recoveryLog.some(line => line.includes('SSH 控制进程退出')));
+        session.control.close();
+    }
+    // Later pull cases use the publication that now includes both fixture files.
+    const recoveredManifest = await scan(payload);
     // Reproduce a closed control SSH while real rsync has delivered all files.
     session = await connect(device, localEnvironment);
     const closedSession = session, closedLog = [];
     session.log = line => { closedLog.push(line); if (line === 'rsync 下载结束') closedSession.control.child.kill(); };
     const closedTarget = path.join(device.root, 'closed-control/download');
     const closedPull = await pull(session, device, randomUUID(), closedTarget);
-    await verify(closedTarget, manifest);
-    assert.equal(closedPull.manifest.digest, manifest.digest); assert.equal(session.control.closed, true);
+    await verify(closedTarget, recoveredManifest);
+    assert.equal(closedPull.manifest.digest, recoveredManifest.digest); assert.equal(session.control.closed, true);
     assert.ok(closedLog.some(line => line.includes('继续准备应用')));
-    assert.equal((await readJson(path.join(device.root, 'closed-control/manifest.json'))).digest, manifest.digest);
+    assert.equal((await readJson(path.join(device.root, 'closed-control/manifest.json'))).digest, recoveredManifest.digest);
     assert.equal((await readJson(path.join(device.root, 'closed-control/download.json'))).generation, current.generation);
     session.control.close();
     // Also cover a lost ACK after the server receives finish, and keep real
@@ -189,7 +221,7 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     finishMode = 'disconnect';
     session = await connect(device, localEnvironment);
     const lostTarget = path.join(device.root, 'lost-ack/download');
-    await pull(session, device, randomUUID(), lostTarget); await verify(lostTarget, manifest); session.control.close();
+    await pull(session, device, randomUUID(), lostTarget); await verify(lostTarget, recoveredManifest); session.control.close();
     finishMode = 'reject'; session = await connect(device, localEnvironment);
     await assert.rejects(pull(session, device, randomUUID(), path.join(device.root, 'rejected/download')), { code: 'PERMISSION' });
     session.control.close(); finishMode = 'normal';
@@ -213,6 +245,13 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     const pathTarget = path.join(device.root, 'PATH-download');
     await pull(session, device, randomUUID(), pathTarget); await verify(pathTarget, pathManifest);
     session.control.close(); pathSsh = false;
+    // Authentication to another dataset during recovery must not publish bytes.
+    session = await connect(device, localEnvironment);
+    const originalDataset = dataset, commitsBefore = operations.filter(op => op === 'commit').length;
+    inspectMode = 'disconnect'; nextDataset = randomUUID();
+    await assert.rejects(push(session, device, randomUUID(), payload, pathManifest), { code: 'REMOTE_DATASET' });
+    assert.equal(operations.filter(op => op === 'commit').length, commitsBefore);
+    session.control.close(); dataset = originalDataset;
     const pinned = device.remote.dataset; dataset = randomUUID();
     await assert.rejects(connect(device, localEnvironment), { code: 'REMOTE_DATASET' });
     assert.equal(device.remote.dataset, pinned); dataset = pinned;

@@ -1,3 +1,5 @@
+import { progressDetail } from './progress.js';
+
 const BASE = '/api/plugins/tavernsyn/';
 const tab = crypto.randomUUID();
 const labels = { IDLE: '就绪', PREFLIGHT: '正在检查环境', DOWNLOADING: '正在从 VPS 下载', VERIFYING: '正在校验文件', PREPARING: '正在准备插件', AWAITING_CONFIRMATION: '需要确认覆盖', AWAITING_SAVE: '正在确认保存', WAITING_PAGE: '正在交接重启任务', QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建快照', UPLOADING: '正在上传到 VPS', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复旧数据', SUCCEEDED: '同步完成', PREVIEW: '预览完成', PENDING_APPLY: '已下载，等待受控启动后应用', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
@@ -104,18 +106,13 @@ if (target) target.append(root);
 const form = root.querySelector('.ts-config');
 const field = name => form.elements.namedItem(name);
 function text(selector, value) { for (const parent of [root, dialog]) { const element = parent.querySelector(selector); if (element) element.textContent = value; } }
-function bytes(value) { return `${((value ?? 0) / 1024 / 1024).toFixed(2)} MiB`; }
 function render() {
     text('.ts-device', `${status.deviceName ?? ''}${status.host ? ` · ${status.host}` : ' · 尚未配置 VPS'}`);
     text('.ts-phase', localError ? '本次操作未开始，请处理提示' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : labels[status.phase] ?? status.phase);
     let detail = localError || status.error?.message || (status.phase === 'AWAITING_CONFIRMATION' ? status.reason : '') || status.note || '';
     if (status.summary) detail += `\n新增 ${status.summary.added}，修改 ${status.summary.changed}，删除 ${status.summary.deleted} 个文件。`;
-    if (status.progress && ['UPLOADING', 'DOWNLOADING', 'FAILED'].includes(status.phase)) {
-        detail += status.phase === 'FAILED'
-            ? `\n中断前文件传输 ${status.progress.percent}%；同步尚未完成。`
-            : `\n文件传输 ${status.progress.percent}%（传输后还需校验${status.direction === 'pull' ? '、应用和启动检查' : '和发布'}）`;
-    }
-    if (status.stats) detail += `\nrsync 已发送 ${bytes(status.stats.sentBytes)}，接收 ${bytes(status.stats.receivedBytes)}；不含 SSH/Tailscale 封装。`;
+    const progressText = progressDetail(status);
+    if (progressText) detail += `\n${progressText}`;
     text('.ts-detail', detail);
     const when = value => value ? new Date(value).toLocaleString() : '尚无';
     text('.ts-history', `最近推送：${when(status.history?.push)}\n最近拉取：${when(status.history?.pull)}\n最近恢复：${when(status.history?.restore)}`);

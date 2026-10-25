@@ -4,7 +4,7 @@ SillyTavern 跨设备手动同步插件，面向 Windows 和 Android Termux。�
 
 ## 当前版本
 
-**0.2.1，适配 SillyTavern 1.19.0。** 修复完整下载后的 SSH 误报、待应用弹窗、插件依赖锁不一致、自动保存导致确认失效，以及刷新页面后的保存交接。Termux 入口在健康检查通过后自动打开浏览器，关闭启动会话时停止酒馆。已通过 Windows 隔离验证、实际 Windows→Linux VPS 的续传发布，以及 Android 真机上的 VPS 快照校验、完整应用和受控重启。[更新记录](CHANGELOG.md)与[实测范围](docs/implementation.md)。
+**0.2.2，适配 SillyTavern 1.19.0。** Windows / Termux 在启动前检查稳定版本，自动更新 TavernSyn 后端和配套前端；Termux 安装器可接入兼容管理工具的选项 4。修复只读请求取消后的停机误判、上传后控制 SSH 断线恢复及增量进度显示。86 项测试与真实酒馆隔离验证通过，真实 VPS 的保留上传已续接、校验并发布；本次安卓启动更新与管理工具集成通过真实 Git 和 Bash 隔离回归，仍待手机实装复测。[更新记录](CHANGELOG.md)与[实测范围](docs/implementation.md)。
 
 本版本已清理旧 Git 历史，已有旧克隆请重新克隆后更新，见[历史清理说明](docs/security-audit-0.2.0.md#历史清理)。
 
@@ -23,6 +23,7 @@ SillyTavern 跨设备手动同步插件，面向 Windows 和 Android Termux。�
 - VPS 专用账号、密码登录与固定 SSH 命令、独立存储根、锁、只读下载代次和原子发布。
 - 传输中断后保留暂存并释放任务占用，支持继续上次上传；迟到的旧连接不能接入新任务。
 - Windows / Termux 启动成功后自动打开默认浏览器，控制台显示酒馆和推送/拉取详细日志；Windows 可创建桌面快捷方式。
+- 新安装生成的 Windows / Termux 入口在启动前检查 TavernSyn 稳定版本并更新后端与配套前端；Termux 安装器可将此流程接入兼容管理工具的选项 4。
 - 未受控启动时只下载待应用；下次受控启动并打开酒馆后继续保存、确认和应用。
 
 ## 开始使用
@@ -55,6 +56,7 @@ bash install.sh "$HOME/SillyTavern"
 - [断线重试、故障处理与手动恢复](docs/recovery.md)
 - [实现说明、实测结果与限制](docs/implementation.md)
 - [0.2.1 发布检查](docs/security-audit-0.2.1.md)
+- [0.2.2 启动更新检查](docs/security-audit-0.2.2.md)
 - [0.2.0 敏感信息扫描](docs/security-audit-0.2.0.md)
 - [设备配置示例](device.example.json)
 - [原始需求](docs/requirements-v2.md)与[第一阶段设计](docs/technical-design.md)

@@ -10,12 +10,13 @@ import { Control, push } from '../helper/transport.mjs';
 import { atomicJson, digest, exists, readJson, SyncError } from '../lib/io.mjs';
 import { fixture, FakeLifecycle, handoff, MemoryTransport } from './fixtures.mjs';
 
-async function interrupted(afterBegin) {
+async function interrupted(afterBegin, terminalStats) {
     const device = await fixture(), lifecycle = new FakeLifecycle();
     const remote = new MemoryTransport(path.join(device.root, 'vps'));
     await fs.mkdir(remote.root);
-    remote.push = async (_session, _device, job, _payload, _manifest, _progress, onBegin) => {
+    remote.push = async (_session, _device, job, _payload, _manifest, progress, onBegin) => {
         if (afterBegin) await onBegin({ job });
+        if (terminalStats) await progress({ stage: 'transferred', stats: terminalStats });
         throw new SyncError(afterBegin ? 'SSH' : 'BUSY', 'synthetic interruption');
     };
     const manager = new Manager(device, lifecycle, remote);
@@ -30,6 +31,13 @@ test('begin rejected by VPS does not falsely mark a remote task as owned', async
     assert.equal(status.remoteJob ?? null, null);
     assert.equal(status.snapshotReady, true);
     assert.equal(await exists(path.join(device.state, 'operation.lock')), false);
+});
+
+test('post-transfer failure preserves actual protocol statistics without losing the final update to throttling', async () => {
+    const stats = { sentBytes: 31006460, receivedBytes: 183831, literalBytes: 37960996, matchedBytes: 87200857, transferredFiles: 215 };
+    const { status } = await interrupted(true, stats);
+    assert.equal(status.phase, 'FAILED'); assert.equal(status.error.code, 'SSH');
+    assert.deepEqual(status.stats, stats); assert.equal(status.progress.stage, 'transferred');
 });
 
 test('interrupted upload resumes the same verified snapshot without stopping live ST again', async () => {
