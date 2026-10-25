@@ -4,7 +4,7 @@ SillyTavern 跨设备手动同步插件，面向 Windows 和 Android Termux。�
 
 ## 当前版本
 
-**0.2.2，适配 SillyTavern 1.19.0。** Windows / Termux 在启动前检查稳定版本，自动更新 TavernSyn 后端和配套前端；Termux 安装器可接入兼容管理工具的选项 4。修复只读请求取消后的停机误判、上传后控制 SSH 断线恢复及增量进度显示。86 项测试与真实酒馆隔离验证通过，真实 VPS 的保留上传已续接、校验并发布；本次安卓启动更新与管理工具集成通过真实 Git 和 Bash 隔离回归，仍待手机实装复测。[更新记录](CHANGELOG.md)与[实测范围](docs/implementation.md)。
+**0.2.3，适配 SillyTavern 1.19.0。** 插件依赖使用设备独立 npm 缓存，安装时和准备依赖前检查缓存是否可写，修复系统缓存无写入权限导致的拉取失败，并明确提示权限或文件占用错误。Windows 全部 91 项测试通过，包含真实 npm、首装和重装、Git 标签更新及 SSH/rsync；本次未做新的安卓真机验收。保留启动前自动更新、Termux 管理工具集成和上传断线恢复。[更新记录](CHANGELOG.md)与[实测范围](docs/implementation.md)。
 
 本版本已清理旧 Git 历史，已有旧克隆请重新克隆后更新，见[历史清理说明](docs/security-audit-0.2.0.md#历史清理)。
 

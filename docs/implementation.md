@@ -1,6 +1,12 @@
-# 0.2.2 实现与验证
+# 0.2.3 实现与验证
 
 日期：2026-10-25。适配 SillyTavern 1.19.0，固定 commit `06bde939fb1e9c4c8d8641d810f0a916b5bce127`。
+
+## 0.2.3 插件依赖缓存
+
+插件依赖通过命令行固定使用设备控制目录中的 `npm-cache`，覆盖系统和环境中配置的缓存位置。安装器与依赖准备共用预检查，实际验证缓存根目录、下载暂存和日志目录可以写入，拒绝目录联接等不安全路径。缓存不可用时在 npm 启动前停止；候选目录的权限或占用错误给出明确提示，保留已下载内容，不自动重复执行安装脚本。
+
+Windows 全部 91 项测试通过，包含真实 npm 缓存覆盖、异常目录拒绝，以及 PowerShell 首装和重装。实际失败的 `JS-Slash-Runner` 候选目录使用独立缓存完成安装，原始下载再次通过校验；酒馆数据未应用。详见[验证记录](test-results/dependency-cache-windows.json)。Windows 与 Termux 使用同一实现，本次未做新的安卓真机复测。
 
 ## 0.2.2 启动前更新与安装入口
 
@@ -61,6 +67,8 @@ Windows 启动入口在所属实例通过启动检查后自动用默认浏览器
 VPS 通过账号专属 SSH Match/ForceCommand 只接受固定入口及有限 JSON 协议，拒绝非 Tailscale 来源、交互式终端和转发。共享密码设备具有相同权限，设备 UUID 仅用于任务归属与恢复。控制会话 operation 独占锁、传输会话 transfer 共享锁，发布前进入 finalizing 再拿 transfer 独占锁。独立副本不硬链接旧代次，保留 current 与 previous 两份。
 
 ## 已运行测试
+
+0.2.3 的依赖缓存修复通过 Windows 全部 91 项测试（无失败、无跳过），包括真实 npm、缓存异常和目录联接拒绝，以及 PowerShell 首装和重装。详见[验证记录](test-results/dependency-cache-windows.json)。
 
 | 范围 | 结果 | 证据 |
 | --- | --- | --- |

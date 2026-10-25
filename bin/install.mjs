@@ -10,6 +10,7 @@ import { copyTree } from '../lib/manifest.mjs';
 import { checkCompatibility } from '../adapters/release-1.19.mjs';
 import { prepareRepository, repositoryPath } from '../lib/repository.mjs';
 import { codeFingerprint, termuxLauncher, windowsLauncher } from './startup.mjs';
+import { prepareDependencyCache } from '../lib/dependencies.mjs';
 
 export async function install({ st, state, profile = 'default-user', repository }) {
     requireThat(st && path.isAbsolute(st), 'INSTALL', '请使用 --st 指定酒馆完整路径。');
@@ -24,6 +25,7 @@ export async function install({ st, state, profile = 'default-user', repository 
         requireThat(who, 'ACL', '无法识别当前 Windows 用户，未创建含密码的设备状态。');
         await run('icacls', [state, '/inheritance:r', '/grant:r', `*${who}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F']);
     } else await fs.chmod(state, 0o700);
+    await prepareDependencyCache({ state });
     const configFile = path.join(directory, 'config.yaml');
     requireThat(await exists(configFile), 'INSTALL', '请先完成酒馆首次安装，生成 config.yaml。');
     const YAML = createRequire(path.join(directory, 'package.json'))('yaml');

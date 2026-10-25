@@ -6,7 +6,7 @@
   "js": "ui/index.js",
   "css": "ui/style.css",
   "author": "TavernSyn contributors",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "homePage": "https://github.com/anyKami/tavernSyn",
   "auto_update": false
 }

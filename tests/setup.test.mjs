@@ -52,6 +52,19 @@ test('a custom external data root cannot be used as the control directory', asyn
     assert.equal(await exists(data), false);
 });
 
+test('installation refuses an unusable private npm cache before replacing code or configuration', async () => {
+    const options = await fixture();
+    const config = path.join(options.st, 'config.yaml'), before = await fs.readFile(config, 'utf8');
+    const blocked = path.join(options.state, 'npm-cache/_logs');
+    await fs.mkdir(path.dirname(blocked), { recursive: true });
+    await fs.writeFile(blocked, 'keep existing file');
+    await assert.rejects(setupDevice(options), { code: 'DEPENDENCY_CACHE' });
+    assert.equal(await fs.readFile(config, 'utf8'), before);
+    assert.equal(await fs.readFile(blocked, 'utf8'), 'keep existing file');
+    assert.equal(await exists(path.join(options.st, 'plugins/tavernsyn')), false);
+    assert.equal(await exists(path.join(options.state, 'device.json')), false);
+});
+
 test('code migrates from the legacy wrapper into the standard plugin directory without overwriting other plugins', async () => {
     const options = await fixture(), repository = path.join(options.st, 'plugins/tavernsyn');
     await assert.rejects(repositoryPath(options.st, path.join(path.dirname(options.st), 'outside')), { code: 'INSTALL' });
@@ -80,6 +93,8 @@ test('fresh setup needs no device keys; reinstall preserves the saved password, 
             '-SillyTavernPath', options.st, '-StatePath', options.state, '-RuntimePath', runtime], { onOutput: text => { output += text; } })
             .catch(error => { context.diagnostic(output); throw error; });
     } else await setupDevice(options);
+    assert.ok(await exists(path.join(options.state, 'npm-cache/_cacache/tmp')));
+    assert.ok(await exists(path.join(options.state, 'npm-cache/_logs')));
     const cli = await run(process.execPath, [path.join(PROJECT, 'bin/configure.mjs'), '--state', options.state, '--host', '100.100.100.100'],
         { input: 'synthetic reinstall password\n' });
     assert.ok(!`${cli.stdout}${cli.stderr}`.includes('synthetic reinstall password'));
@@ -96,10 +111,13 @@ test('fresh setup needs no device keys; reinstall preserves the saved password, 
     const result = await setupDevice({ ...options, ...(process.platform === 'win32' ? { runtime } : {}) }), after = await readJson(file);
     assert.equal(result.deviceId, saved.deviceId); assert.equal(result.configured, true); assert.equal(after.customField, 'keep');
     assert.deepEqual(after.remote, saved.remote); assert.equal((await readJson(passwordFile)).password, 'synthetic reinstall password');
+    assert.ok(await exists(path.join(options.state, 'npm-cache/_cacache/tmp')));
     assert.equal(await exists(privateFile), false); assert.equal(await fs.readFile(settingsFile, 'utf8'), settingsBefore);
     assert.ok(await exists(result.launcher)); assert.ok(await exists(path.join(options.st, 'plugins/tavernsyn/index.mjs')));
     const repository = path.join(options.st, 'plugins/tavernsyn');
     assert.equal(result.repository, repository);
+    const installedDependencies = await import(pathToFileURL(path.join(repository, 'lib/dependencies.mjs')));
+    assert.equal(await installedDependencies.prepareDependencyCache({ state: options.state }), path.join(options.state, 'npm-cache'));
     assert.equal((await readJson(path.join(repository, '.tavernsyn-install.json'))).state, options.state);
     assert.ok((await fs.readFile(result.launcher, 'utf8')).includes('TavernSyn-Startup.mjs'));
     assert.ok(await exists(path.join(options.st, 'TavernSyn-Startup.mjs')));

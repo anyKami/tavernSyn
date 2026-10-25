@@ -1,0 +1,24 @@
+{
+  "date": "2026-10-25",
+  "status": "passed",
+  "platform": "Windows",
+  "release": "0.2.3",
+  "automatedTests": { "passed": 91, "failed": 0, "skipped": 0 },
+  "dependencyTests": { "passed": 9, "failed": 0 },
+  "checks": [
+    "Real offline npm succeeds despite an unusable configured cache",
+    "Cache preflight tests write access in download, temporary and log directories",
+    "An unusable cache stops before npm or candidate lock repair",
+    "Linked cache paths are rejected without writing to their target",
+    "A locked candidate provides a useful error without replaying install scripts",
+    "Actual PowerShell installation and reinstall create the private cache and preserve configuration",
+    "The installed dependency module exposes the same cache preparation logic"
+  ],
+  "productionCandidate": {
+    "plugin": "JS-Slash-Runner",
+    "privateCacheNpmCi": "passed in the preceding cache-isolation verification",
+    "sealedDownloadVerified": true,
+    "liveDataApplied": false
+  },
+  "android": "Shared installer and runtime logic; no new Android physical-device verification in this change"
+}

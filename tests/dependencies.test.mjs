@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { installPluginDependencies } from '../lib/dependencies.mjs';
+import { installPluginDependencies, prepareDependencyCache } from '../lib/dependencies.mjs';
 import { atomicJson, readJson, run, SyncError } from '../lib/io.mjs';
 import { fixture } from './fixtures.mjs';
 
@@ -88,4 +88,56 @@ test('actual offline npm repairs the candidate lock, preserves the sealed source
     assert.equal(await fs.readFile(path.join(source, 'package-lock.json'), 'utf8'), sourceLock);
     assert.equal((await readJson(path.join(directory, 'package-lock.json'))).packages[''].dependencies['fixture-dependency'], 'file:../fixture-dependency');
     assert.equal((await installPluginDependencies(device, directory, { log() {} }, execute)).repairedLock, false);
+});
+
+test('actual npm uses the private device cache even when the configured cache is unusable', { timeout: 60000 }, async () => {
+    const { device, directory, job } = await dependencyFixture();
+    const dependency = path.join(path.dirname(directory), 'fixture-dependency');
+    await atomicJson(path.join(dependency, 'package.json'), { name: 'fixture-dependency', version: '1.0.0' });
+    const pkg = await readJson(path.join(directory, 'package.json'));
+    pkg.dependencies['fixture-dependency'] = 'file:../fixture-dependency';
+    await atomicJson(path.join(directory, 'package.json'), pkg);
+    await fs.unlink(path.join(directory, 'package-lock.json'));
+    const blockedCache = path.join(job, 'blocked-cache');
+    await fs.writeFile(blockedCache, 'not a directory');
+    const execute = (node, args, options) => run(node, args, { ...options, env: {
+        npm_config_cache: blockedCache, npm_config_offline: 'true', npm_config_update_notifier: 'false',
+    } });
+    await installPluginDependencies(device, directory, { log() {} }, execute);
+    assert.equal((await readJson(path.join(directory, 'node_modules/fixture-dependency/package.json'))).version, '1.0.0');
+    assert.equal(await fs.readFile(blockedCache, 'utf8'), 'not a directory');
+    assert.ok((await fs.readdir(path.join(device.state, 'npm-cache/_logs'))).length);
+});
+
+test('cache preflight rejects an unusable download directory before npm or lock repair can run', async () => {
+    const { device, directory } = await dependencyFixture();
+    const blocked = path.join(device.state, 'npm-cache/_cacache/tmp');
+    await fs.mkdir(path.dirname(blocked), { recursive: true });
+    await fs.writeFile(blocked, 'keep existing file');
+    const lock = await fs.readFile(path.join(directory, 'package-lock.json'), 'utf8');
+    let invoked = false;
+    await assert.rejects(installPluginDependencies(device, directory, { log() {} }, async () => { invoked = true; }),
+        error => error.code === 'DEPENDENCY_CACHE' && /npm.*缓存.*写入权限/.test(error.message));
+    assert.equal(invoked, false);
+    assert.equal(await fs.readFile(blocked, 'utf8'), 'keep existing file');
+    assert.equal(await fs.readFile(path.join(directory, 'package-lock.json'), 'utf8'), lock);
+});
+
+test('cache preflight refuses a linked cache without writing into the link target', async () => {
+    const { device } = await dependencyFixture();
+    const outside = path.join(device.root, 'other-cache');
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(device.state, 'npm-cache'), process.platform === 'win32' ? 'junction' : 'dir');
+    await assert.rejects(prepareDependencyCache(device), { code: 'UNSAFE_PATH' });
+    assert.deepEqual(await fs.readdir(outside), []);
+});
+
+test('a locked candidate reports an actionable error and never reruns install scripts', async () => {
+    const { device, directory } = await dependencyFixture();
+    let invoked = 0;
+    await assert.rejects(installPluginDependencies(device, directory, { log() {} }, async (_node, _args, options) => {
+        invoked++; options.onOutput('npm error code EPERM\nnpm error syscall unlink\n');
+        throw new SyncError('PROCESS_FAILED', 'synthetic locked candidate');
+    }), error => error.code === 'PLUGIN_DEPENDENCIES' && /npm EPERM.*文件占用.*尚未应用数据/.test(error.message));
+    assert.equal(invoked, 1);
 });
