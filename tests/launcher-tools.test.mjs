@@ -9,6 +9,7 @@ import { Manager } from '../helper/manager.mjs';
 import { PROJECT } from '../lib/device.mjs';
 import { run, exists } from '../lib/io.mjs';
 import { fixture, temporary, MemoryTransport, FakeLifecycle, handoff } from './fixtures.mjs';
+import { snapshot } from '../lib/snapshot.mjs';
 
 test('browser opener delegates only a plain local URL to the default browser', async () => {
     const windows = browserCommand('http://127.0.0.1:8000', 'win32');
@@ -51,6 +52,10 @@ test('both push and pull emit task phases, manifest counts, checks and successfu
     await fs.mkdir(remote.root);
     const lines = [], manager = new Manager(device, new FakeLifecycle(), remote, (job, line) => lines.push(`${job.direction}: ${line}`));
     await manager.start({ direction: 'push', tab: randomUUID() }); await handoff(manager); await manager.done;
+    const incoming = await fixture(); incoming.stConfig.backups.common.numberOfBackups = 4;
+    await fs.writeFile(incoming.yamlPath, incoming.YAML.stringify(incoming.stConfig));
+    const payload = path.join(remote.root, randomUUID()), frozen = await snapshot(incoming, payload);
+    remote.last = { payload, manifest: frozen.manifest }; remote.current = { generation: randomUUID(), digest: frozen.manifest.digest };
     await manager.start({ direction: 'pull', tab: randomUUID() }); await handoff(manager); await manager.done;
     const text = lines.join('\n');
     for (const phase of ['push: 阶段：上传到 VPS', 'pull: 阶段：从 VPS 下载', 'pull: 阶段：校验文件', 'pull: 阶段：应用更新']) assert.ok(text.includes(phase), phase);

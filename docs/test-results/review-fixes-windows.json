@@ -1,0 +1,64 @@
+{
+  "status": "passed-with-platform-skips",
+  "release": "0.2.5",
+  "date": "2026-10-26",
+  "baseVersion": "0.2.4",
+  "baseCommit": "31728933ccbd203018ece4da0187d2b149437f5c",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "nodeTests": {
+    "total": 131,
+    "passed": 130,
+    "failed": 0,
+    "skipped": 1
+  },
+  "pythonTests": {
+    "total": 26,
+    "passed": 21,
+    "failed": 0,
+    "skipped": 5
+  },
+  "actualSillyTavern": {
+    "status": "passed",
+    "version": "1.19.0",
+    "commit": "06bde939fb1e9c4c8d8641d810f0a916b5bce127",
+    "transport": "MemoryTransport simulation, not a live VPS",
+    "report": "implementation-windows.json",
+    "checks": 28
+  },
+  "faultInjection": [
+    "Published push followed by cache ENOSPC",
+    "History failure after payload moved to cache",
+    "Final status write failure with durable outcome recovery",
+    "Applied pull followed by history failure without rollback of committed data",
+    "Lost publication ACK reconciled only with exact generation and manifest digest",
+    "Committed apply journal recovery before outcome or final status persistence",
+    "Operation lock cleanup failure keeps successful result and can be retried",
+    "Status write queue recovers after one failed write",
+    "Node and Python atomic write, fsync and rename failures preserve old file and remove temporary file",
+    "VPS post-publication record and generation maintenance failures retain published result"
+  ],
+  "otherCoverage": [
+    "Unauthenticated HEAD epoch probe against real authenticated ST",
+    "Windows Git executable mode and non-Git POSIX metadata forwarding",
+    "Unmanaged pull runs no candidate preparation or npm; controlled continuation prepares once",
+    "User binary attachment allowed across platforms while plugin runtime ABI guard remains",
+    "Browser resource entry points tested in VM; synthetic plugin HTTP resource routing tested on real ST",
+    "Chat over 64 MiB verified with 32 MiB Node old-space limit",
+    "VPS storage statistics leave all store file contents unchanged"
+  ],
+  "limits": [
+    "Actual POSIX file execution skipped on Windows; covered by POSIX-specific test for CI",
+    "Linux flock and read-only-descriptor tests skipped on Windows",
+    "No Android physical device, live VPS deployment or full browser interaction acceptance",
+    "Parser-created API script tags, document.write, independent iframe and blob Worker paths may need plugin-specific URL binding",
+    "No user installation deployment performed during verification"
+  ],
+  "finalTargetedNodeTests": {
+    "total": 9,
+    "passed": 9,
+    "failed": 0,
+    "skipped": 0,
+    "scope": "completion after final result-return adjustment"
+  }
+}

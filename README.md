@@ -4,7 +4,7 @@ SillyTavern 跨设备手动同步插件，面向 Windows 和 Android Termux。�
 
 ## 当前版本
 
-**0.2.4，适配 SillyTavern 1.19.0。** 同步确认保存并进入等待页后，遇到请求排空失败会自动断开旧实例连接、正常清理退出，再继续同一次同步。保存失败、控制通道错误、清理超时或异常退出仍停止同步；正在生成或其他未完成请求可能因此中断。99 项测试与 24 项真实酒馆隔离检查通过。保留独立 npm 缓存、启动前自动更新、Termux 管理工具集成和上传断线恢复。[更新记录](CHANGELOG.md)与[实测范围](docs/implementation.md)。
+**0.2.5，适配 SillyTavern 1.19.0。** 优化 Git 插件增量与无变化同步，支持缺少缓存时复用本机文件；修复执行权限丢失、重复启动识别、提交成功后误报失败和重复依赖准备。增加“核对同步结果”与 VPS 只读空间报告。Windows Node 测试 130 项、Python 测试 21 项、真实酒馆隔离检查 28 项通过，6 项平台专项跳过。[更新记录](CHANGELOG.md)、[增量实测](docs/incremental-sync.md)与[审查修复及限制](docs/review-fixes.md)。
 
 本版本已清理旧 Git 历史，已有旧克隆请重新克隆后更新，见[历史清理说明](docs/security-audit-0.2.0.md#历史清理)。
 
@@ -55,6 +55,8 @@ bash install.sh "$HOME/SillyTavern"
 - [同步范围、设备字段与插件恢复](docs/scope.md)
 - [断线重试、故障处理与手动恢复](docs/recovery.md)
 - [实现说明、实测结果与限制](docs/implementation.md)
+- [0.2.5 增量优化实测](docs/incremental-sync.md)
+- [0.2.5 审查修复与故障注入](docs/review-fixes.md)
 - [0.2.1 发布检查](docs/security-audit-0.2.1.md)
 - [0.2.2 启动更新检查](docs/security-audit-0.2.2.md)
 - [0.2.0 敏感信息扫描](docs/security-audit-0.2.0.md)
@@ -72,6 +74,6 @@ node tests/rsync.mjs
 node tests/integration.mjs
 ```
 
-集成测试运行真实酒馆副本，远端由内存适配器模拟。`password-ssh.test.mjs` 另用真实 OpenSSH、rsync 和本机 SSH 测试服务器验证密码登录、双向传输、错误密码及服务器身份变化。它不代替真实 Tailscale 和 Linux dispatcher/flock 验收。GitHub Actions 提供 Linux 检查入口，尚未在远端运行。
+集成测试运行真实酒馆副本，远端由内存适配器模拟。`password-ssh.test.mjs` 另用真实 OpenSSH、rsync 和本机 SSH 测试服务器验证密码登录、双向传输、错误密码及服务器身份变化。它不代替真实 Tailscale 和 Linux dispatcher/flock 验收。GitHub Actions 提供 Linux 检查入口；本地验证范围与平台跳过项见实测记录。
 
 镜像含明文聊天和酒馆 API 密钥，仅供可信设备使用。同步账号密码单独保存在设备受限控制目录，不进入镜像、不在接口中回显；不要将设备状态或密码文件提交到 Git。

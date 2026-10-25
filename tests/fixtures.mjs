@@ -30,7 +30,9 @@ export async function fixture() {
 }
 export class MemoryTransport {
     constructor(root) { this.root = root; this.current = null; this.last = null; }
-    async connect() { return { hello: { current: this.current, dataset: 'fixture', protocol: 1 }, control: { close() {} } }; }
+    async connect(device) { return { hello: { current: this.current, dataset: device?.remote?.dataset ?? 'fixture', protocol: 1 }, control: {
+        close() {}, request: async op => { if (op !== 'hello') throw new Error('Unexpected memory control request'); return { current: this.current, dataset: device?.remote?.dataset ?? 'fixture' }; },
+    } }; }
     async push(_session, _device, job, payload, manifest, _progress, onBegin) {
         await onBegin?.({ job });
         await verify(payload, manifest);

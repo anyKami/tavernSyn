@@ -58,6 +58,7 @@ root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle in
 <div class="inline-drawer-content"><p class="ts-device"></p><p class="ts-phase" role="status">正在连接同步助手……</p>
 <div class="ts-actions"><button class="menu_button ts-push">推送到 VPS</button><button class="menu_button ts-pull">从 VPS 拉取</button>
 <button type="button" class="menu_button ts-resume-upload" hidden>继续上次上传</button><button type="button" class="menu_button ts-resume-apply" hidden>继续应用已下载文件</button></div>
+<button type="button" class="menu_button ts-reconcile" hidden>核对同步结果</button>
 <button type="button" class="menu_button ts-restore" disabled>恢复上一版</button><small class="ts-recovery"></small>
 <p class="ts-detail"></p><small class="ts-history"></small><details class="ts-settings"><summary>设置与检查 · VPS 配置</summary>
 <form class="ts-config"><fieldset disabled><legend>VPS 连接</legend>
@@ -122,8 +123,10 @@ function render() {
     dialog.querySelector('.ts-cancel').hidden = !['AWAITING_CONFIRMATION', 'AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);
     const terminal = ['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
     for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy;
-    root.querySelector('.ts-resume-upload').hidden = !(status.phase === 'FAILED' && status.direction === 'push' && status.snapshotReady === true);
+    root.querySelector('.ts-resume-upload').hidden = !(status.phase === 'FAILED' && !status.commit && status.direction === 'push' && status.snapshotReady === true);
     root.querySelector('.ts-resume-upload').disabled ||= !status.managed;
+    root.querySelector('.ts-reconcile').hidden = !(status.maintenancePending || (status.phase === 'FAILED' && status.direction === 'push' && status.snapshotReady));
+    root.querySelector('.ts-reconcile').disabled ||= !status.managed;
     form.querySelector('fieldset').disabled = !configLoaded || !terminal || starting || setupBusy;
     root.querySelector('.ts-restore').disabled ||= !status.managed || !status.recovery?.available || ['PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
     if (!status.managed && status.recovery?.available) text('.ts-recovery', '有恢复副本；请从 TavernSyn 入口启动酒馆后恢复。');
@@ -145,6 +148,13 @@ async function begin(direction, preview = false) {
 }
 root.querySelector('.ts-push').onclick = () => begin('push');
 root.querySelector('.ts-pull').onclick = () => begin('pull');
+root.querySelector('.ts-reconcile').onclick = async () => {
+    if (starting || setupBusy) return;
+    starting = true; localError = ''; render();
+    try { status = { ...status, ...await api('reconcile', { id: status.id }) }; }
+    catch (error) { localError = error.message; }
+    finally { starting = false; render(); }
+};
 root.querySelector('.ts-resume-upload').onclick = async () => {
     if (starting || setupBusy) return;
     starting = true; localError = '';

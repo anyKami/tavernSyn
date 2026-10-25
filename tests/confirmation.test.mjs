@@ -20,6 +20,14 @@ async function published() {
 
 test('pull inventories the current local data after preparation finishes', async () => {
     const { device, remote } = await published();
+    // A genuinely new remote publication must take the preparation path; an
+    // identical publication now correctly completes without preparing anything.
+    const incoming = await fixture(); incoming.stConfig.backups.common.numberOfBackups = 4;
+    await fs.writeFile(incoming.yamlPath, incoming.YAML.stringify(incoming.stConfig));
+    const payload = path.join(remote.root, randomUUID());
+    const frozen = await snapshot(incoming, payload);
+    remote.last = { payload, manifest: frozen.manifest };
+    remote.current = { generation: randomUUID(), digest: frozen.manifest.digest };
     let changed = false;
     const file = path.join(device.dataRoot, device.profile, 'worlds/book.json');
     const manager = new Manager(device, new FakeLifecycle(), remote, (_job, line) => {

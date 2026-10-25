@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
-import { browserEpoch, isReadOnlyScript } from './epoch.mjs';
+import { browserEpoch, isReadOnlyScript, epochResource, RESOURCE_EPOCH } from './epoch.mjs';
 import { createDrainTracker } from './drain.mjs';
 import { loadDevice } from '../lib/device.mjs';
 import { requireThat } from '../lib/io.mjs';
@@ -84,12 +84,17 @@ for (const module of [http, https]) {
         if (typeof listener === 'function') args[index] = (request, response) => {
             response.setHeader('x-tavernsyn-epoch', nonce);
             const url = new URL(request.url, device.origin), pathname = url.pathname;
+            const resource = epochResource(request.method, url, request.headers, nonce, device.origin);
+            if (resource.redirect) { response.writeHead(307, { location: resource.redirect, 'cache-control': 'no-store' }); response.end(); return; }
             // Browser script/module/worker requests cannot carry our fetch/XHR header.
             // Only the reviewed read-only Cocktail+ assets bypass the epoch gate.
             const readable = ['/api/plugins/tavernsyn/status', '/api/plugins/tavernsyn/wait', '/api/users/login'].includes(pathname)
-                || isReadOnlyScript(request.method, url);
+                || isReadOnlyScript(request.method, url) || resource.allowed;
             if (pathname.startsWith('/api/') && !readable && request.headers['x-tavernsyn-epoch'] !== nonce) {
                 response.writeHead(409, { 'content-type': 'application/json' }); response.end('{"error":"TAVERNSYN_STALE_PAGE","message":"请刷新页面后重试。"}'); return;
+            }
+            if (resource.allowed && url.searchParams.has(RESOURCE_EPOCH)) {
+                url.searchParams.delete(RESOURCE_EPOCH); request.url = url.pathname + url.search;
             }
             if (state.paused) { response.writeHead(503, { 'retry-after': '2' }); response.end('TavernSyn 正在安全重启'); return; }
             drain.track(request, response);

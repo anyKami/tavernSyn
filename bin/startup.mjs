@@ -242,7 +242,7 @@ export async function autoUpdate({ install, state, repositoryUrl = REPOSITORY, c
     }
 }
 
-async function reuseRunning(install, state) {
+export async function reuseRunning(install, state) {
     const file = path.join(state, 'instance.lock');
     if (!await exists(file)) return false;
     const instance = await read(file);
@@ -251,10 +251,11 @@ async function reuseRunning(install, state) {
     const config = YAML.parse(await fs.readFile(path.join(install, 'config.yaml'), 'utf8'));
     const origin = `http://127.0.0.1:${Number(config.port ?? 8000)}`;
     let response;
-    try { response = await fetch(origin + '/api/plugins/tavernsyn/status', { redirect: 'manual', signal: AbortSignal.timeout(3000) }); }
+    try { response = await fetch(origin + '/', { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(3000) }); }
     catch { return false; }
-    const status = await response.json().catch(() => ({}));
-    if (response.status !== 200 || status.managed !== true || typeof instance.nonce !== 'string' || status.epoch !== instance.nonce) throw fail('BUSY', '现有服务的受控实例标识不匹配，未启动重复酒馆。');
+    // Login redirects/403s are normal before a browser has authenticated. The
+    // bootstrap header identifies the owned process without accessing user APIs.
+    if (!/^[a-f0-9-]{36}$/.test(instance.nonce ?? '') || response.headers.get('x-tavernsyn-epoch') !== instance.nonce) throw fail('BUSY', '现有服务的受控实例标识不匹配，未启动重复酒馆。');
     console.log(`受控酒馆已在运行：${origin}；关闭原启动窗口后，再次启动即可检查更新。`);
     try {
         const { openBrowser } = await import(pathToFileURL(path.join(install, 'plugins/tavernsyn/helper/browser.mjs')).href);

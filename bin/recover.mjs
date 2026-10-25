@@ -4,6 +4,7 @@ import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { loadDevice } from '../lib/device.mjs';
 import { atomicJson, cliOptions, exists, readJson, requireThat } from '../lib/io.mjs';
+import { completedStatus, readCompletion, validateCompletion } from '../lib/completion.mjs';
 
 export async function recoverStopped(device) {
     await new Promise((resolve, reject) => {
@@ -23,9 +24,16 @@ export async function recoverStopped(device) {
     const statusFile = path.join(device.state, 'status.json');
     if (await exists(statusFile)) {
         const status = await readJson(statusFile);
+        const receipt = status.id ? await readCompletion(device, status.id) : null;
+        const applyFile = path.join(device.state, 'apply.json');
+        const journal = await exists(applyFile) ? await readJson(applyFile) : null;
+        const applied = journal?.phase === 'committed' && journal.jobRoot === path.join(device.state, 'jobs', status.id ?? '')
+            && journal.completion ? validateCompletion(device, journal.completion, status.id) : null;
+        if ((receipt || applied) && status.phase !== 'SUCCEEDED') {
+            await atomicJson(statusFile, completedStatus(receipt ?? applied, ['finalization']));
+            return;
+        }
         if (!['SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'IDLE'].includes(status.phase)) {
-            const applyFile = path.join(device.state, 'apply.json');
-            const journal = await exists(applyFile) ? await readJson(applyFile) : null;
             const needsRollback = journal && !['committed', 'rolled-back'].includes(journal.phase);
             await atomicJson(statusFile, { ...status, phase: needsRollback ? 'RECOVERY_REQUIRED' : 'FAILED', error: { code: 'INTERRUPTED', message: needsRollback ? '已清理死进程锁；受控启动将先恢复未完成替换。' : '上次任务中断，已确认进程退出。可恢复或中止原远端任务。' } });
         }

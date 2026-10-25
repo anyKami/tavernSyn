@@ -11,6 +11,7 @@ import { connect } from '../helper/transport.mjs';
 import { configuration, configureDevice, withDeviceLock } from '../lib/connection.mjs';
 import { recoveryStatus } from '../helper/apply.mjs';
 import { progressDetail } from '../ui/progress.js';
+import { chatReceipt } from '../lib/chat-receipt.mjs';
 
 export const info = { id: 'tavernsyn', name: 'TavernSyn', description: '跨设备同步与受控重启' };
 let lease;
@@ -29,9 +30,9 @@ export async function savedReceipt(device, body) {
         const id = plainName(body.chat.id);
         const chatFile = body.chat.type === 'group' ? path.join(device.dataRoot, device.profile, 'group chats', `${id}.jsonl`)
             : path.join(device.dataRoot, device.profile, 'chats', plainName(body.chat.avatar).replace(/\.png$/i, ''), `${id}.jsonl`);
-        const lines = (await fsp.readFile(chatFile, 'utf8')).split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
-        requireThat(digest({ messages: lines.slice(1), metadata: lines[0]?.chat_metadata ?? {} }) === body.chat.digest, 'SAVE_PENDING', '聊天内容或元数据尚未与页面一致。');
-        files.push({ path: chatFile, sha256: await hashFile(chatFile) });
+        const chat = await chatReceipt(chatFile);
+        requireThat(chat.digest === body.chat.digest, 'SAVE_PENDING', '聊天内容或元数据尚未与页面一致。');
+        files.push({ path: chatFile, sha256: chat.sha256 });
     }
     return { nonce: body.nonce, created: Date.now(), files };
 }
@@ -83,8 +84,16 @@ export async function init(router) {
         catch (error) { response.status(error.code === 'INPUT' || error.code === 'FILENAME' ? 400 : 409).json({ error: error.code ?? 'FAILED', message: error.code ? error.message : '操作失败，请检查本机日志；未输出敏感数据。' }); }
     };
     router.get('/status', endpoint(async (_req, res) => {
-        const history = await exists(path.join(device.state, 'history.json')) ? await readJson(path.join(device.state, 'history.json')) : {};
-        res.json({ ...await helper('status'), managed: !!managed, deviceName: device.deviceName, host: device.remote?.host ?? '', configured: (await helper('configuration')).configured, epoch: nonce, history, recovery: await helper('recovery'), ...(managed?.drain ? { drain: managed.drain.summary() } : {}) });
+        const status = await helper('status');
+        let history = status.history ?? {}, historyUnavailable = false;
+        try { if (await exists(path.join(device.state, 'history.json'))) history = await readJson(path.join(device.state, 'history.json')); }
+        catch { historyUnavailable = true; }
+        // History is optional bookkeeping. Its I/O failure must not hide a
+        // confirmed publish/apply result or prevent its repair button loading.
+        res.json({ ...status, managed: !!managed, deviceName: device.deviceName, host: device.remote?.host ?? '', configured: (await helper('configuration')).configured, epoch: nonce, history, recovery: await helper('recovery'),
+            ...(historyUnavailable ? { historyUnavailable: true, ...(status.commit ? { maintenancePending: true,
+                maintenance: { ...status.maintenance, pending: [...new Set([...(status.maintenance?.pending ?? []), 'history'])] } } : {}) } : {}),
+            ...(managed?.drain ? { drain: managed.drain.summary() } : {}) });
     }));
     router.post('/check', endpoint(async (_req, res) => res.json(await helper('check'))));
     router.get('/configuration', endpoint(async (_req, res) => res.json(await helper('configuration'))));
@@ -116,7 +125,7 @@ export async function init(router) {
         }
         res.status(202).json(await helper('start', body));
     }));
-    for (const action of ['ready', 'page', 'confirm', 'cancel', 'resume-pending', 'resume-upload']) {
+    for (const action of ['ready', 'page', 'confirm', 'cancel', 'resume-pending', 'resume-upload', 'reconcile']) {
         router.post(`/${action}`, endpoint(async (req, res) => {
             requireThat(Object.keys(req.body).every(k => ['id', 'receipt', 'tab', 'ticket', 'token'].includes(k)), 'INPUT', '不接受未定义的任务参数。');
             if (action === 'confirm' && managed && req.body.tab) {

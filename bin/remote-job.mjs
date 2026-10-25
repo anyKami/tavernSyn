@@ -5,6 +5,7 @@ import { loadDevice, uuidPattern } from '../lib/device.mjs';
 import { atomicJson, cliOptions, digest, exists, readJson, requireThat } from '../lib/io.mjs';
 import { verify } from '../lib/manifest.mjs';
 import { connect, push, pull } from '../helper/transport.mjs';
+import { Manager } from '../helper/manager.mjs';
 
 let lock, handle, session;
 try {
@@ -37,12 +38,9 @@ try {
         const manifest = await readJson(path.join(root, 'manifest.json')); await verify(payload, manifest);
         const published = await push(session, device, options.job, payload, manifest);
         const metadata = await readJson(path.join(payload, 'environment.json'));
-        const historyFile = path.join(device.state, 'history.json'), history = await exists(historyFile) ? await readJson(historyFile) : {};
-        history.push = new Date().toISOString();
-        await atomicJson(path.join(device.state, 'baseline.json'), { connection, local: metadata.sourceState, remote: { generation: published.generation, digest: published.digest }, direction: 'push', at: history.push });
-        await atomicJson(historyFile, history);
-        await save({ phase: 'SUCCEEDED', stats: published.stats, remote: { generation: published.generation, digest: published.digest },
-            remoteJob: null, error: null, progress: null, snapshotReady: false, history, note: '原静态快照已发布；快照后改动留待下次推送。' });
+        const manager = new Manager(device, null); manager.job = status;
+        await manager.success(metadata.sourceState, { generation: published.generation, digest: published.digest }, published.stats, { cache: true });
+        if (manager.job.maintenancePending) console.log(manager.job.note);
     } else {
         const downloaded = await pull(session, device, options.job, payload);
         await save({ phase: 'PENDING_APPLY', jobRoot: root, remoteJob: null, error: null, progress: null, stats: downloaded.stats, remote: { generation: downloaded.generation, digest: downloaded.manifest.digest }, note: '已恢复下载并通过校验，等待受控入口继续应用。' });

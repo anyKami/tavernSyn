@@ -42,12 +42,19 @@ def atomic(file, value):
     file = Path(file)
     temp = file.with_name(file.name + "." + str(uuid.uuid4()) + ".tmp")
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-        json.dump(value, stream, ensure_ascii=False, indent=2)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temp, file)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, file)
+    except BaseException:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass  # Keep the original failure; never remove the valid destination.
+        raise
     if os.name != "nt":
         fd = os.open(file.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -374,12 +381,25 @@ class Store:
             current = self.current()
             if current and current["generation"] != job["generation"]:
                 atomic(self.root / "previous.json", {k: current[k] for k in ("generation", "digest")})
-            atomic(self.root / "current.json", {"generation": job["generation"], "digest": manifest["digest"]})
+            maintenance = []
+            try:
+                atomic(self.root / "current.json", {"generation": job["generation"], "digest": manifest["digest"]})
+            except OSError:
+                # A directory fsync can fail after replace already changed the
+                # pointer. Verify the committed fact before reporting its result.
+                published = self.current()
+                if not published or published["generation"] != job["generation"] or published["digest"] != manifest["digest"]:
+                    raise
+                maintenance.append("publication-sync")
             job["phase"] = "done"
-            self.save(job)
-            self.parked_file(job["job"]).unlink(missing_ok=True)
-            self.gc()
-            return self.describe(job) | {"digest": manifest["digest"]}
+            for name, action in (("job-record", lambda: self.save(job)),
+                                 ("paused-record", lambda: self.parked_file(job["job"]).unlink(missing_ok=True)),
+                                 ("generations", self.gc)):
+                try:
+                    action()
+                except (OSError, ProtocolError):
+                    maintenance.append(name)
+            return self.describe(job) | {"digest": manifest["digest"], **({"maintenance": maintenance} if maintenance else {})}
 
     def gc(self):
         keep = {read(self.root / name)["generation"] for name in ("current.json", "previous.json") if (self.root / name).exists()}
@@ -416,7 +436,7 @@ class Store:
             current = self.current()
             active = self.active()
             pending = {k: active[k] for k in ("job", "direction", "phase")} if active and active["device"] == device and active["phase"] not in ("done", "aborted") else None
-            return {"protocol": 1, "version": "0.2.4", "capabilities": ["paused-jobs", "job-bound-rsync"], "dataset": self.format["dataset"],
+            return {"protocol": 1, "version": "0.2.5", "capabilities": ["paused-jobs", "job-bound-rsync"], "dataset": self.format["dataset"],
                     "current": {k: current[k] for k in ("generation", "digest")} if current else None, "pending": pending}
         if op == "begin":
             return self.begin(message, device)

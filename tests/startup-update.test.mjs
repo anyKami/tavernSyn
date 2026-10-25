@@ -174,7 +174,10 @@ test('an existing service is reused only when its private epoch matches, without
     await fs.writeFile(path.join(f.backend, 'helper/browser.mjs'), `import fs from'node:fs';export async function openBrowser(origin){fs.writeFileSync(${JSON.stringify(browserMarker)},JSON.stringify({origin}));}`);
     await atomicJson(path.join(f.state, 'instance.lock'), { pid: process.pid, nonce, install: f.install });
     let epoch = nonce;
-    const server = http.createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ managed: true, epoch })); });
+    const server = http.createServer((req, res) => {
+        assert.equal(req.method, 'HEAD'); assert.equal(req.url, '/');
+        res.setHeader('x-tavernsyn-epoch', epoch); res.writeHead(302, { location: '/login' }); res.end();
+    });
     await new Promise(resolve => server.listen(f.port, '127.0.0.1', resolve));
     try {
         const args = [path.join(f.install, 'TavernSyn-Startup.mjs'), '--st', f.install, '--state', f.state];

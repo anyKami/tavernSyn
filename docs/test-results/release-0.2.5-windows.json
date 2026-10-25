@@ -1,0 +1,29 @@
+{
+  "version": "0.2.5",
+  "date": "2026-10-26",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "status": "passed-with-platform-skips",
+  "versionFields": ["package.json", "package-lock.json root", "package-lock.json packages root", "manifest.json", "VPS hello"],
+  "versionConsistency": "passed",
+  "releaseEntryChecks": { "total": 16, "passed": 16, "failed": 0, "skipped": 0 },
+  "combinedRegression": {
+    "node": { "total": 131, "passed": 130, "failed": 0, "skipped": 1 },
+    "python": { "total": 26, "passed": 21, "failed": 0, "skipped": 5 },
+    "actualSillyTavernIsolatedChecks": 28,
+    "detail": "review-fixes-windows.json"
+  },
+  "publicationScan": {
+    "scanner": "Gitleaks 8.30.1",
+    "fileFindings": 0,
+    "reachableHistoryFindings": 0,
+    "privateDeploymentOrMachinePathFindings": 0,
+    "localReportsExcludedFromPublication": true
+  },
+  "limits": [
+    "Real ST orchestration uses MemoryTransport; actual rsync and SSH are verified separately",
+    "No new physical Android or live VPS acceptance test",
+    "POSIX execution and Linux locking/read-only-descriptor checks are skipped on Windows",
+    "No user installation deployment is part of this publication"
+  ]
+}

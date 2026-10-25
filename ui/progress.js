@@ -1,6 +1,7 @@
 // Shared by the panel and the standalone waiting document. This function is
 // also embedded into that document, so keep it independent of module state.
 export function progressDetail(status) {
+    if (status.noChanges) return '无需文件传输；本次仅检查本机状态和 VPS 版本。';
     const mib = value => `${((value ?? 0) / 1024 / 1024).toFixed(2)} MiB`;
     const lines = [], progress = status.progress;
     if (progress && ['UPLOADING', 'DOWNLOADING', 'FAILED'].includes(status.phase)) {

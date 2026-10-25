@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-26",
+  "baseRelease": "0.2.4",
+  "release": "0.2.5",
+  "status": "passed",
+  "platform": "Windows",
+  "automatedTests": {
+    "passed": 109,
+    "failed": 0,
+    "skipped": 0
+  },
+  "incrementalTests": {
+    "passed": 10
+  },
+  "actualSillyTavernChecks": 25,
+  "gitIncrementExperiment": {
+    "assetBytes": 2097152,
+    "addedBytes": 19,
+    "legacy": {
+      "sentBytes": 2100375,
+      "receivedBytes": 307,
+      "literalBytes": 2100215,
+      "matchedBytes": 405
+    },
+    "fixed": {
+      "sentBytes": 3121,
+      "receivedBytes": 9084,
+      "literalBytes": 1817,
+      "matchedBytes": 2099140
+    }
+  },
+  "coldCacheExperiment": {
+    "sentBytes": 4193,
+    "receivedBytes": 8882,
+    "literalBytes": 4083,
+    "matchedBytes": 2094608
+  },
+  "transport": "Actual local rsync for byte measurements; MemoryTransport for actual ST orchestration checks",
+  "productionDeployment": false,
+  "androidPhysicalDeviceVerified": false,
+  "scope": "Initial incremental verification; final combined regressions are in review-fixes-windows.json"
+}

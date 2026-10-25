@@ -46,6 +46,7 @@ export async function init(router){
  console.log('TAVERN_SYN_FIXTURE_STDOUT'); console.error('TAVERN_SYN_FIXTURE_STDERR');
  router.use((req,res,next)=>req.user?.profile?.admin?next():res.sendStatus(403));
  router.get('/slow',async(_req,res)=>{process.send?.({channel:'fixture',event:'started'});await new Promise(r=>setTimeout(r,250));res.json({ok:true});process.send?.({channel:'fixture',event:'finished'});});
+ for(const route of ['/module.js','/child.js','/worker.js']) router.get(route,(req,res)=>Object.hasOwn(req.query,'__tavernsyn_epoch')?res.sendStatus(400):res.type('application/javascript').send('/* synthetic native resource */'));
  router.post('/pending',(_req,res)=>{res.type('text/plain');res.write('waiting');});
  router.post('/hang-exit',(_req,res)=>{globalThis.tavernsynRuntime.state.fixtureHangExit=true;res.json({ok:true});});
 }
@@ -77,8 +78,8 @@ const lifecycle = new Lifecycle(device, (action, payload) => manager.action(acti
 const taskLog = createSyncLog(state, liveOutput.stdout);
 manager = new Manager(device, lifecycle, remote, taskLog);
 const jar = new Map(); let csrf, epoch; const checks = [];
-async function request(route, { method = 'GET', body, token = csrf, useEpoch = epoch, cookies = jar } = {}) {
-    const headers = { Cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join('; '), Origin: device.origin };
+async function request(route, { method = 'GET', body, token = csrf, useEpoch = epoch, cookies = jar, extraHeaders = {} } = {}) {
+    const headers = { Cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join('; '), Origin: device.origin, ...extraHeaders };
     if (token) headers['x-csrf-token'] = token;
     if (useEpoch) headers['x-tavernsyn-epoch'] = useEpoch;
     if (body !== undefined) headers['content-type'] = 'application/json';
@@ -140,6 +141,15 @@ async function handoff() {
 try {
     await lifecycle.start(); await login();
     assert.equal((await request('/api/plugins/tavernsyn/status', { cookies: new Map(), token: null })).status, 403);
+    const browserHelper = path.join(repository, 'helper/browser.mjs'), originalBrowser = await fs.readFile(browserHelper);
+    const browserMarker = path.join(root, 'reused-browser.txt');
+    try {
+        await fs.writeFile(browserHelper, `import fs from 'node:fs/promises';export async function openBrowser(origin){await fs.writeFile(${JSON.stringify(browserMarker)},origin);}`);
+        const reused = await run(process.execPath, ['--input-type=module', '-'], { input:
+            `import {reuseRunning} from ${JSON.stringify(pathToFileURL(path.join(PROJECT, 'bin/startup.mjs')).href)};if(!await reuseRunning(${JSON.stringify(fixture)},${JSON.stringify(state)}))process.exit(1);` });
+        assert.ok(reused.stdout.includes('受控酒馆已在运行')); assert.equal(await fs.readFile(browserMarker, 'utf8'), device.origin);
+    } finally { await fs.writeFile(browserHelper, originalBrowser); }
+    checks.push('A second real startup probe reuses the authenticated ST instance through an unauthenticated HEAD epoch header and opens the existing origin');
     assert.equal((await request('/api/plugins/tavernsyn/check', { method: 'POST', token: null, body: {} })).status, 403);
     checks.push('Native authentication and CSRF reject unauthenticated/missing-token requests');
     const created = await request('/api/users/create', { method: 'POST', body: { handle: 'fixture-reader', name: 'Fixture reader', admin: false } }); assert.equal(created.status, 200); await created.text();
@@ -180,6 +190,20 @@ try {
     const blockedWrite = await request('/api/plugins/cocktail-plus/module?path=%2Fscript.js', { method: 'POST', body: {}, useEpoch: null });
     assert.equal(blockedWrite.status, 409); await blockedWrite.text();
     checks.push('Browser-loaded Cocktail+ scripts and reviewed modules load without a custom header; other API requests and writes remain epoch-protected');
+    const resourceUrl = '/api/plugins/sync-test-probe/module.js?__tavernsyn_epoch=' + lifecycle.nonce;
+    const nativeHeaders = { 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'script' };
+    const native = await request(resourceUrl, { useEpoch: null, extraHeaders: nativeHeaders }); assert.equal(native.status, 200); await native.text();
+    const worker = await request('/api/plugins/sync-test-probe/worker.js?__tavernsyn_epoch=' + lifecycle.nonce,
+        { useEpoch: null, extraHeaders: { ...nativeHeaders, 'sec-fetch-dest': 'worker' } });
+    assert.equal(worker.status, 200); await worker.text();
+    const child = await request('/api/plugins/sync-test-probe/child.js', { useEpoch: null, extraHeaders: { ...nativeHeaders, referer: device.origin + resourceUrl } });
+    assert.equal(child.status, 307);
+    assert.equal((await request(child.headers.get('location'), { useEpoch: null, extraHeaders: nativeHeaders })).status, 200);
+    const staleResource = await request('/api/plugins/sync-test-probe/module.js?__tavernsyn_epoch=old', { useEpoch: null, extraHeaders: nativeHeaders });
+    assert.equal(staleResource.status, 409); await staleResource.text();
+    const anonymousResource = await request(resourceUrl, { useEpoch: null, cookies: new Map(), token: null, extraHeaders: nativeHeaders });
+    assert.equal(anonymousResource.status, 403); await anonymousResource.text();
+    checks.push('A third-party native script, Worker and nested module URL work without fetch headers; stale epochs and unauthenticated access remain refused');
     const settings = await readJson(path.join(fixture, 'data/default-user/settings.json'));
     const wrong = await request('/api/plugins/tavernsyn/flush', { method: 'POST', body: { nonce: randomUUID(), settingsDigest: '0'.repeat(64) } });
     assert.equal(wrong.status, 409);
@@ -219,6 +243,33 @@ try {
     checks.push('A canceled real static sendFile does not poison drain; the following normal push safely stops, publishes and restarts');
     assert.ok(!remote.last.manifest.files.some(file => /^(server-plugins|extensions)\/tavernsyn\//i.test(file.path)));
     assert.equal((await request('/api/settings/save', { method: 'POST', body: settings, useEpoch: oldEpoch })).status, 409);
+    const unchangedEpoch = lifecycle.nonce, unchangedGeneration = remote.current.generation;
+    await api('start', { direction: 'push', tab, preview: false }); await handoff();
+    assert.equal((await api('status')).noChanges, true); assert.equal(lifecycle.nonce, unchangedEpoch);
+    await api('start', { direction: 'pull', tab, preview: false }); await manager.done;
+    assert.equal((await api('status')).noChanges, true);
+    assert.equal(lifecycle.nonce, unchangedEpoch); assert.equal(remote.current.generation, unchangedGeneration);
+    checks.push('Unchanged push uses real save/page handoff without restarting ST; unchanged pull skips download and preparation and retains the same publication');
+    const maintenanceFile = path.join(fixture, 'data/default-user/worlds/maintenance-fixture.json');
+    await fs.writeFile(maintenanceFile, '{"entries":{}}');
+    const cachePayload = manager.cache.bind(manager);
+    const sendCommitted = remote.push.bind(remote), historyFile = path.join(state, 'history.json'), historyBefore = path.join(root, 'history-before-fixture.json');
+    remote.push = async (...args) => {
+        const result = await sendCommitted(...args);
+        await fs.rename(historyFile, historyBefore); await fs.mkdir(historyFile); return result;
+    };
+    manager.cache = async () => { throw Object.assign(Error('Synthetic post-publish cache ENOSPC'), { code: 'ENOSPC' }); };
+    try { await api('start', { direction: 'push', tab, preview: false }); await handoff(); }
+    finally { manager.cache = cachePayload; remote.push = sendCommitted; }
+    const committed = await api('status'), committedEpoch = lifecycle.nonce;
+    assert.equal(committed.commit.kind, 'published'); assert.equal(committed.maintenancePending, true);
+    assert.equal(committed.historyUnavailable, true);
+    await fs.rmdir(historyFile); await fs.rename(historyBefore, historyFile);
+    const finalized = await api('reconcile', { id: committed.id });
+    assert.equal(finalized.phase, 'SUCCEEDED'); assert.equal(finalized.maintenancePending, false);
+    assert.equal(lifecycle.nonce, committedEpoch); assert.equal(remote.current.generation, committed.id);
+    await fs.unlink(maintenanceFile);
+    checks.push('A real saved push remains successful after cache ENOSPC and unreadable history; its status API stays accessible and authenticated reconciliation repairs records without another restart or publication');
     await fs.writeFile(path.join(fixture, 'data/default-user/worlds/local-only.json'), '{"entries":{}}');
     const normalPull = remote.pull.bind(remote), prePullEpoch = lifecycle.nonce;
     remote.pull = async (...args) => {

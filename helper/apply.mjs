@@ -4,8 +4,9 @@ import { atomicJson, exists, inside, noLinks, readJson, requireThat, removeOwned
 import { copyTree, verify } from '../lib/manifest.mjs';
 import { preserveSettings } from '../lib/settings.mjs';
 import { CONFIG_POINTERS } from '../lib/device.mjs';
-import { restoreRepositories, rootsFor } from '../lib/snapshot.mjs';
+import { restoreRepositories, rootsFor, preparePluginDependencies } from '../lib/snapshot.mjs';
 import { enoughSpace, validateContent } from '../lib/content.mjs';
+import { ATTRIBUTES, applyExecutables, gitExecutables, validateExecutables } from '../lib/file-attributes.mjs';
 
 async function flushTree(directory) {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -30,9 +31,18 @@ export async function prepare(device, payload, manifest, jobRoot) {
     requireThat(!await exists(candidate), 'CANDIDATE_EXISTS', '候选目录已存在，请先处理之前的恢复记录。');
     await copyTree(payload, candidate, { exclude: p => p === 'repositories' || p.startsWith('repositories/') });
     const metadata = await restoreRepositories(device, payload, candidate);
-    const nativeFiles = manifest.files.filter(f => !f.path.startsWith('repositories/') && /\.(?:exe|dll|node|so|dylib)$/i.test(f.path));
+    // Legacy snapshots have no execution metadata. Git index modes can still
+    // recover tracked scripts; arbitrary legacy files cannot be inferred safely.
+    metadata.executables = metadata.executables === undefined
+        ? [...new Set((await Promise.all(metadata.plugins.map(p => gitExecutables(path.join(candidate, ...p.code.split('/')), p.code)))).flat())]
+        : validateExecutables(metadata.executables, manifest);
+    await applyExecutables(candidate, metadata.executables, manifest);
+    // Attachments/custom user data are portable content, not plugin runtime.
+    const nativeFiles = manifest.files.filter(f => /^(?:extensions|server-plugins|profile\/extensions)\/[^/]+\//.test(f.path)
+        && /\.(?:exe|dll|node|so(?:\.\d+)*|dylib)$/i.test(f.path));
     requireThat(!nativeFiles.length || (metadata.sourcePlatform === process.platform && metadata.sourceArch === process.arch), 'NATIVE_RESOURCE', '插件包含跨平台二进制资源。请在目标平台单独安装对应资源后，再重新准备同步。');
     requireThat((metadata.extraRoots ?? []).every(id => device.extraRoots.some(x => x.id === id)), 'EXTRA_ROOT', '远端包含本机尚未映射的自定义目录，请先配置映射。');
+    await preparePluginDependencies(device, candidate);
     return { candidate, metadata };
 }
 async function preserveFile(source, target) {
@@ -64,6 +74,8 @@ export async function buildPlan(device, prepared, jobRoot) {
     for (const pointer of CONFIG_POINTERS) if (Object.hasOwn(metadata.config ?? {}, pointer)) document.setIn(pointer.slice(1).split('/'), metadata.config[pointer]);
     document.setIn(['enableServerPlugins'], true);
     const nextConfig = path.join(candidate, 'config.yaml'); await fs.writeFile(nextConfig, document.toString(), { mode: 0o600 });
+    const nextAttributes = path.join(candidate, ATTRIBUTES);
+    await atomicJson(nextAttributes, { format: 1, executables: metadata.executables });
     const recovery = path.join(device.state, 'recovery');
     requireThat(!await exists(recovery), 'RECOVERY_EXISTS', '存在上一次恢复数据，请完成上次任务或明确归档后重试。');
     const steps = [];
@@ -75,14 +87,16 @@ export async function buildPlan(device, prepared, jobRoot) {
         steps.push({ live: root.path, next, old: path.join(recovery, String(steps.length)), hadOld: await exists(root.path), phase: 'planned' });
     }
     steps.push({ live: device.yamlPath, next: nextConfig, old: path.join(recovery, 'config.yaml'), hadOld: true, phase: 'planned' });
+    steps.push({ live: path.join(device.state, ATTRIBUTES), next: nextAttributes, old: path.join(recovery, ATTRIBUTES), hadOld: await exists(path.join(device.state, ATTRIBUTES)), phase: 'planned' });
     await flushTree(candidate);
     await fs.mkdir(recovery, { mode: 0o700 });
-    const journal = { format: 1, jobRoot, candidate, recovery, phase: 'prepared', steps };
+    const journal = { format: 2, jobRoot, candidate, recovery, phase: 'prepared', steps };
     await atomicJson(path.join(device.state, 'apply.json'), journal); return journal;
 }
 export async function validatePlan(device, journal) {
-    const allowed = [...(await rootsFor(device)).map(r => path.resolve(r.path)), path.resolve(device.yamlPath)];
-    requireThat(journal.format === 1 && Array.isArray(journal.steps) && journal.steps.length === allowed.length, 'JOURNAL', '恢复记录格式无效。');
+    const allowed = [...(await rootsFor(device)).map(r => path.resolve(r.path)), path.resolve(device.yamlPath),
+        ...(journal.format === 2 ? [path.join(device.state, ATTRIBUTES)] : [])];
+    requireThat([1, 2].includes(journal.format) && Array.isArray(journal.steps) && journal.steps.length === allowed.length, 'JOURNAL', '恢复记录格式无效。');
     requireThat(new Set(journal.steps.map(s => path.resolve(s.live))).size === allowed.length && new Set(journal.steps.map(s => s.old)).size === allowed.length, 'JOURNAL', '恢复记录存在重复目标。');
     for (const step of journal.steps) {
         requireThat(allowed.includes(path.resolve(step.live)) && inside(path.join(device.state, 'jobs'), step.next) && inside(path.join(device.state, 'recovery'), step.old), 'JOURNAL', '恢复记录含越界路径。');
@@ -121,7 +135,10 @@ export async function rollback(device, journal) {
     if (!(await fs.readdir(journal.recovery)).length) await removeOwned(device.state, journal.recovery);
 }
 export async function commitPlan(device, journal) {
-    journal.phase = 'committed'; journal.committedAt = new Date().toISOString(); await atomicJson(path.join(device.state, 'apply.json'), journal);
+    const committed = { ...journal, phase: 'committed', committedAt: new Date().toISOString() };
+    try { await atomicJson(path.join(device.state, 'apply.json'), committed); }
+    catch (error) { if (!error.atomicCommitted) throw error; }
+    Object.assign(journal, committed);
 }
 export async function recoveryStatus(device) {
     const file = path.join(device.state, 'apply.json');

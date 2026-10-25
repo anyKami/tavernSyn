@@ -3,11 +3,13 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { atomicJson, digest, exists, readJson, requireThat, removeOwned, SyncError } from '../lib/io.mjs';
-import { copyTree, verify } from '../lib/manifest.mjs';
+import { copyTree, verify, validateManifest } from '../lib/manifest.mjs';
 import { portableState, snapshot } from '../lib/snapshot.mjs';
-import { prepare, buildPlan, applyPlan, rollback, commitPlan, retireRecovery, recoveryStatus, preserveSyncCode } from './apply.mjs';
+import { prepare, buildPlan, applyPlan, rollback, commitPlan, retireRecovery, recoveryStatus, preserveSyncCode, validatePlan } from './apply.mjs';
 import * as transport from './transport.mjs';
 import { configuration, configureDevice, withDeviceLock } from '../lib/connection.mjs';
+import { validateContent } from '../lib/content.mjs';
+import { completionPath, readCompletion, validateCompletion, completedStatus, connectionId } from '../lib/completion.mjs';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'PREVIEW', 'PENDING_APPLY', 'RECOVERY_REQUIRED']);
 const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '从 VPS 下载', VERIFYING: '校验文件', PREPARING: '准备插件', AWAITING_CONFIRMATION: '等待覆盖确认',
@@ -15,7 +17,11 @@ const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '从 VPS 下载', VERIF
     APPLYING: '应用更新', RESTORING: '恢复上一版', STARTING: '重新启动酒馆', ROLLING_BACK: '回滚数据', SUCCEEDED: '同步完成',
     FAILED: '同步失败', PREVIEW: '预览完成', PENDING_APPLY: '等待受控应用', RECOVERY_REQUIRED: '需要人工恢复' };
 export function stateDifference(before, after) {
-    const a = new Map((before?.files ?? []).map(f => [f.path, f.sha256])); const b = new Map((after?.files ?? []).map(f => [f.path, f.sha256]));
+    const entries = state => {
+        const executable = new Set(state?.executables ?? []);
+        return new Map((state?.files ?? []).map(f => [f.path, `${f.sha256}:${executable.has(f.path)}`]));
+    };
+    const a = entries(before), b = entries(after);
     return { added: [...b.keys()].filter(k => !a.has(k)).length, changed: [...b.keys()].filter(k => a.has(k) && a.get(k) !== b.get(k)).length,
         deleted: [...a.keys()].filter(k => !b.has(k)).length, files: b.size };
 }
@@ -29,7 +35,15 @@ export class Manager {
         this.logger = logger;
         this.wake = {}; this.progressTime = 0; this.writeQueue = Promise.resolve();
     }
-    async status() { return await exists(path.join(this.device.state, 'status.json')) ? readJson(path.join(this.device.state, 'status.json')) : { phase: 'IDLE' }; }
+    async status() {
+        if (this.statusWriteFailed && this.job?.commit) return structuredClone(this.job);
+        const status = await exists(path.join(this.device.state, 'status.json')) ? await readJson(path.join(this.device.state, 'status.json')) : { phase: 'IDLE' };
+        if (status.id && status.phase !== 'SUCCEEDED') {
+            const outcome = await readCompletion(this.device, status.id);
+            if (outcome) return completedStatus(outcome, ['finalization']);
+        }
+        return status;
+    }
     log = message => {
         try { this.logger(this.job, message); }
         catch { if (!this.logFailed) { this.logFailed = true; console.error('TavernSyn：无法记录同步日志，请检查设备控制目录及磁盘空间。'); } }
@@ -38,8 +52,9 @@ export class Manager {
         const oldPhase = this.job.phase, oldNote = this.job.note;
         Object.assign(this.job, { phase, updated: new Date().toISOString() }, fields);
         const snapshot = structuredClone(this.job);
-        this.writeQueue = this.writeQueue.then(() => atomicJson(path.join(this.device.state, 'status.json'), snapshot));
-        await this.writeQueue;
+        this.writeQueue = this.writeQueue.catch(() => {}).then(() => atomicJson(path.join(this.device.state, 'status.json'), snapshot));
+        try { await this.writeQueue; this.statusWriteFailed = false; }
+        catch (error) { this.statusWriteFailed = true; throw error; }
         if (phase !== oldPhase) this.log(`阶段：${PHASES[phase] ?? phase} (${phase})`);
         if (fields.files !== undefined) this.log(`快照：${fields.files} 个文件，${fields.bytes ?? 0} 字节`);
         if (fields.summary) this.log(`文件差异：新增 ${fields.summary.added}，修改 ${fields.summary.changed}，删除 ${fields.summary.deleted}`);
@@ -63,9 +78,10 @@ export class Manager {
             return configureDevice(this.device, action, payload);
         }
         if (action === 'start') return this.start(payload);
+        if (action === 'reconcile') return this.reconcile(payload.id);
         if (action === 'resume-upload') {
             const previous = await this.status();
-            requireThat(previous.id === payload.id && previous.phase === 'FAILED' && previous.direction === 'push'
+            requireThat(previous.id === payload.id && !previous.commit && previous.phase === 'FAILED' && previous.direction === 'push'
                 && previous.snapshotReady === true, 'JOB', '没有可继续上传的完整快照，请重新推送。');
             requireThat(previous.connection === this.connectionId(), 'CONFIG_CHANGED', '连接目标已改变，不能把旧快照发送到另一数据集。');
             return this.start({ direction: 'push', tab: payload.tab, resume: previous });
@@ -134,10 +150,11 @@ export class Manager {
         requireThat(typeof tab === 'string' && /^[a-f0-9-]{36}$/.test(tab), 'INPUT', '浏览器标签页标识无效。');
         requireThat(!this.busy, 'BUSY', '已有同步任务正在执行。');
         const previous = await this.status();
+        requireThat(!previous.maintenancePending, 'FINALIZATION_PENDING', '数据已提交，但本机收尾尚未完成，请先点击“核对同步结果”再开始新同步。');
         requireThat(TERMINAL.has(previous.phase) || previous.phase === 'IDLE', 'RECOVERY_REQUIRED', '上次任务未正常结束，请先查看恢复说明。');
         requireThat((previous.phase !== 'PENDING_APPLY' || pending) && previous.phase !== 'RECOVERY_REQUIRED', 'PENDING_APPLY', '已有待应用或待恢复任务，请先处理。');
         requireThat(this.lifecycle || direction === 'pull', 'UNMANAGED', '严格推送需要受控启动器；请关闭酒馆后使用 TavernSyn 入口。');
-        this.busy = true; this.receipt = null;
+        this.busy = true; this.receipt = null; this.outcome = null; this.statusWriteFailed = false;
         this.pendingSource = pending;
         this.resumeSource = resume;
         const lock = path.join(this.device.state, 'operation.lock');
@@ -161,17 +178,18 @@ export class Manager {
             throw error;
         }
         const job = this.job;
+        this.ownedOperation = { handle, lock, id: job.id };
         this.done = this.execute().catch(async error => {
+            if (this.outcome) { await this.finishOutcome(this.outcome); return; }
             const dangerous = error.code === 'RECOVERY_REQUIRED' || (this.plan && !['committed', 'rolled-back'].includes(this.plan.phase));
             await this.write(dangerous ? 'RECOVERY_REQUIRED' : 'FAILED', { error: { code: error.code ?? 'FAILED', message: error.code ? error.message : '同步失败，详细原因请查看本机日志。' } });
         }).finally(async () => {
             try {
                 await atomicJson(path.join(this.device.state, 'jobs', job.id, 'job.json'), this.job);
-                if (['SUCCEEDED', 'PREVIEW'].includes(this.job.phase)) await this.pruneCompleted();
+                if (['SUCCEEDED', 'PREVIEW'].includes(this.job.phase) && !this.job.maintenancePending) await this.pruneCompleted();
             } catch { /* Cleanup never changes a successful publish/apply into a false failure. */ }
-            this.busy = false; this.wake = {}; this.plan = null;
-            await handle.close();
-            if ((await readJson(lock).catch(() => ({}))).id === job.id) await fs.unlink(lock);
+            this.wake = {}; this.plan = null;
+            await this.releaseOperation(); this.busy = false;
         });
         return { id: job.id, phase: job.phase };
     }
@@ -183,7 +201,8 @@ export class Manager {
             if (!entry.isDirectory() || !/^[a-f0-9-]{36}$/.test(entry.name) || entry.name === this.job.id) continue;
             const directory = path.join(jobs, entry.name), marker = path.join(directory, 'job.json');
             if (directory === apply?.jobRoot || !await exists(marker)) continue;
-            if (['SUCCEEDED', 'PREVIEW'].includes((await readJson(marker)).phase)) await removeOwned(jobs, directory);
+            const old = await readJson(marker);
+            if (['SUCCEEDED', 'PREVIEW'].includes(old.phase) && !old.maintenancePending) await removeOwned(jobs, directory);
         }
     }
     async confirm(reason, local, remote, incoming = null) {
@@ -194,31 +213,151 @@ export class Manager {
             return this.job.localDigest;
         } finally { this.confirmationTarget = null; this.confirmationRemote = null; this.confirmationReason = null; }
     }
-    async saveAndStop() {
+    async saveAndStop({ skipStop } = {}) {
         await this.waitFor('ready', 'AWAITING_SAVE');
         await this.waitFor('page', 'WAITING_PAGE');
-        await this.write('QUIESCING');
         await this.lifecycle.verifyReceipt(this.receipt);
+        if (skipStop && await skipStop()) return false;
+        await this.write('QUIESCING');
         await this.lifecycle.stop({ interruptOnDrain: true, onInterrupt: () => this.write('QUIESCING', {
             note: '请求未排空，正在中断旧实例连接并正常关闭酒馆；等待清理完成后继续同步。',
         }) });
         await this.lifecycle.verifyReceipt(this.receipt);
+        return true;
     }
     async cache(payload) {
         const cache = path.join(this.device.state, 'cache');
         if (await exists(cache)) await removeOwned(this.device.state, cache);
         await fs.mkdir(cache, { mode: 0o700 }); await fs.rename(payload, path.join(cache, 'payload'));
     }
-    async success(localState, remote, stats) {
-        const historyFile = path.join(this.device.state, 'history.json');
-        const history = await exists(historyFile) ? await readJson(historyFile) : {};
-        history[this.job.direction] = new Date().toISOString();
-        await atomicJson(historyFile, history);
-        await atomicJson(path.join(this.device.state, 'baseline.json'), { connection: this.connectionId(), local: localState, remote, direction: this.job.direction, at: history[this.job.direction] });
-        await this.write('SUCCEEDED', { stats, remote, history, remoteJob: null, snapshotReady: false, error: null, progress: null,
-            note: this.job.direction === 'push' ? '已上传停机快照；酒馆重新启动后的新改动留待下次推送。' : '数据已应用，受控实例健康检查通过。' });
+    async releaseOperation() {
+        if (!this.ownedOperation) return true;
+        const { handle, lock, id } = this.ownedOperation;
+        try {
+            await handle.close();
+            if (await exists(lock)) {
+                requireThat((await readJson(lock)).id === id, 'LOCK', '设备任务锁归属已改变，未删除其他任务的锁。');
+                await fs.unlink(lock);
+            }
+            this.ownedOperation = null; return true;
+        } catch (error) {
+            this.log(`任务锁收尾未完成（${error.code ?? 'IO'}），保留任务结果和记录。`);
+            if (this.job?.commit) {
+                const pending = [...new Set([...(this.job.maintenance?.pending ?? []), 'lock'])];
+                await this.write('SUCCEEDED', { maintenancePending: true, maintenance: { ...this.job.maintenance, pending },
+                    note: '数据提交已确认；设备任务锁尚待整理。可点击“核对同步结果”重试，或正常关闭启动器后按恢复说明处理。' }).catch(() => {});
+            }
+            return false;
+        }
     }
-    connectionId() { const { host, user, dataset } = this.device.remote ?? {}; return digest({ host: host ?? '', user: user ?? '', dataset: dataset ?? '' }); }
+    makeOutcome(localState, remote, stats, { noChanges = false, cache = false } = {}) {
+        return { format: 1, id: this.job.id, connection: this.connectionId(), completedAt: new Date().toISOString(),
+            kind: noChanges ? 'checked' : this.job.direction === 'push' ? 'published' : this.job.direction === 'restore' ? 'restored' : 'applied',
+            job: structuredClone(this.job), localState, remote, stats, cache };
+    }
+    async success(localState, remote, stats, options = {}) {
+        // Set the fact in memory before any local maintenance can fail. A durable
+        // receipt is written before moving the last frozen payload into cache.
+        this.outcome = options.outcome ?? this.makeOutcome(localState, remote, stats, options);
+        await this.finishOutcome(this.outcome);
+    }
+    async finishOutcome(outcome) {
+        validateCompletion(this.device, outcome, this.job.id);
+        const pending = [];
+        const attempt = async (step, action) => {
+            try { await action(); return true; }
+            catch (error) { pending.push(step); this.log(`数据提交已确认；本机收尾 ${step} 未完成（${error.code ?? 'IO'}），保留回执供重新核对。`); return false; }
+        };
+        const recorded = await attempt('receipt', () => atomicJson(completionPath(this.device, outcome.id), outcome));
+        if (outcome.cache) {
+            if (!recorded) pending.push('cache');
+            else await attempt('cache', async () => {
+                const root = path.dirname(completionPath(this.device, outcome.id)), payload = path.join(root, 'payload');
+                const manifest = validateManifest(await readJson(path.join(root, 'manifest.json')));
+                requireThat(manifest.digest === outcome.remote.digest, 'MANIFEST', '完成回执与缓存清单不一致。');
+                if (await exists(payload)) await this.cache(payload);
+                else await verify(path.join(this.device.state, 'cache/payload'), manifest);
+            });
+        }
+        let history;
+        await attempt('history', async () => {
+            const file = path.join(this.device.state, 'history.json');
+            history = await exists(file) ? await readJson(file) : {};
+            history[this.job.direction] = outcome.completedAt; await atomicJson(file, history);
+        });
+        await attempt('baseline', async () => {
+            const file = path.join(this.device.state, 'baseline.json');
+            if (outcome.kind === 'restored') { if (await exists(file)) await fs.unlink(file); }
+            else await atomicJson(file, { connection: this.connectionId(), local: outcome.localState, remote: outcome.remote, direction: this.job.direction, at: outcome.completedAt });
+        });
+        const completed = completedStatus(outcome, pending);
+        this.job.commit = completed.commit;
+        if (!await attempt('status', () => this.write('SUCCEEDED', { ...completed, ...(history ? { history } : {}) }))) {
+            Object.assign(this.job, completedStatus(outcome, pending), history ? { history } : {});
+            await attempt('job', () => atomicJson(path.join(this.device.state, 'jobs', outcome.id, 'job.json'), this.job));
+        }
+    }
+    async reconcile(id) {
+        requireThat(!this.busy, 'BUSY', '同步正在进行，不能同时核对提交结果。');
+        const previous = await this.status();
+        requireThat(previous.id === id && (previous.commit || ['FAILED', 'UPLOADING', 'STARTING'].includes(previous.phase)), 'JOB', '只能核对当前已完成、失败或中断在提交阶段的任务。');
+        const file = completionPath(this.device, id), lock = path.join(this.device.state, 'operation.lock');
+        requireThat(await this.releaseOperation(), 'FINALIZATION_PENDING', '设备任务锁仍无法整理，请检查控制目录的写入权限或文件占用。');
+        const handle = await fs.open(lock, 'wx', 0o600).catch(() => { throw new SyncError('BUSY', '仍有任务占用设备，请先处理任务锁。'); });
+        this.ownedOperation = { handle, lock, id };
+        this.busy = true;
+        try {
+            await handle.writeFile(JSON.stringify({ id, pid: process.pid, purpose: 'completion' })); await handle.sync();
+            let outcome = await readCompletion(this.device, id);
+            this.job = structuredClone(previous);
+            if (!outcome && previous.direction === 'pull') {
+                const journal = await readJson(path.join(this.device.state, 'apply.json'));
+                await validatePlan(this.device, journal);
+                requireThat(journal.phase === 'committed' && journal.jobRoot === path.dirname(file) && journal.completion,
+                    'COMMIT_NOT_CONFIRMED', '未找到此任务的已提交应用回执，未修改数据。');
+                outcome = validateCompletion(this.device, journal.completion, id);
+            }
+            if (!outcome && previous.direction === 'push') {
+                const manifest = validateManifest(await readJson(path.join(path.dirname(file), 'manifest.json')));
+                requireThat(previous.connection === this.connectionId() && previous.snapshotReady && previous.snapshotDigest === manifest.digest,
+                    'COMPLETION', '旧推送的完整快照或目标记录不匹配。');
+                const session = await this.transport.connect(this.device, undefined, this.log);
+                try {
+                    requireThat(session.hello.dataset === this.device.remote.dataset && session.hello.current?.generation === id
+                        && session.hello.current.digest === manifest.digest, 'COMMIT_NOT_CONFIRMED', 'VPS 当前代次尚不能证明此任务已发布；可继续原快照上传，未修改 VPS。');
+                } finally { session.control.close(); }
+                const payload = await exists(path.join(path.dirname(file), 'payload')) ? path.join(path.dirname(file), 'payload') : path.join(this.device.state, 'cache/payload');
+                await verify(payload, manifest);
+                const metadata = await readJson(path.join(payload, 'environment.json'));
+                outcome = this.makeOutcome(metadata.sourceState, { generation: id, digest: manifest.digest }, previous.stats, { cache: true });
+            }
+            requireThat(outcome, 'COMMIT_NOT_CONFIRMED', '未找到可核对的提交回执，未应用或发布数据。');
+            this.outcome = outcome; await this.finishOutcome(outcome);
+        } finally {
+            await this.releaseOperation(); this.busy = false;
+        }
+        return structuredClone(this.job);
+    }
+    async skipUnchanged(session, baseline) {
+        if (!this.lifecycle || this.job.preview || !baseline || baseline.local?.format !== 2 || !Array.isArray(baseline.local.executables) || !session.hello.current
+            || !/^[a-f0-9]{64}$/.test(baseline.remote?.digest ?? '')
+            || baseline.remote?.digest !== session.hello.current.digest) return false;
+        // An empty configured root and a missing root have the same file list.
+        // Do not hide a missing source or skip a pull that must recreate it.
+        for (const extra of this.device.extraRoots) if (!await exists(extra.path)) return false;
+        const local = await portableState(this.device);
+        if (local.digest !== baseline.local.digest) return false;
+        // Recheck the publication after local inventory/save; a stale hello must
+        // never let us skip another device's newly published update.
+        const latest = await session.control.request('hello');
+        requireThat(latest.dataset === this.device.remote.dataset, 'REMOTE_DATASET', 'VPS 数据集已经改变，停止跳过同步。');
+        if (latest.current?.digest !== baseline.remote.digest) return false;
+        if ((await portableState(this.device)).digest !== local.digest) return false;
+        if (this.job.direction === 'push') await this.lifecycle.verifyReceipt(this.receipt);
+        await this.success(local, latest.current, { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 }, { noChanges: true });
+        return true;
+    }
+    connectionId() { return connectionId(this.device); }
     async restore() {
         requireThat((await recoveryStatus(this.device)).available, 'NO_RECOVERY', '没有可用的上一版恢复副本；需要先完成一次拉取更新。');
         const file = path.join(this.device.state, 'apply.json'), journal = await readJson(file), journalDigest = digest(journal);
@@ -232,12 +371,7 @@ export class Manager {
             this.plan = journal;
             await this.write('RESTORING'); await rollback(this.device, journal);
             await this.write('STARTING'); await this.lifecycle.start();
-            const baseline = path.join(this.device.state, 'baseline.json');
-            if (await exists(baseline)) await fs.unlink(baseline);
-            const historyFile = path.join(this.device.state, 'history.json');
-            const history = await exists(historyFile) ? await readJson(historyFile) : {};
-            history.restore = new Date().toISOString(); await atomicJson(historyFile, history);
-            await this.write('SUCCEEDED', { history, note: '已恢复到最近一次拉取前的本机数据。VPS 副本未改变；该次恢复副本已使用。' });
+            await this.success(null, null, null);
         } catch (error) {
             if (this.plan) {
                 await this.write('ROLLING_BACK', { note: '恢复未能完成，正在回到恢复操作前的数据。' });
@@ -285,7 +419,7 @@ export class Manager {
                     if (session.hello.current && baseline?.remote?.digest !== session.hello.current.digest) await this.confirm('VPS 已有另一份数据，或本机尚未建立同步基准。推送会以本机为准替换它。', local, session.hello.current.digest);
                     const diff = stateDifference(baseline?.local, local);
                     if ((diff.deleted && diff.deleted > (baseline?.local?.files.length ?? Infinity) * 0.4) || clearsCore(baseline?.local, local)) await this.confirm('本次将大量删除共享文件，或清空某类聊天、角色或世界书，请确认方向。', local, session.hello.current?.digest ?? null);
-                    await this.saveAndStop();
+                    if (!await this.saveAndStop({ skipStop: () => this.skipUnchanged(session, baseline) })) return;
                     try { await this.write('SNAPSHOT'); frozen = await snapshot(this.device, payload); }
                     finally { if (this.lifecycle.stopped) { await this.write('STARTING'); await this.lifecycle.start(); } else await this.lifecycle.resume(); }
                     await atomicJson(path.join(root, 'manifest.json'), frozen.manifest);
@@ -294,9 +428,10 @@ export class Manager {
                     snapshotReady: true, snapshotDigest: frozen.manifest.digest });
                 const published = await this.transport.push(session, this.device, this.job.id, payload, frozen.manifest, this.progress, onBegin);
                 remoteBegun = false;
-                await this.cache(payload);
-                await this.success(frozen.metadata.sourceState, { generation: published.generation, digest: published.digest }, published.stats);
+                await this.success(frozen.metadata.sourceState, { generation: published.generation, digest: published.digest,
+                    ...(published.maintenance?.length ? { maintenance: published.maintenance } : {}) }, published.stats, { cache: true });
             } else {
+                if (!this.pendingSource && await this.skipUnchanged(session, baseline)) return;
                 await this.write('DOWNLOADING');
                 let downloaded;
                 if (this.pendingSource) {
@@ -315,13 +450,17 @@ export class Manager {
                 let summary = stateDifference(local, metadata.sourceState);
                 const remote = { generation: downloaded.generation, digest: downloaded.manifest.digest };
                 if (this.job.preview) { await this.cache(payload); await this.write('PREVIEW', { summary, remote, note: '以 VPS 为准替换当前设备共享内容；预览未应用。' }); return; }
+                if (!this.lifecycle) {
+                    await verify(payload, downloaded.manifest); await validateContent(payload, downloaded.manifest);
+                    await this.write('PENDING_APPLY', { jobRoot: root, remote, localDigest: local.digest, reason: '当前酒馆未通过受控入口启动。已下载并校验；关闭酒馆后从 TavernSyn 入口启动以继续。' });
+                    return;
+                }
                 await this.write('PREPARING', { summary, remote });
                 const prepared = await prepare(this.device, payload, downloaded.manifest, root);
                 // Dependency installation can take minutes while ST continues saving data.
                 local = await portableState(this.device);
                 summary = stateDifference(local, metadata.sourceState);
                 await this.write('PREPARING', { summary });
-                if (!this.lifecycle) { await this.write('PENDING_APPLY', { jobRoot: root, remote, localDigest: local.digest, reason: '当前酒馆未通过受控入口启动。已下载并校验；关闭酒馆后从 TavernSyn 入口启动以继续。' }); return; }
                 const reasons = [];
                 if (!baseline || baseline.local.digest !== local.digest) reasons.push('本机有尚未推送的修改，或这是首次拉取。');
                 if (summary.deleted > local.files.length * 0.4 || clearsCore(local, metadata.sourceState)) reasons.push('本次将大量删除共享文件，或清空某类聊天、角色或世界书。');
@@ -338,9 +477,9 @@ export class Manager {
                     // Capture the applied baseline before plugins resume background writes.
                     const appliedState = await portableState(this.device);
                     await this.write('STARTING'); await this.lifecycle.start();
+                    this.plan.completion = this.makeOutcome(appliedState, remote, downloaded.stats, { cache: true });
                     await commitPlan(this.device, this.plan);
-                    await this.cache(payload);
-                    await this.success(appliedState, remote, downloaded.stats);
+                    await this.success(appliedState, remote, downloaded.stats, { outcome: this.plan.completion });
                 } catch (error) {
                     if (this.plan && !['committed', 'rolled-back'].includes(this.plan.phase)) {
                         await this.write('ROLLING_BACK');

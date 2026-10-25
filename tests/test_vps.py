@@ -55,6 +55,68 @@ class StoreTests(unittest.TestCase):
         self.store.begin(dict(job=job, direction=direction, dataset=self.dataset, base=current["digest"] if current else None, jobBound=True), self.device)
         return job
 
+    def test_atomic_failures_remove_temporary_files_and_keep_the_original(self):
+        file = self.work / "atomic.json"
+        for where in ("write", "sync", "rename"):
+            d.atomic(file, {"old": True})
+            target, name = (d.json, "dump") if where == "write" else (d.os, "fsync") if where == "sync" else (d.os, "replace")
+            with patch.object(target, name, side_effect=OSError("synthetic storage failure")):
+                with self.assertRaises(OSError):
+                    d.atomic(file, {"new": True})
+            self.assertEqual(d.read(file), {"old": True})
+            self.assertEqual(list(self.work.glob("atomic.json.*.tmp")), [])
+
+    def test_publication_survives_failure_in_post_commit_housekeeping(self):
+        job = self.begin()
+        _, manifest = self.payload(job)
+        save = self.store.save
+
+        def fail_done(value):
+            if value["phase"] == "done":
+                raise OSError("synthetic done-record failure")
+            save(value)
+
+        with patch.object(self.store, "save", side_effect=fail_done), patch.object(self.store, "gc", side_effect=PermissionError()):
+            result = self.store.commit(dict(job=job, manifest=manifest), self.device)
+        self.assertEqual(result["phase"], "done")
+        self.assertEqual(set(result["maintenance"]), {"job-record", "generations"})
+        self.assertEqual(self.store.current()["generation"], job)
+        self.assertEqual(self.store.current()["digest"], manifest["digest"])
+        self.assertEqual(self.store.commit(dict(job=job, manifest=manifest), self.device)["phase"], "done")
+
+    def test_pointer_replaced_before_sync_failure_is_reported_as_published_with_warning(self):
+        job = self.begin()
+        _, manifest = self.payload(job)
+        atomic = d.atomic
+
+        def fail_after_pointer(file, value):
+            atomic(file, value)
+            if Path(file).name == "current.json":
+                raise OSError("synthetic directory sync failure after replace")
+
+        with patch.object(d, "atomic", side_effect=fail_after_pointer):
+            result = self.store.commit(dict(job=job, manifest=manifest), self.device)
+        self.assertEqual(result["phase"], "done")
+        self.assertEqual(result["maintenance"], ["publication-sync"])
+        self.assertEqual(self.store.current()["generation"], job)
+
+    def test_storage_report_is_read_only_and_warns_about_retained_work(self):
+        job = self.begin()
+        self.payload(job)
+        self.store.close()
+        spec = importlib.util.spec_from_file_location("storage_status", PROJECT / "vps/storage-status.py")
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(os.sys.modules, {"dispatcher": d}):
+            spec.loader.exec_module(module)
+        before = {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        result = module.storage_status(self.root)
+        after = {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+        self.assertEqual(result["incoming"][0]["generation"], job)
+        self.assertGreater(result["incoming"][0]["logicalBytes"], 0)
+        self.assertEqual(result["pausedJobs"], [job])
+        self.assertIn("RETAINED_JOBS_REVIEW_REQUIRED", result["warnings"])
+
     def payload(self, job, value="one"):
         payload = self.root / "incoming" / job / "payload"
         (payload / "profile").mkdir(exist_ok=True)

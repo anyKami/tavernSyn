@@ -10,6 +10,7 @@ import { copyTree, difference, scan, validateManifest, verify } from '../lib/man
 import { enoughSpace } from '../lib/content.mjs';
 import { rsyncOutputLog } from './sync-log.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { seedDownloadBasis } from '../lib/download-basis.mjs';
 
 export const RSYNC_ARGS = ['-rt', '--compress', '--omit-dir-times', '--no-whole-file', '--delete-delay', '--partial-dir=.tavernsyn-partial', '--fsync', '--info=progress2,stats2', '--stats', '--itemize-changes', '--8-bit-output', '--outbuf=L', '--timeout=120', '--modify-window=0'];
 const ALIAS = 'tavernsyn-vps';
@@ -263,7 +264,11 @@ export async function pull(session, device, job, payload, onProgress, onBegin) {
     const cache = path.join(device.state, 'cache/payload');
     if (!await exists(payload)) {
         if (await exists(cache)) await copyTree(cache, payload);
-        else await fs.mkdir(payload, { recursive: true, mode: 0o700 });
+        else {
+            await fs.mkdir(payload, { recursive: true, mode: 0o700 });
+            const basis = await seedDownloadBasis(device, payload, manifest);
+            session.log?.(`下载缓存缺失，已从本机共享目录建立 ${basis.files} 个文件的差分基础；下载后仍执行完整校验。`);
+        }
     }
     let stats = await transfer(env, 'pull', job, payload, onProgress, undefined, session.log);
     await partialCleanup(payload);
