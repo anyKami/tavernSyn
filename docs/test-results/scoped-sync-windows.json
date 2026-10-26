@@ -1,0 +1,100 @@
+{
+  "status": "passed",
+  "version": "0.2.6",
+  "date": "2026-10-26T17:25:46.020Z",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "nodeTests": {
+    "tests": 142,
+    "pass": 141,
+    "fail": 0,
+    "skipped": 1
+  },
+  "pythonTests": {
+    "tests": 31,
+    "pass": 26,
+    "fail": 0,
+    "skipped": 5
+  },
+  "scopedTests": {
+    "tests": 8,
+    "pass": 8,
+    "fail": 0,
+    "skipped": 0
+  },
+  "actualSillyTavern": {
+    "version": "1.19.0",
+    "status": "passed",
+    "checks": 28,
+    "transport": "MemoryTransport; real HTTP and lifecycle"
+  },
+  "rsyncRegression": {
+    "status": "passed",
+    "checks": 8,
+    "version": "rsync  version 3.5.1  protocol version 33"
+  },
+  "syntaxChecks": {
+    "node": 13,
+    "python": 3
+  },
+  "scopedTransfer": {
+    "fixtureBytes": 2097152,
+    "changedBytes": 4096,
+    "upload": {
+      "sentBytes": 2926,
+      "receivedBytes": 8808,
+      "literalBytes": 7111,
+      "matchedBytes": 2091360,
+      "transferredFiles": 4,
+      "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+    },
+    "download": {
+      "sentBytes": 9168,
+      "receivedBytes": 2315,
+      "literalBytes": 5824,
+      "matchedBytes": 2091386,
+      "transferredFiles": 5,
+      "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+    },
+    "transport": "Production Node control/transport + Python Store + real rsync daemon; SSH replaced by a local process pipe; Windows substitutes flock and cp"
+  },
+  "coverage": [
+    "single or combined categories; group chat indexes included",
+    "selected deletions including empty categories; unselected files unchanged by SHA-256",
+    "transaction rollback and scope-specific restore",
+    "unchanged scope skips transfer/restart without overwriting the full baseline",
+    "literal bracket paths and SHA-256 correction under the existing daemon option restrictions",
+    "unmanaged pull prepares once; changed local data refreshes confirmation",
+    "lost scoped publication ACK is reconciled without another upload",
+    "server capability required before stopping ST; task scope and pinned publication cannot change"
+  ],
+  "executionNotes": [
+    "The first restricted parallel integration run timed out during frontend compilation. A standalone run in the normal administrator environment passed all 28 checks."
+  ],
+  "untested": [
+    "Physical Android/Termux acceptance",
+    "Live VPS deployment and Tailscale traffic for this release",
+    "Linux-only flock and POSIX cases skipped on Windows",
+    "Full browser interaction with the new category controls"
+  ],
+  "publicationPrivacy": "Only synthetic data, versions and aggregate counts are recorded; no real profile, credentials or private paths.",
+  "finalFocusedVerification": {
+    "date": "2026-10-26T17:28:36.280Z",
+    "tests": 8,
+    "pass": 8,
+    "fail": 0,
+    "skipped": 0,
+    "additionalCoverage": "Chat folders named backups or tavernsyn remain ordinary selected data; exclusions are evaluated against the full profile path."
+  },
+  "releaseVerification": {
+    "date": "2026-10-26T19:07:21.738Z",
+    "upstreamCommit": "0073659f71f3d78ab640f6c2218570d0fe364dcf",
+    "nodeTests": {
+      "tests": 142,
+      "pass": 141,
+      "fail": 0,
+      "skipped": 1
+    },
+    "notes": "Retained upstream local Git object packing fix and passed all three added plugin version round-trip regressions."
+  }
+}

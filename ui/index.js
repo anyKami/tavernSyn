@@ -59,6 +59,11 @@ root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle in
 <div class="ts-actions"><button class="menu_button ts-push">推送到 VPS</button><button class="menu_button ts-pull">从 VPS 拉取</button>
 <button type="button" class="menu_button ts-resume-upload" hidden>继续上次上传</button><button type="button" class="menu_button ts-resume-apply" hidden>继续应用已下载文件</button></div>
 <button type="button" class="menu_button ts-reconcile" hidden>核对同步结果</button>
+<fieldset class="ts-scope"><legend>仅同步所选内容（增量传输，包含删除）</legend>
+<div class="ts-scope-options"><label><input type="checkbox" name="scope" value="chats" checked>聊天记录（含群聊）</label><label><input type="checkbox" name="scope" value="characters" checked>角色卡</label><label><input type="checkbox" name="scope" value="worlds" checked>世界书</label></div>
+<div class="ts-actions"><button type="button" class="menu_button ts-scoped-push">仅推送所选内容</button><button type="button" class="menu_button ts-scoped-pull">仅拉取所选内容</button></div>
+<div class="ts-scope-previews"><button type="button" class="menu_button ts-preview-scoped-push">预览分类推送</button><button type="button" class="menu_button ts-preview-scoped-pull">预览分类拉取</button></div>
+<small>所选类别以来源为准，接收端多出的文件会删除；其他类别、配置和插件保持不变。首次使用需先在 VPS 建立一次完整副本。</small></fieldset>
 <button type="button" class="menu_button ts-restore" disabled>恢复上一版</button><small class="ts-recovery"></small>
 <p class="ts-detail"></p><small class="ts-history"></small><details class="ts-settings"><summary>设置与检查 · VPS 配置</summary>
 <form class="ts-config"><fieldset disabled><legend>VPS 连接</legend>
@@ -85,7 +90,9 @@ directionDialog.addEventListener('click', event => event.stopPropagation());
 for (const modal of [dialog, directionDialog]) for (const event of ['mousedown', 'touchstart']) {
     modal.addEventListener(event, interaction => interaction.stopPropagation());
 }
-function confirmDirection(direction) {
+const scopeNames = { chats: '聊天记录（含群聊）', characters: '角色卡', worlds: '世界书' };
+const scopeText = scope => scope.map(name => scopeNames[name]).join('、');
+function confirmDirection(direction, scope = null) {
     const push = direction === 'push', restore = direction === 'restore', resume = direction === 'resume';
     directionDialog.querySelector('h3').textContent = resume ? '继续上次上传' : restore ? '确认恢复上一版' : push ? '确认推送到 VPS' : '确认从 VPS 拉取';
     directionDialog.querySelector('.ts-detail').textContent = resume
@@ -94,6 +101,11 @@ function confirmDirection(direction) {
         ? '将以本机已保存的内容更新 VPS 同步副本，VPS 原有的共享数据可能被替换。是否继续？'
         : '将以 VPS 同步副本更新本机，覆盖本机的共享配置、插件和用户数据。应用前会保留一次恢复副本。是否继续？';
     directionDialog.querySelector('.ts-accept').textContent = resume ? '继续上传' : restore ? '确认恢复' : push ? '确认推送' : '确认拉取';
+    if (scope) {
+        directionDialog.querySelector('h3').textContent = push ? '确认分类推送' : '确认分类拉取';
+        directionDialog.querySelector('.ts-detail').textContent = `仅同步${scopeText(scope)}，以${push ? '本机' : 'VPS'}为准，包含修改和删除。其他类别、配置及插件保持不变。下一步会显示实际文件差异，确认后继续。`;
+    }
+    if (restore && status.recovery?.scope) directionDialog.querySelector('.ts-detail').textContent = `将恢复${scopeText(status.recovery.scope)}到最近一次分类拉取前的状态，替换此后这些类别的改动。其他类别、配置及插件保持不变。是否继续？`;
     return new Promise(resolve => {
         const finish = result => { directionDialog.close(); resolve(result); };
         directionDialog.querySelector('.ts-accept').onclick = () => finish(true);
@@ -112,6 +124,7 @@ function render() {
     text('.ts-phase', localError ? '本次操作未开始，请处理提示' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : labels[status.phase] ?? status.phase);
     let detail = localError || status.error?.message || (status.phase === 'AWAITING_CONFIRMATION' ? status.reason : '') || status.note || '';
     if (status.summary) detail += `\n新增 ${status.summary.added}，修改 ${status.summary.changed}，删除 ${status.summary.deleted} 个文件。`;
+    if (status.scope) detail += `\n范围：${scopeText(status.scope)}（包含删除）。`;
     const progressText = progressDetail(status);
     if (progressText) detail += `\n${progressText}`;
     text('.ts-detail', detail);
@@ -123,6 +136,7 @@ function render() {
     dialog.querySelector('.ts-cancel').hidden = !['AWAITING_CONFIRMATION', 'AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);
     const terminal = ['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
     for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy;
+    for (const checkbox of root.querySelectorAll('.ts-scope input')) checkbox.disabled = !terminal || starting || setupBusy;
     root.querySelector('.ts-resume-upload').hidden = !(status.phase === 'FAILED' && !status.commit && status.direction === 'push' && status.snapshotReady === true);
     root.querySelector('.ts-resume-upload').disabled ||= !status.managed;
     root.querySelector('.ts-reconcile').hidden = !(status.maintenancePending || (status.phase === 'FAILED' && status.direction === 'push' && status.snapshotReady));
@@ -136,18 +150,24 @@ function render() {
     else if (!terminal && !dialog.open) dialog.showModal();
 }
 function showError(error) { starting = false; localError = error.message; if (dialog.open) dialog.close(); render(); }
-async function begin(direction, preview = false) {
+async function begin(direction, preview = false, scoped = false) {
     if (starting || setupBusy) return; starting = true; localError = '';
     try {
+        const scope = scoped ? [...root.querySelectorAll('.ts-scope input:checked')].map(input => input.value) : null;
+        if (scoped && !scope.length) throw Error('请至少选择聊天记录、角色卡或世界书中的一项。');
         render();
-        if (!preview && !await confirmDirection(direction)) { starting = false; render(); return; }
+        if (!preview && !await confirmDirection(direction, scope)) { starting = false; render(); return; }
         if (!preview && status.managed) { if (!dialog.open) dialog.showModal(); text('.ts-phase', '正在保存并核对内容'); text('.ts-detail', ''); await flush(); }
-        const started = await api('start', { direction, preview, tab });
-        status = { ...status, ...started, reason: '', note: '', error: null, stats: null, summary: null, progress: null }; starting = false; render();
+        const started = await api('start', { direction, preview, tab, ...(scope ? { scope } : {}) });
+        status = { ...status, ...started, scope, reason: '', note: '', error: null, stats: null, summary: null, progress: null }; starting = false; render();
     } catch (error) { showError(error); }
 }
 root.querySelector('.ts-push').onclick = () => begin('push');
 root.querySelector('.ts-pull').onclick = () => begin('pull');
+root.querySelector('.ts-scoped-push').onclick = () => begin('push', false, true);
+root.querySelector('.ts-scoped-pull').onclick = () => begin('pull', false, true);
+root.querySelector('.ts-preview-scoped-push').onclick = () => begin('push', true, true);
+root.querySelector('.ts-preview-scoped-pull').onclick = () => begin('pull', true, true);
 root.querySelector('.ts-reconcile').onclick = async () => {
     if (starting || setupBusy) return;
     starting = true; localError = ''; render();

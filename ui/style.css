@@ -15,6 +15,13 @@
 #tavernsyn-panel .ts-config-actions{display:flex;flex-wrap:wrap;gap:.5em}
 #tavernsyn-panel .ts-config-actions .menu_button{width:auto;white-space:normal;justify-content:center;margin:0;min-width:7em}
 #tavernsyn-panel .ts-hint{font-size:.85em;opacity:.85}
+#tavernsyn-panel .ts-scope{border:1px solid #8885;border-radius:8px;margin:1em 0;padding:.75em;min-width:0}
+#tavernsyn-panel .ts-scope-options{display:flex;flex-wrap:wrap;gap:.65em;margin:.5em 0 .8em}
+#tavernsyn-panel .ts-scope-options label{display:inline-flex;align-items:center;gap:.35em}
+#tavernsyn-panel .ts-scope-options input{width:auto;margin:0}
+#tavernsyn-panel .ts-scope-previews{display:flex;flex-wrap:wrap;gap:.5em;margin:.65em 0}
+#tavernsyn-panel .ts-scope-previews>.menu_button{width:auto;white-space:normal;margin:0}
+#tavernsyn-panel .ts-scope small{display:block;line-height:1.5;opacity:.85}
 #tavernsyn-panel .ts-dataset,#tavernsyn-panel .ts-config-result{overflow-wrap:anywhere}
 .ts-dialog{background:var(--SmartThemeBlurTintColor,#20242d);color:var(--SmartThemeBodyColor,#eee);border:1px solid #8885;border-radius:12px;box-sizing:border-box;padding:24px;width:min(520px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:85vh;overflow:auto}
 .ts-dialog::backdrop{background:#000a}

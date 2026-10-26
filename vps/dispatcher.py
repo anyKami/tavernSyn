@@ -148,6 +148,39 @@ def payload_paths(manifest):
             check(not any(part in ("node_modules", ".git", ".ssh", ".tailscale") for part in name.split("/")), "device dependencies/identity rejected")
 
 
+CATEGORIES = {"chats": ["chats", "group chats", "groups"], "characters": ["characters"], "worlds": ["worlds"]}
+
+
+def scope_valid(scope):
+    if scope is None:
+        return None
+    check(isinstance(scope, list) and 0 < len(scope) <= 3 and all(isinstance(item, str) and item in CATEGORIES for item in scope)
+          and len(set(scope)) == len(scope), "invalid selected categories")
+    return sorted(scope)
+
+
+def scope_paths(scope):
+    return ["profile/" + folder for category in scope_valid(scope) for folder in CATEGORIES[category]]
+
+
+def in_scope(name, scope):
+    return any(name.startswith(prefix + "/") for prefix in scope_paths(scope))
+
+
+def sealed(files):
+    files = sorted(files, key=lambda file: file["path"])
+    return dict(format=1, files=files, bytes=sum(file["size"] for file in files), digest=digest_files(files))
+
+
+def source_state(metadata, files, scope=None):
+    identity = dict(files=sorted([{k: file[k] for k in ("path", "sha256")} for file in files], key=lambda file: file["path"]),
+                    plugins=sorted([{k: plugin[k] for k in ("code", "commit", "branch", "origin")} for plugin in metadata.get("plugins", [])], key=lambda plugin: plugin["code"]),
+                    config=metadata.get("config", {}), extraRoots=sorted(metadata.get("extraRoots", [])), executables=sorted(metadata.get("executables", [])))
+    if scope:
+        identity["scope"] = scope_valid(scope)
+    return dict(format=2, digest=hashlib.sha256(canonical(identity).encode()).hexdigest(), **identity)
+
+
 class Lock:
     def __init__(self, path, shared=False):
         check(fcntl is not None, "SSH dispatcher requires Linux flock")
@@ -235,6 +268,7 @@ class Store:
         check(message.get("jobBound") is True, "UPGRADE_REQUIRED: update the device before starting a transfer")
         direction = message.get("direction")
         check(direction in ("push", "pull"), "invalid direction")
+        scope = scope_valid(message.get("scope"))
         if self.lock is None:
             self.lock = Lock(self.private / "operation.lock")
         with Lock(self.private / "transfer.lock"):
@@ -245,6 +279,7 @@ class Store:
             check(prior or not message.get("resumeOnly"), "NO_JOB: no retained job with this id")
             if prior:
                 check(prior["device"] == device and prior["direction"] == direction, "wrong job owner or direction")
+                check(scope_valid(prior.get("scope")) == scope, "job categories changed")
                 check(prior["phase"] != "aborted", "job was aborted; start a new job")
                 if prior["phase"] == "done":
                     return self.describe(prior)
@@ -267,17 +302,19 @@ class Store:
                 check(message.get("base") == (current["digest"] if current else None), "REMOTE_CHANGED: preview no longer current")
             else:
                 check(current is not None, "EMPTY_REMOTE: no published data")
+            if scope:
+                self.catalog(scope, current)  # Requires a complete initial publication.
             if active:
                 self.park(active)
             seed = self.root / "generations" / current["generation"] / "payload" if current else None
             seeded_from = None
-            if direction == "push" and active and active["direction"] == "push" and active["phase"] not in ("done", "aborted") \
+            if direction == "push" and active and active["direction"] == "push" and scope_valid(active.get("scope")) == scope and active["phase"] not in ("done", "aborted") \
                     and active["base"] == (current["digest"] if current else None):
                 # Copy/reflink interrupted bytes into the new task. The retained job
                 # stays independent; rsync plus SHA-256 verification handles differences.
                 check(ID.fullmatch(active["generation"]), "invalid interrupted generation")
                 for directory in ("incoming", "generations"):
-                    candidate = self.root / directory / active["generation"] / "payload"
+                    candidate = self.root / directory / active["generation"] / ("upload" if scope else "payload")
                     if candidate.is_dir():
                         check(candidate.resolve() == candidate, "linked interrupted payload")
                         seed, seeded_from = candidate, active["job"]
@@ -287,10 +324,18 @@ class Store:
                 payload = self.root / "generations" / generation / "payload"
             else:
                 generation = message["job"]
-                payload = self.root / "incoming" / generation / "payload"
+                payload = self.root / "incoming" / generation / ("upload" if scope else "payload")
                 check(not payload.parent.exists(), "staging path already exists")
                 payload.parent.mkdir(mode=0o700)
-                if seed:
+                if seed and scope:
+                    payload.mkdir(mode=0o700)
+                    for relative in scope_paths(scope):
+                        source = seed / relative
+                        if source.exists():
+                            target = payload / relative
+                            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                            subprocess.run(["cp", "--reflink=auto", "--recursive", "--preserve=timestamps", "--no-dereference", str(source), str(target)], check=True, stdout=subprocess.DEVNULL)
+                elif seed:
                     # reflink or independent copy; never hardlinks and never a live ST directory.
                     subprocess.run(["cp", "--reflink=auto", "--recursive", "--preserve=timestamps", "--no-dereference",
                                     str(seed), str(payload)], check=True, stdout=subprocess.DEVNULL)
@@ -298,8 +343,15 @@ class Store:
                     payload.mkdir(mode=0o700)
             job = dict(job=message["job"], device=device, direction=direction, generation=generation,
                        phase="transfer", base=current["digest"] if current else None, payload=str(payload))
+            if scope:
+                job["scope"] = scope
+                job["baseGeneration"] = current["generation"]
             if direction == "pull":
-                job["manifest"] = current["manifest"]
+                if scope:
+                    selected = self.catalog(scope, current)
+                    job.update(manifest=selected["manifest"], environment=selected["environment"], publicationDigest=current["digest"])
+                else:
+                    job["manifest"] = current["manifest"]
             elif seeded_from:
                 job["seededFrom"] = seeded_from
             self.save(job)
@@ -307,7 +359,77 @@ class Store:
             return self.describe(job)
 
     def describe(self, job):
-        return {k: job[k] for k in ("job", "direction", "generation", "phase", "base", "manifest", "seededFrom") if k in job} | {"module": "payload"}
+        return {k: job[k] for k in ("job", "direction", "generation", "phase", "base", "manifest", "seededFrom", "scope", "environment", "publicationDigest") if k in job} | {"module": "payload"}
+
+    def catalog(self, scope, current=None):
+        scope = scope_valid(scope)
+        check(scope is not None, "selected categories required")
+        current = current or self.current()
+        check(current is not None, "EMPTY_REMOTE: publish a complete snapshot before category synchronization")
+        metadata = read(self.root / "generations" / current["generation"] / "payload" / "environment.json")
+        check(not metadata.get("scope") and any(file["path"] == "profile/settings.json" and file["size"] > 2 for file in current["manifest"]["files"]), "EMPTY_REMOTE: a complete publication is required")
+        files = [file for file in current["manifest"]["files"] if in_scope(file["path"], scope)]
+        state_files = [file for file in metadata.get("sourceState", {}).get("files", []) if in_scope(file["path"], scope)]
+        check({file["path"] for file in state_files} == {file["path"] for file in files}, "incomplete selected source state")
+        selected = {k: metadata[k] for k in ("format", "sourceVersion", "sourcePlatform", "sourceArch") if k in metadata}
+        selected.update(scope=scope, plugins=[], config={}, extraRoots=[], warnings=[], executables=[name for name in metadata.get("executables", []) if in_scope(name, scope)])
+        selected["sourceState"] = source_state(selected, state_files, scope)
+        environment = canonical(selected) + "\n"
+        entry = dict(path="environment.json", size=len(environment.encode()), mtime=0, sha256=hashlib.sha256(environment.encode()).hexdigest())
+        return dict(generation=current["generation"], digest=current["digest"], scope=scope, manifest=sealed(files + [entry]), environment=environment)
+
+    def merge_scope(self, job, manifest, active_root):
+        temporary = active_root / (".merge-" + str(uuid.uuid4()))
+        try:
+            return self._merge_scope(job, manifest, active_root, temporary)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+
+    def _merge_scope(self, job, manifest, active_root, temporary):
+        scope = scope_valid(job["scope"])
+        upload = active_root / "upload"
+        check(difference(manifest, scan(upload))["equal"], "INTEGRITY: category upload is incomplete")
+        incoming = read(upload / "environment.json")
+        check(scope_valid(incoming.get("scope")) == scope and not incoming.get("plugins") and not incoming.get("extraRoots")
+              and not incoming.get("config") and all(file["path"] == "environment.json" or in_scope(file["path"], scope) for file in manifest["files"]), "category upload outside scope")
+        state_files = incoming.get("sourceState", {}).get("files", [])
+        check({file["path"] for file in state_files} == {file["path"] for file in manifest["files"] if file["path"] != "environment.json"}
+              and all(in_scope(name, scope) for name in incoming.get("executables", []))
+              and source_state(incoming, state_files, scope)["digest"] == incoming.get("sourceState", {}).get("digest"), "invalid selected source state")
+        base = self.root / "generations" / job["baseGeneration"] / "payload"
+        subprocess.run(["cp", "--reflink=auto", "--recursive", "--preserve=timestamps", "--no-dereference", str(base), str(temporary)], check=True, stdout=subprocess.DEVNULL)
+        for relative in scope_paths(scope):
+            target, source = temporary / relative, upload / relative
+            if target.exists():
+                check(target.is_dir() and not target.is_symlink(), "invalid selected destination")
+                shutil.rmtree(target)
+            if source.exists():
+                check(source.is_dir() and not source.is_symlink(), "invalid selected source")
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                subprocess.run(["cp", "--reflink=auto", "--recursive", "--preserve=timestamps", "--no-dereference", str(source), str(target)], check=True, stdout=subprocess.DEVNULL)
+        metadata = read(base / "environment.json")
+        metadata["executables"] = sorted(set([name for name in metadata.get("executables", []) if not in_scope(name, scope)] + incoming.get("executables", [])))
+        files = [file for file in metadata["sourceState"]["files"] if not in_scope(file["path"], scope)] + state_files
+        metadata["sourceState"] = source_state(metadata, files)
+        atomic(temporary / "environment.json", metadata)
+        merged = scan(temporary)
+        payload_paths(merged)
+        target = active_root / "payload"
+        if target.exists():
+            check(not target.is_symlink(), "invalid category publication stage")
+            shutil.rmtree(target)
+        os.rename(temporary, target)
+        atomic(active_root / "SCOPE.json", dict(scope=scope, snapshotDigest=manifest["digest"], digest=merged["digest"]))
+        return merged
+
+    def published(self, message):
+        current = self.current()
+        check(current and current["generation"] == message.get("job"), "COMMIT_NOT_CONFIRMED: publication is not current")
+        receipt = read(self.root / "generations" / current["generation"] / "SCOPE.json")
+        check(receipt["scope"] == scope_valid(message.get("scope")) and receipt["snapshotDigest"] == message.get("snapshotDigest")
+              and receipt["digest"] == current["digest"], "COMMIT_NOT_CONFIRMED: category receipt differs")
+        return dict(generation=current["generation"], digest=current["digest"], snapshotDigest=receipt["snapshotDigest"], phase="done")
 
     def own_job(self, message, device):
         check(self.lock is not None, "begin/resume control session first")
@@ -336,12 +458,16 @@ class Store:
         job = self.own_job(message, device)
         manifest = manifest_valid(message["manifest"])
         payload_paths(manifest)
+        scope = scope_valid(job.get("scope"))
+        current = self.current()
+        if scope and current and current["generation"] == job["generation"]:
+            return self.describe(job) | self.published(dict(job=job["job"], scope=scope, snapshotDigest=manifest["digest"]))
         if job["phase"] == "done":
             current = self.current()
             check(current and current["generation"] == job["generation"] and current["digest"] == manifest["digest"], "different committed result")
             return self.describe(job) | {"digest": manifest["digest"]}
         check(job["direction"] == "push" and job["phase"] in ("transfer", "finalizing"), "not an upload")
-        check(any(f["path"] == "profile/settings.json" and f["size"] > 2 for f in manifest["files"]), "EMPTY_SOURCE: missing profile settings")
+        check(scope or any(f["path"] == "profile/settings.json" and f["size"] > 2 for f in manifest["files"]), "EMPTY_SOURCE: missing profile settings")
         job["phase"] = "finalizing"
         self.save(job)  # Daemon dispatcher rejects any new transfer before exclusive lock acquisition.
         with Lock(self.private / "transfer.lock"):
@@ -349,11 +475,14 @@ class Store:
             generation = self.root / "generations" / job["generation"]
             active_root = stage if stage.exists() else generation
             self.clean_partials(active_root / "payload")
-            if not difference(manifest, scan(active_root / "payload"))["equal"]:
+            if not difference(manifest, scan(active_root / ("upload" if scope else "payload")))["equal"]:
                 if stage.exists():
                     job["phase"] = "transfer"
                     self.save(job)
                 raise ProtocolError("INTEGRITY: upload is incomplete")
+            snapshot_digest = manifest["digest"]
+            if scope:
+                manifest = self.merge_scope(job, manifest, active_root)
             atomic(active_root / "manifest.json", manifest)
             atomic(active_root / "COMPLETE.json", {"digest": manifest["digest"], "generation": job["generation"]})
             # Ensure transferred file data precedes the publication pointer.
@@ -399,7 +528,12 @@ class Store:
                     action()
                 except (OSError, ProtocolError):
                     maintenance.append(name)
-            return self.describe(job) | {"digest": manifest["digest"], **({"maintenance": maintenance} if maintenance else {})}
+            if scope:
+                try:
+                    shutil.rmtree(generation / "upload")
+                except OSError:
+                    maintenance.append("category-staging")
+            return self.describe(job) | {"digest": manifest["digest"], **({"snapshotDigest": snapshot_digest} if scope else {}), **({"maintenance": maintenance} if maintenance else {})}
 
     def gc(self):
         keep = {read(self.root / name)["generation"] for name in ("current.json", "previous.json") if (self.root / name).exists()}
@@ -436,10 +570,14 @@ class Store:
             current = self.current()
             active = self.active()
             pending = {k: active[k] for k in ("job", "direction", "phase")} if active and active["device"] == device and active["phase"] not in ("done", "aborted") else None
-            return {"protocol": 1, "version": "0.2.5", "capabilities": ["paused-jobs", "job-bound-rsync"], "dataset": self.format["dataset"],
+            return {"protocol": 1, "version": "0.2.6", "capabilities": ["paused-jobs", "job-bound-rsync", "scoped-sync-v1"], "dataset": self.format["dataset"],
                     "current": {k: current[k] for k in ("generation", "digest")} if current else None, "pending": pending}
         if op == "begin":
             return self.begin(message, device)
+        if op == "catalog":
+            return self.catalog(scope_valid(message.get("scope")))
+        if op == "published":
+            return self.published(message)
         if op == "status":
             return self.describe(self.own_job(message, device))
         if op == "inspect":
@@ -459,7 +597,7 @@ def serve_rsync(store, device, job_id=None):
         check(job and job["job"] == job_id, "wrong transfer job")
         check(job and job["device"] == device and job["phase"] == "transfer", "no active transfer for this device")
         payload = Path(job["payload"])
-        expected = store.root / ("incoming" if job["direction"] == "push" else "generations") / job["generation"] / "payload"
+        expected = store.root / ("incoming" if job["direction"] == "push" else "generations") / job["generation"] / ("upload" if job.get("scope") and job["direction"] == "push" else "payload")
         check(payload == expected and payload.resolve() == expected and not payload.is_symlink(), "invalid module root")
         config = store.private / ("rsync-" + job["job"] + "-" + str(os.getpid()) + ".conf")
         contents = "\n".join([

@@ -4,13 +4,14 @@ SillyTavern 跨设备手动同步插件，面向 Windows 和 Android Termux。�
 
 ## 当前版本
 
-**0.2.5，适配 SillyTavern 1.19.0。** 优化 Git 插件增量与无变化同步，支持缺少缓存时复用本机文件；修复执行权限丢失、重复启动识别、提交成功后误报失败和重复依赖准备。增加“核对同步结果”与 VPS 只读空间报告。Windows Node 测试 130 项、Python 测试 21 项、真实酒馆隔离检查 28 项通过，6 项平台专项跳过。[更新记录](CHANGELOG.md)、[增量实测](docs/incremental-sync.md)与[审查修复及限制](docs/review-fixes.md)。
+**0.2.6，适配 SillyTavern 1.19.0。** 新增聊天记录、角色卡、世界书的分类增量推送和拉取，可单选或组合，包含删除。所选类别以来源为准；其他配置、插件及用户数据保持不变。需要同步更新本机前后端与 VPS。[分类同步说明](docs/scoped-sync.md)、[更新记录](CHANGELOG.md)、[增量实测](docs/incremental-sync.md)与[审查修复及限制](docs/review-fixes.md)。
 
 本版本已清理旧 Git 历史，已有旧克隆请重新克隆后更新，见[历史清理说明](docs/security-audit-0.2.0.md#历史清理)。
 
 ## 已实现
 
 - 原生前端扩展、管理员服务端接口和独立受控启动器，同一个仓库安装。
+- 分类增量推送/拉取聊天记录（含群聊）、角色卡和世界书，支持组合选择、差异预览、删除确认、无变化快速结束和仅恢复本次范围。
 - 酒馆内填写 VPS 地址、专用账号和密码，保存后立即生效；自动识别数据集和记住首次连接的服务器身份。
 - 推送和拉取均先确认方向；「恢复上一版」恢复最近一次拉取前的本机数据，并检查重启结果。
 - 完整用户目录和自定义持久化子目录，包含聊天、角色资源、世界书、预设、API 配置与密钥。
@@ -53,6 +54,7 @@ bash install.sh "$HOME/SillyTavern"
 - [Windows / Termux / VPS 安装与更新](docs/installation.md)
 - [版本更新记录](CHANGELOG.md)
 - [同步范围、设备字段与插件恢复](docs/scope.md)
+- [分类增量同步：聊天、角色卡和世界书](docs/scoped-sync.md)
 - [断线重试、故障处理与手动恢复](docs/recovery.md)
 - [实现说明、实测结果与限制](docs/implementation.md)
 - [0.2.5 增量优化实测](docs/incremental-sync.md)

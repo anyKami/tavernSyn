@@ -4,13 +4,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { installPluginDependencies, prepareDependencyCache } from '../lib/dependencies.mjs';
-import { atomicJson, readJson, run, SyncError } from '../lib/io.mjs';
+import { atomicJson, exists, readJson, run, SyncError } from '../lib/io.mjs';
 import { fixture } from './fixtures.mjs';
 
 const mismatch = 'npm error code EUSAGE\nnpm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync.\nnpm error Missing: fixture-dependency@1.0.0 from lock file\n';
 async function dependencyFixture() {
     const device = await fixture(); device.restoreDependencies = true;
-    device.npmCli = path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+    const candidates = [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), path.resolve(path.dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js')];
+    for (const candidate of candidates) if (await exists(candidate)) { device.npmCli = candidate; break; }
     const job = path.join(device.state, 'jobs', randomUUID()), directory = path.join(job, 'candidate/extensions/demo');
     await fs.mkdir(directory, { recursive: true });
     await atomicJson(path.join(directory, 'package.json'), { name: 'fixture-root', version: '1.0.0', dependencies: { 'fixture-dependency': '1.0.0' } });

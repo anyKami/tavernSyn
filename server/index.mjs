@@ -118,7 +118,7 @@ export async function init(router) {
     }));
     router.post('/start', endpoint(async (req, res) => {
         const body = req.body;
-        requireThat(Object.keys(body).every(k => ['direction', 'tab', 'preview'].includes(k)), 'INPUT', '不接受未定义的同步参数。');
+        requireThat(Object.keys(body).every(k => ['direction', 'tab', 'preview', 'scope'].includes(k)), 'INPUT', '不接受未定义的同步参数。');
         if (managed) {
             const others = [...managed.tabs].filter(([tab, time]) => tab !== body.tab && Date.now() - time < 15000);
             requireThat(!others.length, 'OTHER_TABS', '请先关闭其他正在打开的酒馆标签页，再执行同步。');

@@ -1,10 +1,10 @@
 {
   "status": "passed",
-  "date": "2026-10-25T21:08:37.437Z",
+  "date": "2026-10-26T17:23:43.639Z",
   "platform": "win32",
   "node": "v24.18.0",
-  "root": "<temporary isolated fixture>",
-  "port": 56974,
+  "root": "<isolated-test-directory>",
+  "port": 60507,
   "checks": [
     "A second real startup probe reuses the authenticated ST instance through an unauthenticated HEAD epoch header and opens the existing origin",
     "Native authentication and CSRF reject unauthenticated/missing-token requests",

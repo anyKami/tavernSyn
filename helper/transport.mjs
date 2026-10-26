@@ -11,6 +11,7 @@ import { enoughSpace } from '../lib/content.mjs';
 import { rsyncOutputLog } from './sync-log.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { seedDownloadBasis } from '../lib/download-basis.mjs';
+import { normalizeScope, sameScope, inScope } from '../lib/scope.mjs';
 
 export const RSYNC_ARGS = ['-rt', '--compress', '--omit-dir-times', '--no-whole-file', '--delete-delay', '--partial-dir=.tavernsyn-partial', '--fsync', '--info=progress2,stats2', '--stats', '--itemize-changes', '--8-bit-output', '--outbuf=L', '--timeout=120', '--modify-window=0'];
 const ALIAS = 'tavernsyn-vps';
@@ -159,14 +160,18 @@ async function partialCleanup(root) {
         }
     }
 }
-async function transfer(env, direction, job, payload, onProgress, correction, log = () => {}) {
+async function transfer(env, direction, job, payload, onProgress, correction, log = () => {}, selection) {
     const local = `${(await env.posix(payload)).replace(/\/$/, '')}/`, remote = `${ALIAS}::payload/`;
     const args = [...RSYNC_ARGS];
-    if (correction) {
+    if (correction || selection) {
         const list = path.join(path.dirname(payload), `correction-${randomUUID()}.txt`);
-        await fs.writeFile(list, `${correction.join('\0')}\0`, { mode: 0o600 });
+        // --files-from implicitly enables --relative, which the VPS deliberately
+        // refuses. Anchored exact include filters retain the same path layout
+        // without widening the daemon's option allowlist.
+        await fs.writeFile(list, `${selectionFilters(correction ?? selection).join('\0')}\0`, { mode: 0o600 });
         args.splice(args.indexOf('--delete-delay'), 1);
-        args.push('--from0', `--files-from=${await env.posix(list)}`, '--ignore-times');
+        args.push('--from0', `--include-from=${await env.posix(list)}`, '--exclude=*');
+        if (correction) args.push('--ignore-times');
     }
     args.push(`--rsync-path=${env.jobBound ? `tavernsyn-rsync-v2 ${env.deviceId} ${job}` : `tavernsyn-rsync-v1 ${env.deviceId}`}`, `--rsh=${env.rsh}`, '--', ...(direction === 'push' ? [local, remote] : [remote, local]));
     let tail = '';
@@ -183,29 +188,43 @@ async function transfer(env, direction, job, payload, onProgress, correction, lo
     log(`rsync ${direction === 'push' ? '上传' : '下载'}结束`);
     return parseStats(result.stdout);
 }
+export function selectionFilters(files) {
+    const patterns = new Set();
+    const escape = name => name.replace(/[\\[\]*?]/g, '\\$&');
+    for (const file of files) {
+        const parts = file.split('/');
+        for (let i = 1; i < parts.length; i++) patterns.add('/' + escape(parts.slice(0, i).join('/')) + '/');
+        patterns.add('/' + escape(file));
+    }
+    return [...patterns];
+}
 function addStats(first, second) {
     if (!first) return second;
     if (!second) return first;
     return { ...first, ...Object.fromEntries(['sentBytes', 'receivedBytes', 'literalBytes', 'matchedBytes', 'transferredFiles'].map(k => [k, first[k] + second[k]])), corrected: true };
 }
-export async function push(session, device, job, payload, manifest, onProgress, onBegin) {
+export async function push(session, device, job, payload, manifest, onProgress, onBegin, { scope = null } = {}) {
+    scope = normalizeScope(scope);
     validateManifest(manifest); const { control, env } = session;
-    const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'push', base: session.hello.current?.digest ?? null, jobBound: env.jobBound === true });
+    if (scope) requireScoped(session);
+    const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'push', base: session.hello.current?.digest ?? null, jobBound: env.jobBound === true, ...(scope ? { scope } : {}) });
+    requireThat(sameScope(begun.scope, scope), 'REMOTE_PROTOCOL', 'VPS 返回了不同的同步范围。');
     await onBegin?.(begun);
     let stats;
     if (!['done', 'finalizing'].includes(begun.phase)) {
         stats = await transfer(env, 'push', job, payload, onProgress, undefined, session.log);
         await onProgress?.({ stage: 'transferred', stats });
     }
-    return finalizeUpload(session, device, job, payload, manifest, stats, onProgress, begun.phase);
+    return finalizeUpload(session, device, job, payload, manifest, stats, onProgress, begun.phase, { scope, base: begun.base });
 }
 
 // Upload bytes remain useful when the independent control SSH exits. Reclaim
 // only this retained job; begin/resume and commit enforce ownership and base.
-export async function finalizeUpload(session, device, job, payload, manifest, stats, onProgress, phase = 'transfer') {
+export async function finalizeUpload(session, device, job, payload, manifest, stats, onProgress, phase = 'transfer', options = {}) {
+    const scope = normalizeScope(options.scope);
     let recoveries = 0;
     const dataset = session.hello.dataset ?? device.remote.dataset;
-    const base = session.hello.current?.digest ?? null;
+    const base = options.base === undefined ? session.hello.current?.digest ?? null : options.base;
     for (;;) {
         try {
             if (!['done', 'finalizing'].includes(phase)) {
@@ -219,7 +238,8 @@ export async function finalizeUpload(session, device, job, payload, manifest, st
             }
             session.log?.('逐文件 SHA-256 校验后发布 VPS 快照');
             const published = await session.control.request('commit', { job, manifest });
-            requireThat(published.digest === manifest.digest, 'REMOTE_PROTOCOL', 'VPS 发布回执与源快照不匹配。');
+            requireThat((scope ? published.snapshotDigest : published.digest) === manifest.digest
+                && /^[a-f0-9]{64}$/.test(published.digest), 'REMOTE_PROTOCOL', 'VPS 发布回执与源快照不匹配。');
             return { ...published, stats };
         } catch (error) {
             if (!['SSH', 'SSH_TIMEOUT'].includes(error.code) || recoveries >= 2 || typeof session.reconnect !== 'function') throw error;
@@ -229,7 +249,7 @@ export async function finalizeUpload(session, device, job, payload, manifest, st
             let resumed;
             for (let attempt = 0; ; attempt++) {
                 try {
-                    resumed = await session.control.request('begin', { job, dataset, direction: 'push', base, jobBound: true, resumeOnly: true });
+                    resumed = await session.control.request('begin', { job, dataset, direction: 'push', base, jobBound: true, resumeOnly: true, ...(scope ? { scope } : {}) });
                     break;
                 } catch (retryError) {
                     if (retryError.code !== 'BUSY' || attempt >= 4) throw retryError;
@@ -237,14 +257,16 @@ export async function finalizeUpload(session, device, job, payload, manifest, st
                 }
             }
             requireThat(resumed.job === job && resumed.generation === job
-                && ['transfer', 'finalizing', 'done'].includes(resumed.phase) && (resumed.base ?? null) === base,
+                && ['transfer', 'finalizing', 'done'].includes(resumed.phase) && (resumed.base ?? null) === base && sameScope(resumed.scope, scope),
             'REMOTE_PROTOCOL', 'VPS 续接回执与原上传任务不一致，已停止发布。');
             phase = resumed.phase;
             session.log?.(`SSH 已恢复同一上传任务：${phase}；继续校验与发布。`);
         }
     }
 }
-export async function pull(session, device, job, payload, onProgress, onBegin) {
+export async function pull(session, device, job, payload, onProgress, onBegin, { scope = null } = {}) {
+    scope = normalizeScope(scope);
+    if (scope) return pullScoped(session, device, job, payload, onProgress, onBegin, scope);
     const { control, env } = session;
     const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: env.jobBound === true });
     await onBegin?.(begun);
@@ -292,4 +314,45 @@ export async function pull(session, device, job, payload, onProgress, onBegin) {
         session.log?.('VPS 结束回执未收到；下载文件已全量校验，继续准备应用。控制连接关闭后 VPS 会释放占用。');
     } finally { control.close(); }
     return { ...begun, manifest, stats };
+}
+function requireScoped(session) {
+    requireThat(session.hello.capabilities?.includes('scoped-sync-v1'), 'UPGRADE_REQUIRED', '分类增量同步需要更新 VPS 的 TavernSyn 服务程序；本次未停止酒馆或传输文件。');
+}
+export async function catalog(session, _device, scope) {
+    requireScoped(session);
+    try { return await session.control.request('catalog', { scope: normalizeScope(scope) }); }
+    catch (error) {
+        if (error.message.includes('EMPTY_REMOTE')) throw new SyncError('EMPTY_REMOTE', 'VPS 尚无完整同步副本，请先完成一次完整推送，再使用分类增量同步。');
+        throw error;
+    }
+}
+async function pullScoped(session, device, job, payload, onProgress, onBegin, scope) {
+    requireScoped(session);
+    const { control, env } = session;
+    const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: env.jobBound === true, scope });
+    await onBegin?.(begun);
+    const manifest = validateManifest(begun.manifest);
+    requireThat(sameScope(begun.scope, scope) && uuidPattern.test(begun.generation) && /^[a-f0-9]{64}$/.test(begun.publicationDigest ?? '')
+        && typeof begun.environment === 'string' && manifest.files.every(file => file.path === 'environment.json' || inScope(file.path, scope)),
+    'REMOTE_PROTOCOL', 'VPS 分类清单与本次选择不一致。');
+    await enoughSpace(device.state, manifest.bytes);
+    if (!await exists(payload)) { await fs.mkdir(payload, { recursive: true, mode: 0o700 }); await seedDownloadBasis(device, payload, manifest); }
+    await fs.writeFile(path.join(payload, 'environment.json'), begun.environment, { mode: 0o600 });
+    const selection = manifest.files.filter(file => file.path !== 'environment.json').map(file => file.path);
+    let stats = { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 };
+    if (begun.phase !== 'done' && selection.length) stats = await transfer(env, 'pull', job, payload, onProgress, undefined, session.log, selection);
+    await partialCleanup(payload);
+    const diff = difference(manifest, await scan(payload));
+    requireThat(!diff.extra.length, 'INTEGRITY', '分类下载暂存含额外文件。');
+    const correction = [...diff.missing, ...diff.changed];
+    requireThat(!correction.includes('environment.json'), 'REMOTE_PROTOCOL', 'VPS 分类元数据摘要不匹配。');
+    if (correction.length) stats = addStats(stats, await transfer(env, 'pull', job, payload, onProgress, correction, session.log));
+    await partialCleanup(payload); await verify(payload, manifest);
+    await onProgress?.({ stage: 'transferred', stats });
+    await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
+    await atomicJson(path.join(path.dirname(payload), 'download.json'), { format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest, scope, publicationDigest: begun.publicationDigest });
+    try { if (begun.phase !== 'done') await control.request('finish', { job }, 15_000); }
+    catch (error) { if (!['SSH', 'SSH_TIMEOUT'].includes(error.code)) throw error; }
+    finally { control.close(); }
+    return { ...begun, digest: begun.publicationDigest, manifest, stats };
 }

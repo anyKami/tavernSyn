@@ -130,6 +130,122 @@ class StoreTests(unittest.TestCase):
         self.store.commit(dict(job=job, manifest=manifest), self.device)
         return job, manifest
 
+    def complete_publication(self):
+        job = self.begin()
+        payload = self.root / "incoming" / job / "payload"
+        shutil.rmtree(payload)
+        contents = {"profile/settings.json": '{"theme":"keep"}', "profile/secrets.json": '{"key":"synthetic"}',
+                    "profile/chats/A/old.jsonl": '{"mes":"old"}\n', "profile/group chats/g.jsonl": '{"mes":"group"}\n',
+                    "profile/groups/g.json": '{"id":"g"}', "profile/characters/old.png": "old card",
+                    "profile/worlds/old.json": '{"entries":{}}', "extensions/demo/index.js": "keep plugin",
+                    "profile/files/keep.txt": "keep attachment"}
+        for name, text in contents.items():
+            file = payload / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(text, encoding="utf-8")
+        metadata = dict(format=1, sourceVersion="1.19.0", sourcePlatform="fixture", sourceArch="fixture",
+                        plugins=[], config={"/backups/chat/enabled": True}, extraRoots=[], warnings=[], executables=[])
+        metadata["sourceState"] = d.source_state(metadata, d.scan(payload)["files"])
+        d.atomic(payload / "environment.json", metadata)
+        manifest = d.scan(payload)
+        self.store.commit(dict(job=job, manifest=manifest), self.device)
+        return self.store.current()
+
+    def category_upload(self, scope, empty=False):
+        current = self.store.current()
+        job = str(uuid.uuid4())
+        self.store.begin(dict(job=job, direction="push", scope=scope, dataset=self.dataset, base=current["digest"], jobBound=True), self.device)
+        upload = self.root / "incoming" / job / "upload"
+        for relative in d.scope_paths(scope):
+            if (upload / relative).exists():
+                shutil.rmtree(upload / relative)
+        if not empty:
+            for category in scope:
+                relative = d.CATEGORIES[category][0]
+                file = upload / "profile" / relative / ("new.png" if category == "characters" else "new.jsonl" if category == "chats" else "new.json")
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text('{"fixture":"new"}\n', encoding="utf-8")
+        metadata = dict(format=1, sourceVersion="1.19.0", sourcePlatform="other", sourceArch="other", scope=sorted(scope),
+                        plugins=[], config={}, extraRoots=[], warnings=[], executables=[])
+        metadata["sourceState"] = d.source_state(metadata, d.scan(upload)["files"], scope)
+        d.atomic(upload / "environment.json", metadata)
+        return job, upload, d.scan(upload)
+
+    def test_category_push_mirrors_deletions_and_preserves_every_unselected_file(self):
+        for scope in (["characters"], ["chats"], ["worlds"], ["chats", "characters", "worlds"]):
+            with self.subTest(scope=scope):
+                before = self.complete_publication()
+                expected = {file["path"]: file["sha256"] for file in before["manifest"]["files"] if file["path"] != "environment.json" and not d.in_scope(file["path"], scope)}
+                job, _, manifest = self.category_upload(scope)
+                result = self.store.commit(dict(job=job, manifest=manifest), self.device)
+                current = self.store.current()
+                self.assertEqual(result["snapshotDigest"], manifest["digest"])
+                self.assertEqual(result["digest"], current["digest"])
+                self.assertNotEqual(result["digest"], manifest["digest"])
+                actual = {file["path"]: file["sha256"] for file in current["manifest"]["files"] if file["path"] != "environment.json" and not d.in_scope(file["path"], scope)}
+                self.assertEqual(actual, expected)
+                self.assertFalse(any("old." in file["path"] and d.in_scope(file["path"], scope) for file in current["manifest"]["files"]))
+                metadata = d.read(self.root / "generations" / job / "payload/environment.json")
+                self.assertNotIn("scope", metadata)
+                self.assertEqual(metadata["sourceState"]["digest"], d.source_state(metadata, metadata["sourceState"]["files"])["digest"])
+                catalog = self.store.catalog(scope)
+                selected = json.loads(catalog["environment"])
+                self.assertEqual(selected["sourceState"]["digest"], d.source_state(selected, selected["sourceState"]["files"], scope)["digest"])
+                self.assertTrue(all(file["path"] == "environment.json" or d.in_scope(file["path"], scope) for file in catalog["manifest"]["files"]))
+
+    def test_empty_category_is_an_explicit_delete_not_an_empty_full_snapshot(self):
+        self.complete_publication()
+        job, _, manifest = self.category_upload(["worlds"], empty=True)
+        self.store.commit(dict(job=job, manifest=manifest), self.device)
+        current = self.store.current()
+        self.assertFalse(any(d.in_scope(file["path"], ["worlds"]) for file in current["manifest"]["files"]))
+        self.assertTrue(any(file["path"] == "profile/characters/old.png" for file in current["manifest"]["files"]))
+
+    def test_category_job_rejects_outside_files_and_changed_resume_scope(self):
+        before = self.complete_publication()
+        job, upload, _ = self.category_upload(["worlds"])
+        (upload / "profile/settings.json").write_text('{"unexpected":true}', encoding="utf-8")
+        with self.assertRaises(d.ProtocolError):
+            self.store.commit(dict(job=job, manifest=d.scan(upload)), self.device)
+        self.assertEqual(self.store.current()["generation"], before["generation"])
+        with self.assertRaises(d.ProtocolError):
+            self.store.begin(dict(job=job, direction="push", scope=["characters"], dataset=self.dataset, jobBound=True), self.device)
+
+    def test_category_publication_receipt_and_retry_after_rename(self):
+        before = self.complete_publication()
+        job, _, manifest = self.category_upload(["characters"])
+        atomic = d.atomic
+        def fail_pointer(file, value):
+            if Path(file).name == "current.json":
+                raise OSError("synthetic pre-publication failure")
+            return atomic(file, value)
+        with patch.object(d, "atomic", side_effect=fail_pointer):
+            with self.assertRaises(OSError):
+                self.store.commit(dict(job=job, manifest=manifest), self.device)
+        self.assertEqual(self.store.current()["generation"], before["generation"])
+        published = self.store.commit(dict(job=job, manifest=manifest), self.device)
+        replay = self.store.commit(dict(job=job, manifest=manifest), self.device)
+        self.assertEqual(published["digest"], replay["digest"])
+        self.assertEqual(self.store.published(dict(job=job, scope=["characters"], snapshotDigest=manifest["digest"]))["digest"], published["digest"])
+        with self.assertRaises(d.ProtocolError):
+            self.store.published(dict(job=job, scope=["worlds"], snapshotDigest=manifest["digest"]))
+
+    def test_category_download_is_pinned_and_requires_a_complete_first_publication(self):
+        with self.assertRaises(d.ProtocolError):
+            self.store.catalog(["worlds"])
+        current = self.complete_publication()
+        job = str(uuid.uuid4())
+        result = self.store.begin(dict(job=job, direction="pull", scope=["chats"], dataset=self.dataset, jobBound=True), self.device)
+        self.assertEqual(result["publicationDigest"], current["digest"])
+        paths = {file["path"] for file in result["manifest"]["files"]}
+        self.assertIn("profile/groups/g.json", paths)
+        self.assertIn("profile/group chats/g.jsonl", paths)
+        self.assertNotIn("profile/settings.json", paths)
+        self.store.close()
+        self.complete_publication()
+        resumed = self.store.begin(dict(job=job, direction="pull", scope=["chats"], dataset=self.dataset, jobBound=True), self.device)
+        self.assertEqual(resumed["generation"], current["generation"])
+
     def test_new_root_only_and_empty_pull_refused(self):
         with self.assertRaises(d.ProtocolError):
             d.initialize(self.root, self.dataset)

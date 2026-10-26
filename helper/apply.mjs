@@ -7,6 +7,7 @@ import { CONFIG_POINTERS } from '../lib/device.mjs';
 import { restoreRepositories, rootsFor, preparePluginDependencies } from '../lib/snapshot.mjs';
 import { enoughSpace, validateContent } from '../lib/content.mjs';
 import { ATTRIBUTES, applyExecutables, gitExecutables, validateExecutables } from '../lib/file-attributes.mjs';
+import { inScope, normalizeScope, sameScope } from '../lib/scope.mjs';
 
 async function flushTree(directory) {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -24,13 +25,16 @@ async function flushTree(directory) {
     }
 }
 
-export async function prepare(device, payload, manifest, jobRoot) {
+export async function prepare(device, payload, manifest, jobRoot, { scope = null } = {}) {
+    scope = normalizeScope(scope);
     await verify(payload, manifest);
-    await validateContent(payload, manifest); await enoughSpace(device.state, manifest.bytes, 1);
+    await validateContent(payload, manifest, { scope }); await enoughSpace(device.state, manifest.bytes, 1);
+    const environment = await readJson(path.join(payload, 'environment.json'));
+    requireThat(sameScope(environment.scope, scope), 'PAYLOAD_SCOPE', '下载范围与任务不一致，未应用。');
     const candidate = path.join(jobRoot, 'candidate');
     requireThat(!await exists(candidate), 'CANDIDATE_EXISTS', '候选目录已存在，请先处理之前的恢复记录。');
     await copyTree(payload, candidate, { exclude: p => p === 'repositories' || p.startsWith('repositories/') });
-    const metadata = await restoreRepositories(device, payload, candidate);
+    const metadata = scope ? environment : await restoreRepositories(device, payload, candidate);
     // Legacy snapshots have no execution metadata. Git index modes can still
     // recover tracked scripts; arbitrary legacy files cannot be inferred safely.
     metadata.executables = metadata.executables === undefined
@@ -42,8 +46,8 @@ export async function prepare(device, payload, manifest, jobRoot) {
         && /\.(?:exe|dll|node|so(?:\.\d+)*|dylib)$/i.test(f.path));
     requireThat(!nativeFiles.length || (metadata.sourcePlatform === process.platform && metadata.sourceArch === process.arch), 'NATIVE_RESOURCE', '插件包含跨平台二进制资源。请在目标平台单独安装对应资源后，再重新准备同步。');
     requireThat((metadata.extraRoots ?? []).every(id => device.extraRoots.some(x => x.id === id)), 'EXTRA_ROOT', '远端包含本机尚未映射的自定义目录，请先配置映射。');
-    await preparePluginDependencies(device, candidate);
-    return { candidate, metadata };
+    if (!scope) await preparePluginDependencies(device, candidate);
+    return { candidate, metadata, scope };
 }
 async function preserveFile(source, target) {
     if (!await exists(source)) return;
@@ -54,6 +58,7 @@ async function syncDirectories(root) {
     return entries.filter(entry => entry.isDirectory() && entry.name.toLowerCase() === 'tavernsyn').map(entry => entry.name);
 }
 export async function buildPlan(device, prepared, jobRoot) {
+    if (prepared.scope) return buildScopedPlan(device, prepared, jobRoot);
     const { candidate, metadata } = prepared;
     const settings = path.join(candidate, 'profile/settings.json'), localSettings = path.join(device.dataRoot, device.profile, 'settings.json');
     await atomicJson(settings, preserveSettings(await readJson(settings), await readJson(localSettings), device.pointers));
@@ -94,14 +99,47 @@ export async function buildPlan(device, prepared, jobRoot) {
     await atomicJson(path.join(device.state, 'apply.json'), journal); return journal;
 }
 export async function validatePlan(device, journal) {
-    const allowed = [...(await rootsFor(device)).map(r => path.resolve(r.path)), path.resolve(device.yamlPath),
-        ...(journal.format === 2 ? [path.join(device.state, ATTRIBUTES)] : [])];
-    requireThat([1, 2].includes(journal.format) && Array.isArray(journal.steps) && journal.steps.length === allowed.length, 'JOURNAL', '恢复记录格式无效。');
+    const scope = journal.format === 3 ? normalizeScope(journal.scope) : null;
+    requireThat(journal.format !== 3 || scope, 'JOURNAL', '分类恢复记录缺少范围。');
+    const allowed = [...(await rootsFor(device, { scope })).map(r => path.resolve(r.path)),
+        ...(!scope ? [path.resolve(device.yamlPath)] : []), ...([2, 3].includes(journal.format) ? [path.join(device.state, ATTRIBUTES)] : [])];
+    requireThat([1, 2, 3].includes(journal.format) && Array.isArray(journal.steps) && journal.steps.length === allowed.length, 'JOURNAL', '恢复记录格式无效。');
     requireThat(new Set(journal.steps.map(s => path.resolve(s.live))).size === allowed.length && new Set(journal.steps.map(s => s.old)).size === allowed.length, 'JOURNAL', '恢复记录存在重复目标。');
     for (const step of journal.steps) {
         requireThat(allowed.includes(path.resolve(step.live)) && inside(path.join(device.state, 'jobs'), step.next) && inside(path.join(device.state, 'recovery'), step.old), 'JOURNAL', '恢复记录含越界路径。');
         await noLinks(step.live); await noLinks(step.next); await noLinks(step.old);
     }
+}
+async function buildScopedPlan(device, { candidate, metadata, scope }, jobRoot) {
+    scope = normalizeScope(scope);
+    requireThat(sameScope(metadata.scope, scope), 'PAYLOAD_SCOPE', '候选目录范围不匹配。');
+    for (const policy of device.preserveJson) {
+        if (!inScope(policy.path, scope)) continue;
+        const next = path.join(candidate, ...policy.path.split('/'));
+        const local = path.join(device.dataRoot, device.profile, ...policy.path.slice('profile/'.length).split('/'));
+        if (await exists(next) && await exists(local)) await atomicJson(next, preserveSettings(await readJson(next), await readJson(local), policy.pointers));
+    }
+    const attributesFile = path.join(device.state, ATTRIBUTES);
+    const oldAttributes = await exists(attributesFile) ? await readJson(attributesFile) : { format: 1, executables: [] };
+    requireThat(oldAttributes.format === 1, 'FILE_ATTRIBUTES', '本机文件属性记录无效。');
+    const executables = validateExecutables([...validateExecutables(oldAttributes.executables).filter(name => !inScope(name, scope)), ...metadata.executables]);
+    const nextAttributes = path.join(candidate, ATTRIBUTES);
+    await atomicJson(nextAttributes, { format: 1, executables });
+    const recovery = path.join(device.state, 'recovery');
+    requireThat(!await exists(recovery), 'RECOVERY_EXISTS', '存在上一次恢复数据，请先处理。');
+    const steps = [];
+    for (const root of await rootsFor(device, { scope })) {
+        const next = path.join(candidate, ...root.id.split('/'));
+        await fs.mkdir(next, { recursive: true, mode: 0o700 });
+        const parent = await fs.stat(path.dirname(root.path)), stage = await fs.stat(next);
+        requireThat(parent.dev === stage.dev && path.parse(root.path).root.toLowerCase() === path.parse(next).root.toLowerCase(), 'VOLUME', '安全替换要求候选与目标位于同一文件系统。');
+        steps.push({ live: root.path, next, old: path.join(recovery, String(steps.length)), hadOld: await exists(root.path), phase: 'planned' });
+    }
+    steps.push({ live: attributesFile, next: nextAttributes, old: path.join(recovery, ATTRIBUTES), hadOld: await exists(attributesFile), phase: 'planned' });
+    await flushTree(candidate); await fs.mkdir(recovery, { mode: 0o700 });
+    const journal = { format: 3, scope, jobRoot, candidate, recovery, phase: 'prepared', steps };
+    await atomicJson(path.join(device.state, 'apply.json'), journal);
+    return journal;
 }
 export async function applyPlan(device, journal, { afterRename } = {}) {
     await validatePlan(device, journal);
@@ -148,7 +186,7 @@ export async function recoveryStatus(device) {
         if (journal.phase !== 'committed') return { available: false };
         await validatePlan(device, journal);
         for (const step of journal.steps) if (await exists(step.old) !== step.hadOld || await exists(step.next)) return { available: false };
-        return { available: true, created: journal.committedAt ?? (await fs.stat(file)).mtime.toISOString() };
+        return { available: true, created: journal.committedAt ?? (await fs.stat(file)).mtime.toISOString(), ...(journal.scope ? { scope: journal.scope } : {}) };
     } catch { return { available: false, reason: '恢复记录或副本异常，请先查看恢复说明。' }; }
 }
 export async function preserveSyncCode(device, journal) {

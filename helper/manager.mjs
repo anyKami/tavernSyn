@@ -10,6 +10,8 @@ import * as transport from './transport.mjs';
 import { configuration, configureDevice, withDeviceLock } from '../lib/connection.mjs';
 import { validateContent } from '../lib/content.mjs';
 import { completionPath, readCompletion, validateCompletion, completedStatus, connectionId } from '../lib/completion.mjs';
+import { normalizeScope } from '../lib/scope.mjs';
+import { executeScoped } from './scoped.mjs';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'PREVIEW', 'PENDING_APPLY', 'RECOVERY_REQUIRED']);
 const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '从 VPS 下载', VERIFYING: '校验文件', PREPARING: '准备插件', AWAITING_CONFIRMATION: '等待覆盖确认',
@@ -95,12 +97,12 @@ export class Manager {
         if (action === 'confirm') {
             requireThat(this.job?.id === payload.id && this.job.phase === 'AWAITING_CONFIRMATION' && payload.token === this.job.confirmationToken, 'CONFIRMATION', '确认已过期，请重新预览。');
             requireThat(payload.tab === undefined || (typeof payload.tab === 'string' && /^[a-f0-9-]{36}$/.test(payload.tab)), 'INPUT', '浏览器标签页标识无效。');
-            const local = await portableState(this.device);
+            const local = await portableState(this.device, { scope: this.job.scope });
             if (local.digest !== this.job.localDigest && this.confirmationTarget) {
                 await this.write('AWAITING_CONFIRMATION', {
                     localDigest: local.digest,
                     confirmationToken: digest({ direction: this.job.direction, local: local.digest, remote: this.confirmationRemote }),
-                    summary: stateDifference(local, this.confirmationTarget),
+                    summary: this.job.scope && this.job.direction === 'push' ? stateDifference(this.confirmationTarget, local) : stateDifference(local, this.confirmationTarget),
                     ...(payload.tab ? { tab: payload.tab } : {}),
                     reason: `本机内容在等待期间有更新，已重新核对差异。请再次确认。${this.confirmationReason}`,
                 });
@@ -145,7 +147,9 @@ export class Manager {
         try { await this.write(phase, fields); await promise; }
         finally { clearTimeout(timeout); delete this.wake[name]; }
     }
-    async start({ direction, tab, preview = false, pending = null, resume = null }) {
+    async start({ direction, tab, preview = false, pending = null, resume = null, scope = null }) {
+        scope = normalizeScope(resume?.scope ?? pending?.scope ?? scope);
+        requireThat(!scope || direction !== 'restore', 'INPUT', '恢复操作使用上次实际应用的范围，不能另选类别。');
         requireThat(['push', 'pull', 'restore'].includes(direction) && typeof preview === 'boolean' && !(direction === 'restore' && preview), 'INPUT', '同步方向无效。');
         requireThat(typeof tab === 'string' && /^[a-f0-9-]{36}$/.test(tab), 'INPUT', '浏览器标签页标识无效。');
         requireThat(!this.busy, 'BUSY', '已有同步任务正在执行。');
@@ -167,6 +171,7 @@ export class Manager {
             }
             this.progressTime = 0;
             this.job = { ...(resume ?? {}), id: resume?.id ?? randomUUID(), direction, tab, preview, ticket: randomUUID(),
+                ...(scope ? { scope } : {}),
                 started: resume?.started ?? new Date().toISOString(), error: null, progress: null,
                 ...(resume ? { resumedAt: new Date().toISOString(), note: '正在继续上次的已保存快照；此后的本机改动留待下次推送。' } : {}) };
             await handle.writeFile(JSON.stringify({ id: this.job.id, pid: process.pid })); await handle.sync();
@@ -286,6 +291,7 @@ export class Manager {
             history[this.job.direction] = outcome.completedAt; await atomicJson(file, history);
         });
         await attempt('baseline', async () => {
+            if (outcome.job.scope) return; // A partial mirror is never a full-device synchronization baseline.
             const file = path.join(this.device.state, 'baseline.json');
             if (outcome.kind === 'restored') { if (await exists(file)) await fs.unlink(file); }
             else await atomicJson(file, { connection: this.connectionId(), local: outcome.localState, remote: outcome.remote, direction: this.job.direction, at: outcome.completedAt });
@@ -322,14 +328,16 @@ export class Manager {
                 requireThat(previous.connection === this.connectionId() && previous.snapshotReady && previous.snapshotDigest === manifest.digest,
                     'COMPLETION', '旧推送的完整快照或目标记录不匹配。');
                 const session = await this.transport.connect(this.device, undefined, this.log);
+                let remote = { generation: id, digest: manifest.digest };
                 try {
-                    requireThat(session.hello.dataset === this.device.remote.dataset && session.hello.current?.generation === id
+                    if (previous.scope) remote = await session.control.request('published', { job: id, snapshotDigest: manifest.digest, scope: previous.scope });
+                    else requireThat(session.hello.dataset === this.device.remote.dataset && session.hello.current?.generation === id
                         && session.hello.current.digest === manifest.digest, 'COMMIT_NOT_CONFIRMED', 'VPS 当前代次尚不能证明此任务已发布；可继续原快照上传，未修改 VPS。');
                 } finally { session.control.close(); }
                 const payload = await exists(path.join(path.dirname(file), 'payload')) ? path.join(path.dirname(file), 'payload') : path.join(this.device.state, 'cache/payload');
                 await verify(payload, manifest);
                 const metadata = await readJson(path.join(payload, 'environment.json'));
-                outcome = this.makeOutcome(metadata.sourceState, { generation: id, digest: manifest.digest }, previous.stats, { cache: true });
+                outcome = this.makeOutcome(metadata.sourceState, remote, previous.stats, { cache: !previous.scope });
             }
             requireThat(outcome, 'COMMIT_NOT_CONFIRMED', '未找到可核对的提交回执，未应用或发布数据。');
             this.outcome = outcome; await this.finishOutcome(outcome);
@@ -387,6 +395,7 @@ export class Manager {
         }
     }
     async execute() {
+        if (this.job.scope) return executeScoped(this);
         if (this.job.direction === 'restore') return this.restore();
         const root = path.join(this.device.state, 'jobs', this.job.id), payload = path.join(root, 'payload');
         await fs.mkdir(root, { recursive: true, mode: 0o700 });
