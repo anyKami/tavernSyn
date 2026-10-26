@@ -29,7 +29,11 @@ async function tools(context) {
     const rsync = process.platform === 'win32' ? path.join(runtime, 'usr/bin/rsync.exe') : 'rsync';
     if (process.platform === 'win32' && !await exists(rsync)) { context.skip('Prepared rsync runtime is required'); return null; }
     const posix = async file => process.platform === 'win32' ? (await run(path.join(runtime, 'usr/bin/cygpath.exe'), ['-u', file])).stdout.trim() : file;
-    return async (source, destination) => parseStats((await run(rsync, [...RSYNC_ARGS, '--', (await posix(source)) + '/', (await posix(destination)) + '/'])).stdout);
+    // This raw rsync fixture has no production inspect/SHA-256 correction pass.
+    // Compare contents so same-size Git refs created within one second on fast
+    // Linux hosts cannot be skipped by the timestamp quick check. This does not
+    // change block deltas or the production transfer arguments.
+    return async (source, destination) => parseStats((await run(rsync, [...RSYNC_ARGS, '--checksum', '--', (await posix(source)) + '/', (await posix(destination)) + '/'])).stdout);
 }
 
 test('real rsync avoids resending a large plugin object after a tiny Git commit', { timeout: 90000 }, async context => {

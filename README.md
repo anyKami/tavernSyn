@@ -4,7 +4,7 @@ SillyTavern 跨设备手动同步插件，面向 Windows 和 Android Termux。�
 
 ## 当前版本
 
-**0.2.6，适配 SillyTavern 1.19.0。** 新增聊天记录、角色卡、世界书的分类增量推送和拉取，可单选或组合，包含删除。所选类别以来源为准；其他配置、插件及用户数据保持不变。需要同步更新本机前后端与 VPS。[分类同步说明](docs/scoped-sync.md)、[更新记录](CHANGELOG.md)、[增量实测](docs/incremental-sync.md)与[审查修复及限制](docs/review-fixes.md)。
+**0.2.7，适配 SillyTavern 1.19.0。** 包含 0.2.6 新增的聊天记录、角色卡、世界书分类增量推送和拉取，并修正 Linux 增量测试的同秒时间戳依赖。可单选或组合，包含删除；其他配置、插件及用户数据保持不变。需要同步更新本机前后端与 VPS。[分类同步说明](docs/scoped-sync.md)、[更新记录](CHANGELOG.md)、[增量实测](docs/incremental-sync.md)与[审查修复及限制](docs/review-fixes.md)。
 
 本版本已清理旧 Git 历史，已有旧克隆请重新克隆后更新，见[历史清理说明](docs/security-audit-0.2.0.md#历史清理)。
 

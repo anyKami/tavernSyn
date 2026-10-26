@@ -1,0 +1,53 @@
+{
+  "status": "passed",
+  "version": "0.2.7",
+  "date": "2026-10-26T19:16:12.173Z",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "targetedNodeTests": {
+    "tests": 28,
+    "pass": 28,
+    "fail": 0,
+    "skipped": 0,
+    "suites": [
+      "incremental.test.mjs",
+      "scoped.test.mjs",
+      "startup-update.test.mjs"
+    ]
+  },
+  "baseline": "0.2.6 Windows verification: 141 Node tests, 26 Python tests, 28 actual ST lifecycle checks and 8 rsync checks passed. See scoped-sync-windows.json for platform skips and boundaries.",
+  "regression": {
+    "status": "reproduced-and-corrected",
+    "sameSizeAndSecond": true,
+    "defaultQuickCheck": {
+      "stats": {
+        "sentBytes": 55,
+        "receivedBytes": 15,
+        "literalBytes": 0,
+        "matchedBytes": 0,
+        "transferredFiles": 0,
+        "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+      },
+      "changed": [
+        "ref"
+      ]
+    },
+    "contentComparison": {
+      "stats": {
+        "sentBytes": 131,
+        "receivedBytes": 44,
+        "literalBytes": 41,
+        "matchedBytes": 0,
+        "transferredFiles": 1,
+        "unit": "rsync protocol bytes; excludes SSH/Tailscale overhead"
+      },
+      "equal": true
+    },
+    "productionArgumentsChanged": false
+  },
+  "scope": "Only the direct rsync test fixture now compares content to remove same-second Git-reference timing dependence. Production rsync arguments, final SHA-256 verification and targeted correction are unchanged.",
+  "untested": [
+    "Physical Android and live VPS deployment for this patch"
+  ],
+  "publicationPrivacy": "Synthetic refs and aggregate counts only; no user data, credentials or private paths."
+}
