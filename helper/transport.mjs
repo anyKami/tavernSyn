@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { checkRemoteConfig, uuidPattern } from '../lib/device.mjs';
 import { readPassword } from '../lib/connection.mjs';
 import { atomicJson, exists, noLinks, readJson, requireThat, run, SyncError, removeOwned } from '../lib/io.mjs';
-import { copyTree, difference, scan, validateManifest, verify } from '../lib/manifest.mjs';
+import { copyTree, difference, scan, transferSummary, validateManifest, verify } from '../lib/manifest.mjs';
 import { enoughSpace } from '../lib/content.mjs';
 import { rsyncOutputLog } from './sync-log.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -203,7 +203,7 @@ function addStats(first, second) {
     if (!second) return first;
     return { ...first, ...Object.fromEntries(['sentBytes', 'receivedBytes', 'literalBytes', 'matchedBytes', 'transferredFiles'].map(k => [k, first[k] + second[k]])), corrected: true };
 }
-export async function push(session, device, job, payload, manifest, onProgress, onBegin, { scope = null } = {}) {
+export async function push(session, device, job, payload, manifest, onProgress, onBegin, { scope = null, onPlan } = {}) {
     scope = normalizeScope(scope);
     validateManifest(manifest); const { control, env } = session;
     if (scope) requireScoped(session);
@@ -212,6 +212,7 @@ export async function push(session, device, job, payload, manifest, onProgress, 
     await onBegin?.(begun);
     let stats;
     if (!['done', 'finalizing'].includes(begun.phase)) {
+        if (onPlan) await onPlan(transferSummary(manifest, await control.request('inspect', { job, manifest })));
         stats = await transfer(env, 'push', job, payload, onProgress, undefined, session.log);
         await onProgress?.({ stage: 'transferred', stats });
     }
@@ -264,9 +265,9 @@ export async function finalizeUpload(session, device, job, payload, manifest, st
         }
     }
 }
-export async function pull(session, device, job, payload, onProgress, onBegin, { scope = null } = {}) {
+export async function pull(session, device, job, payload, onProgress, onBegin, { scope = null, onPlan } = {}) {
     scope = normalizeScope(scope);
-    if (scope) return pullScoped(session, device, job, payload, onProgress, onBegin, scope);
+    if (scope) return pullScoped(session, device, job, payload, onProgress, onBegin, scope, onPlan);
     const { control, env } = session;
     const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: env.jobBound === true });
     await onBegin?.(begun);
@@ -292,6 +293,7 @@ export async function pull(session, device, job, payload, onProgress, onBegin, {
             session.log?.(`下载缓存缺失，已从本机共享目录建立 ${basis.files} 个文件的差分基础；下载后仍执行完整校验。`);
         }
     }
+    if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload))));
     let stats = await transfer(env, 'pull', job, payload, onProgress, undefined, session.log);
     await partialCleanup(payload);
     const diff = difference(manifest, await scan(payload));
@@ -326,7 +328,7 @@ export async function catalog(session, _device, scope) {
         throw error;
     }
 }
-async function pullScoped(session, device, job, payload, onProgress, onBegin, scope) {
+async function pullScoped(session, device, job, payload, onProgress, onBegin, scope, onPlan) {
     requireScoped(session);
     const { control, env } = session;
     const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: env.jobBound === true, scope });
@@ -338,6 +340,7 @@ async function pullScoped(session, device, job, payload, onProgress, onBegin, sc
     await enoughSpace(device.state, manifest.bytes);
     if (!await exists(payload)) { await fs.mkdir(payload, { recursive: true, mode: 0o700 }); await seedDownloadBasis(device, payload, manifest); }
     await fs.writeFile(path.join(payload, 'environment.json'), begun.environment, { mode: 0o600 });
+    if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload))));
     const selection = manifest.files.filter(file => file.path !== 'environment.json').map(file => file.path);
     let stats = { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 };
     if (begun.phase !== 'done' && selection.length) stats = await transfer(env, 'pull', job, payload, onProgress, undefined, session.log, selection);

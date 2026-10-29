@@ -97,6 +97,9 @@ export class Manager {
         if (action === 'confirm') {
             requireThat(this.job?.id === payload.id && this.job.phase === 'AWAITING_CONFIRMATION' && payload.token === this.job.confirmationToken, 'CONFIRMATION', '确认已过期，请重新预览。');
             requireThat(payload.tab === undefined || (typeof payload.tab === 'string' && /^[a-f0-9-]{36}$/.test(payload.tab)), 'INPUT', '浏览器标签页标识无效。');
+            // The upload snapshot / download generation is already pinned. New
+            // live edits belong to a later sync and must not invalidate this size.
+            if (this.job.transferConfirmation) { this.wake.confirm?.(); return { ok: true }; }
             const local = await portableState(this.device, { scope: this.job.scope });
             if (local.digest !== this.job.localDigest && this.confirmationTarget) {
                 await this.write('AWAITING_CONFIRMATION', {
@@ -172,7 +175,7 @@ export class Manager {
             this.progressTime = 0;
             this.job = { ...(resume ?? {}), id: resume?.id ?? randomUUID(), direction, tab, preview, ticket: randomUUID(),
                 ...(scope ? { scope } : {}),
-                started: resume?.started ?? new Date().toISOString(), error: null, progress: null,
+                started: resume?.started ?? new Date().toISOString(), error: null, progress: null, transferPlan: null, transferConfirmation: false,
                 ...(resume ? { resumedAt: new Date().toISOString(), note: '正在继续上次的已保存快照；此后的本机改动留待下次推送。' } : {}) };
             await handle.writeFile(JSON.stringify({ id: this.job.id, pid: process.pid })); await handle.sync();
             this.log(`${resume ? '续传' : '开始'}任务 ${this.job.id}；${preview ? '仅预览；' : ''}VPS：${this.device.remote?.user ?? ''}@${this.device.remote?.host ?? '未配置'}`);
@@ -218,6 +221,16 @@ export class Manager {
             return this.job.localDigest;
         } finally { this.confirmationTarget = null; this.confirmationRemote = null; this.confirmationReason = null; }
     }
+    confirmTransfer = async transferPlan => {
+        requireThat(Number.isSafeInteger(transferPlan.files) && transferPlan.files >= 0
+            && Number.isSafeInteger(transferPlan.bytes) && transferPlan.bytes >= 0, 'MANIFEST', '待传输文件大小无效。');
+        const phase = this.job.direction === 'push' ? 'UPLOADING' : 'DOWNLOADING';
+        try {
+            await this.waitFor('confirm', 'AWAITING_CONFIRMATION', { transferPlan, transferConfirmation: true,
+                confirmationToken: randomUUID(), reason: '已核对待传输文件，请确认总大小后开始传输。' });
+            await this.write(phase, { transferConfirmation: false, reason: '' });
+        } finally { this.job.transferConfirmation = false; }
+    };
     async saveAndStop({ skipStop } = {}) {
         await this.waitFor('ready', 'AWAITING_SAVE');
         await this.waitFor('page', 'WAITING_PAGE');
@@ -435,7 +448,7 @@ export class Manager {
                 }
                 await this.write('UPLOADING', { files: frozen.manifest.files.length, bytes: frozen.manifest.bytes,
                     snapshotReady: true, snapshotDigest: frozen.manifest.digest });
-                const published = await this.transport.push(session, this.device, this.job.id, payload, frozen.manifest, this.progress, onBegin);
+                const published = await this.transport.push(session, this.device, this.job.id, payload, frozen.manifest, this.progress, onBegin, { onPlan: this.confirmTransfer });
                 remoteBegun = false;
                 await this.success(frozen.metadata.sourceState, { generation: published.generation, digest: published.digest,
                     ...(published.maintenance?.length ? { maintenance: published.maintenance } : {}) }, published.stats, { cache: true });
@@ -450,7 +463,7 @@ export class Manager {
                     await copyTree(path.join(old.jobRoot, 'payload'), payload);
                     downloaded = { generation: old.remote.generation, manifest, stats: old.stats };
                     await atomicJson(path.join(root, 'manifest.json'), manifest);
-                } else downloaded = await this.transport.pull(session, this.device, this.job.id, payload, this.progress, onBegin);
+                } else downloaded = await this.transport.pull(session, this.device, this.job.id, payload, this.progress, onBegin, { onPlan: this.confirmTransfer });
                 remoteBegun = false;
                 await this.write('VERIFYING', { files: downloaded.manifest.files.length, bytes: downloaded.manifest.bytes, stats: downloaded.stats });
                 const metadata = await readJson(path.join(payload, 'environment.json'));

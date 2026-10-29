@@ -72,3 +72,14 @@ export async function handoff(manager) {
     const page = await phase(manager, 'WAITING_PAGE');
     await manager.action('page', { id: page.id, tab: page.tab, ticket: page.ticket });
 }
+// Existing integration cases approve the new transfer-size prompt automatically.
+// Dedicated transfer-size tests leave it pending to verify the barrier/cancellation.
+export function approveTransfers(manager) {
+    const confirm = manager.confirmTransfer;
+    manager.confirmTransfer = async plan => {
+        const pending = confirm(plan), waiting = await phase(manager, 'AWAITING_CONFIRMATION');
+        await manager.action('confirm', { id: waiting.id, token: waiting.confirmationToken });
+        await pending;
+    };
+    return manager;
+}

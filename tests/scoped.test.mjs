@@ -5,7 +5,7 @@ import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { fixture, temporary, FakeLifecycle, phase, handoff } from './fixtures.mjs';
+import { fixture, temporary, FakeLifecycle, phase, handoff, approveTransfers } from './fixtures.mjs';
 import { atomicJson, exists, readJson, run } from '../lib/io.mjs';
 import { snapshot, portableState } from '../lib/snapshot.mjs';
 import { hashFile, verify } from '../lib/manifest.mjs';
@@ -52,7 +52,11 @@ async function publish(device, remote) {
     try { return await remote.push(session, device, job, payload, frozen.manifest); } finally { session.control.close(); }
 }
 async function confirmAndRun(manager) {
-    const confirmation = await phase(manager, 'AWAITING_CONFIRMATION', 30000);
+    let confirmation = await phase(manager, 'AWAITING_CONFIRMATION', 30000);
+    while (confirmation.transferConfirmation) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        confirmation = await phase(manager, 'AWAITING_CONFIRMATION', 30000);
+    }
     await manager.action('confirm', { id: confirmation.id, token: confirmation.confirmationToken });
     await handoff(manager); await manager.done;
     const status = await manager.status(); assert.equal(status.phase, 'SUCCEEDED', JSON.stringify(status.error));
@@ -119,7 +123,7 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     await fs.unlink(path.join(source.dataRoot, source.profile, 'worlds/book.json'));
     await fs.unlink(path.join(source.dataRoot, source.profile, 'chats/A/old.jsonl'));
     await fs.writeFile(path.join(source.dataRoot, source.profile, 'chats/A/new.jsonl'), '{"mes":"new"}\n');
-    const lifecycle = new FakeLifecycle(), manager = new Manager(source, lifecycle, remote);
+    const lifecycle = new FakeLifecycle(), manager = approveTransfers(new Manager(source, lifecycle, remote));
     const baselineFile = path.join(source.state, 'baseline.json'); await atomicJson(baselineFile, { sentinel: 'full baseline' });
     const scope = ['chats', 'characters', 'worlds'];
     await manager.start({ direction: 'push', scope, tab: randomUUID() });
@@ -142,7 +146,7 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     await fs.writeFile(path.join(target.dataRoot, target.profile, 'characters/local.png'), 'delete locally');
     const localFiles = [path.join(target.dataRoot, target.profile, 'settings.json'), path.join(target.dataRoot, target.profile, 'secrets.json'), target.yamlPath, path.join(target.install, 'plugins/tavernsyn/index.mjs')];
     const localHashes = await Promise.all(localFiles.map(hashFile));
-    const targetLifecycle = new FakeLifecycle(), puller = new Manager(target, targetLifecycle, remote);
+    const targetLifecycle = new FakeLifecycle(), puller = approveTransfers(new Manager(target, targetLifecycle, remote));
     await puller.start({ direction: 'pull', scope, tab: randomUUID() });
     const pulled = await confirmAndRun(puller);
     assert.equal(pulled.summary.deleted >= 2, true);
@@ -186,7 +190,7 @@ test('unmanaged classification pull prepares once when resumed, and autosaves re
     const source = await fixture(); await publish(source, remote);
     const target = await fixture(); target.remote = source.remote;
     await atomicJson(path.join(target.dataRoot, target.profile, 'worlds/local.json'), { local: true });
-    const unmanaged = new Manager(target, null, remote);
+    const unmanaged = approveTransfers(new Manager(target, null, remote));
     await unmanaged.start({ direction: 'pull', scope: ['worlds'], tab: randomUUID() }); await unmanaged.done;
     const pending = await unmanaged.status(); assert.equal(pending.phase, 'PENDING_APPLY');
     assert.equal(await exists(path.join(pending.jobRoot, 'candidate')), false);
@@ -207,7 +211,7 @@ test('a lost scoped publication acknowledgement reconciles the exact merged gene
     await atomicJson(path.join(device.dataRoot, device.profile, 'worlds/book.json'), { changed: true });
     const original = remote.push;
     remote.push = async (...args) => { await original.apply(remote, args); throw Object.assign(Error('synthetic lost ACK'), { code: 'SSH' }); };
-    const lifecycle = new FakeLifecycle(), manager = new Manager(device, lifecycle, remote);
+    const lifecycle = new FakeLifecycle(), manager = approveTransfers(new Manager(device, lifecycle, remote));
     await manager.start({ direction: 'push', scope: ['worlds'], tab: randomUUID() });
     const waiting = await phase(manager, 'AWAITING_CONFIRMATION', 30000);
     await manager.action('confirm', { id: waiting.id, token: waiting.confirmationToken }); await handoff(manager); await manager.done;

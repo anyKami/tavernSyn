@@ -90,7 +90,7 @@ export async function executeScoped(manager) {
                 await atomicJson(path.join(root, 'manifest.json'), frozen.manifest);
             }
             await m.write('UPLOADING', { snapshotReady: true, snapshotDigest: frozen.manifest.digest, files: frozen.manifest.files.length, bytes: frozen.manifest.bytes });
-            const published = await m.transport.push(session, device, m.job.id, payload, frozen.manifest, m.progress, onBegin, { scope });
+            const published = await m.transport.push(session, device, m.job.id, payload, frozen.manifest, m.progress, onBegin, { scope, onPlan: m.confirmTransfer });
             remoteBegun = false;
             await m.success(frozen.metadata.sourceState, { generation: published.generation, digest: published.digest, snapshotDigest: published.snapshotDigest,
                 ...(published.maintenance?.length ? { maintenance: published.maintenance } : {}) }, published.stats);
@@ -111,7 +111,7 @@ export async function executeScoped(manager) {
             await copyTree(path.join(old.jobRoot, 'payload'), payload);
             await atomicJson(path.join(root, 'manifest.json'), manifest);
             downloaded = { generation: old.remote.generation, digest: old.remote.digest, manifest, stats: old.stats };
-        } else downloaded = await m.transport.pull(session, device, m.job.id, payload, m.progress, onBegin, { scope });
+        } else downloaded = await m.transport.pull(session, device, m.job.id, payload, m.progress, onBegin, { scope, onPlan: m.confirmTransfer });
         remoteBegun = false;
         await verify(payload, downloaded.manifest); await validateContent(payload, downloaded.manifest, { scope });
         metadata = selectedMetadata(await readJson(path.join(payload, 'environment.json')), scope, downloaded.manifest);

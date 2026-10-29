@@ -105,6 +105,7 @@ function confirmDirection(direction, scope = null) {
         directionDialog.querySelector('h3').textContent = push ? '确认分类推送' : '确认分类拉取';
         directionDialog.querySelector('.ts-detail').textContent = `仅同步${scopeText(scope)}，以${push ? '本机' : 'VPS'}为准，包含修改和删除。其他类别、配置及插件保持不变。下一步会显示实际文件差异，确认后继续。`;
     }
+    if (['push', 'pull'].includes(direction)) directionDialog.querySelector('.ts-detail').textContent += '\n实际传输前会显示待上传或待下载文件总大小，再次确认后开始传输。';
     if (restore && status.recovery?.scope) directionDialog.querySelector('.ts-detail').textContent = `将恢复${scopeText(status.recovery.scope)}到最近一次分类拉取前的状态，替换此后这些类别的改动。其他类别、配置及插件保持不变。是否继续？`;
     return new Promise(resolve => {
         const finish = result => { directionDialog.close(); resolve(result); };
@@ -121,7 +122,7 @@ const field = name => form.elements.namedItem(name);
 function text(selector, value) { for (const parent of [root, dialog]) { const element = parent.querySelector(selector); if (element) element.textContent = value; } }
 function render() {
     text('.ts-device', `${status.deviceName ?? ''}${status.host ? ` · ${status.host}` : ' · 尚未配置 VPS'}`);
-    text('.ts-phase', localError ? '本次操作未开始，请处理提示' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : labels[status.phase] ?? status.phase);
+    text('.ts-phase', localError ? '本次操作未开始，请处理提示' : status.transferConfirmation ? '请核对待传输文件大小' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : labels[status.phase] ?? status.phase);
     let detail = localError || status.error?.message || (status.phase === 'AWAITING_CONFIRMATION' ? status.reason : '') || status.note || '';
     if (status.summary) detail += `\n新增 ${status.summary.added}，修改 ${status.summary.changed}，删除 ${status.summary.deleted} 个文件。`;
     if (status.scope) detail += `\n范围：${scopeText(status.scope)}（包含删除）。`;
@@ -133,6 +134,7 @@ function render() {
     text('.ts-recovery', status.recovery?.available ? `可恢复到 ${when(status.recovery.created)} 拉取前的本机数据。`
         : status.recovery?.reason || '暂无可用恢复副本；完成一次拉取更新后保留一版。');
     dialog.querySelector('.ts-confirm').hidden = status.phase !== 'AWAITING_CONFIRMATION';
+    dialog.querySelector('.ts-confirm').textContent = status.transferConfirmation ? status.direction === 'push' ? '开始上传' : '开始下载' : '确认覆盖并继续';
     dialog.querySelector('.ts-cancel').hidden = !['AWAITING_CONFIRMATION', 'AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);
     const terminal = ['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
     for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy;

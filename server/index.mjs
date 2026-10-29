@@ -15,6 +15,22 @@ import { chatReceipt } from '../lib/chat-receipt.mjs';
 
 export const info = { id: 'tavernsyn', name: 'TavernSyn', description: '跨设备同步与受控重启' };
 let lease;
+export function workerAction(child, action, payload) {
+    const actionId = randomUUID();
+    return new Promise((resolve, reject) => {
+        const finish = (error, result) => {
+            clearTimeout(timer); child.off('message', received); child.off('exit', exited);
+            if (error) reject(error); else resolve(result);
+        };
+        const received = message => {
+            if (message?.actionId === actionId) finish(message.error ? new SyncError(message.error.code, message.error.message) : null, message.result);
+        };
+        const exited = () => finish(new SyncError('WORKER', '下载助手未能确认操作，请重新检查任务。'));
+        const timer = setTimeout(exited, 20000);
+        child.on('message', received); child.once('exit', exited);
+        child.send({ actionId, action, payload }, error => { if (error) exited(); });
+    });
+}
 function plainName(value) { portablePath(value); requireThat(!value.includes('/'), 'INPUT', '文件标识无效。'); return value; }
 export async function savedReceipt(device, body) {
     requireThat(uuidPattern.test(body.nonce) && /^[a-f0-9]{64}$/.test(body.settingsDigest), 'INPUT', '保存确认格式无效。');
@@ -53,6 +69,7 @@ export async function init(router) {
         if (action === 'configure') return configureDevice(device, action, payload);
         if (action === 'status') return await exists(path.join(device.state, 'status.json')) ? readJson(path.join(device.state, 'status.json')) : { phase: 'IDLE' };
         if (action === 'check') return withDeviceLock(device, async () => { const session = await connect(device); try { return { ok: true, ...session.hello }; } finally { session.control.close(); } });
+        if (worker && ['confirm', 'cancel'].includes(action)) return workerAction(worker, action, payload);
         requireThat(action === 'start' && payload.direction === 'pull', 'UNMANAGED', '当前实例未受控；只可下载待应用数据，请通过 TavernSyn 入口启动后同步。');
         requireThat(!worker, 'BUSY', '下载助手仍在运行。');
         const log = fs.openSync(path.join(device.state, 'worker.log'), 'a');
@@ -149,13 +166,28 @@ function releaseLease() {
     lease = null;
 }
 export async function exit() { releaseLease(); }
-function waitPage(config) {
-    return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TavernSyn 同步</title><style>body{font:17px system-ui;background:#171b22;color:#eee;max-width:640px;margin:15vh auto;padding:24px}button{padding:12px}pre{white-space:pre-wrap;color:#b7c7da}</style><h1>正在同步酒馆</h1><p id="state">正在交接任务，请保留此页面。</p><pre id="detail"></pre><button id="back" hidden>返回酒馆</button><script>const progressDetail = ${progressDetail.toString()}; (${waitingDocument.toString()})(${JSON.stringify(config)})</script></html>`;
+export function waitPage(config) {
+    return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TavernSyn 同步</title><style>body{font:17px system-ui;background:#171b22;color:#eee;max-width:640px;margin:15vh auto;padding:24px}button{padding:12px}pre{white-space:pre-wrap;color:#b7c7da}</style><h1>正在同步酒馆</h1><p id="state">正在交接任务，请保留此页面。</p><pre id="detail"></pre><button id="cancel" hidden>取消</button><button id="confirm" hidden>开始传输</button><button id="back" hidden>返回酒馆</button><script>const progressDetail = ${progressDetail.toString()}; (${waitingDocument.toString()})(${JSON.stringify(config)})</script></html>`;
 }
 function waitingDocument(config) {
     const base = '/api/plugins/tavernsyn/';
-    const labels = { QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建独立快照', UPLOADING: '正在上传到 VPS', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复更新前的数据', SUCCEEDED: '同步完成', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
+    const labels = { AWAITING_CONFIRMATION: '请核对待传输文件大小', QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建独立快照', UPLOADING: '正在上传到 VPS', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复更新前的数据', SUCCEEDED: '同步完成', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
     document.getElementById('back').onclick = () => location.replace('/');
+    let confirmation = null, answering = false;
+    const confirm = document.getElementById('confirm'), cancel = document.getElementById('cancel');
+    async function answer(action) {
+        if (!confirmation || answering) return;
+        answering = true; confirm.disabled = cancel.disabled = true;
+        try {
+            const csrf = await (await fetch('/csrf-token')).json();
+            const response = await fetch(base + action, { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf.token, 'x-tavernsyn-epoch': confirmation.epoch },
+                body: JSON.stringify({ id: config.id, token: confirmation.confirmationToken }) });
+            if (!response.ok) throw Error('操作未确认，请等待页面刷新后重试。');
+            confirmation = null; confirm.hidden = cancel.hidden = true;
+        } catch (error) { document.getElementById('detail').textContent = error.message; }
+        finally { answering = false; confirm.disabled = cancel.disabled = false; }
+    }
+    confirm.onclick = () => answer('confirm'); cancel.onclick = () => answer('cancel');
     async function poll() {
         try {
             const response = await fetch(base + 'status', { cache: 'no-store' });
@@ -163,7 +195,10 @@ function waitingDocument(config) {
             const status = await response.json();
             if (status.id !== config.id) { document.getElementById('state').textContent = '任务已改变，请返回酒馆检查。'; document.getElementById('back').hidden = false; return; }
             document.getElementById('state').textContent = labels[status.phase] || '正在同步';
-            document.getElementById('detail').textContent = [status.error?.message || status.note || '', progressDetail(status)].filter(Boolean).join('\n');
+            document.getElementById('detail').textContent = [status.error?.message || status.reason || status.note || '', progressDetail(status)].filter(Boolean).join('\n');
+            confirmation = status.phase === 'AWAITING_CONFIRMATION' && status.transferConfirmation ? status : null;
+            confirm.hidden = cancel.hidden = !confirmation;
+            confirm.textContent = status.direction === 'pull' ? '开始下载' : '开始上传';
             if (status.phase === 'SUCCEEDED') { location.replace('/'); return; }
             if (['FAILED', 'RECOVERY_REQUIRED', 'PENDING_APPLY'].includes(status.phase)) { document.getElementById('back').hidden = false; return; }
         } catch { document.getElementById('state').textContent = '酒馆正在应用或重启，等待重新连接……'; }

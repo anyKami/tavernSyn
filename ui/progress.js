@@ -1,9 +1,16 @@
 // Shared by the panel and the standalone waiting document. This function is
 // also embedded into that document, so keep it independent of module state.
 export function progressDetail(status) {
-    if (status.noChanges) return '无需文件传输；本次仅检查本机状态和 VPS 版本。';
+    if (status.noChanges) return `待${status.direction === 'pull' ? '下载' : '上传'}文件总大小：0 B（0 个新增、修改文件）。\n无需文件传输；本次仅检查本机状态和 VPS 版本。`;
     const mib = value => `${((value ?? 0) / 1024 / 1024).toFixed(2)} MiB`;
     const lines = [], progress = status.progress;
+    if (status.transferPlan && ['AWAITING_CONFIRMATION', 'UPLOADING', 'DOWNLOADING'].includes(status.phase)) {
+        const { bytes, files } = status.transferPlan, units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        const unit = Math.min(bytes > 0 ? Math.floor(Math.log(bytes) / Math.log(1024)) : 0, units.length - 1);
+        const size = `${(bytes / 1024 ** unit).toFixed(unit ? 2 : 0)} ${units[unit]}`;
+        lines.push(`待${status.direction === 'pull' ? '下载' : '上传'}文件总大小：${size}（${files} 个新增、修改文件）。`);
+        lines.push('不含删除和未变化文件；按完整文件大小合计，实际增量传输量另计。');
+    }
     if (progress && ['UPLOADING', 'DOWNLOADING', 'FAILED'].includes(status.phase)) {
         if (progress.stage === 'transferred') {
             lines.push(status.phase === 'FAILED'
