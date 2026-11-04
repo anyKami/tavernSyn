@@ -296,20 +296,20 @@ try {
     checks.push('Legacy SSH failure after complete download: offline SHA-256 recovery, original-generation confirmation, real ST same-port restart and successful application without reconnecting');
     checks.push('Confirmation binds the save handoff to its current page and refuses another still-active TavernSyn tab');
     assert.equal(await exists(path.join(fixture, 'data/default-user/worlds/local-only.json')), false);
-    assert.equal((await readJson(path.join(state, 'apply.json'))).phase, 'committed');
-    assert.ok(await exists(path.join(state, 'recovery')));
-    checks.push('Protected plugin pull: verified stage, unpushed-change confirmation, owned stop, journal apply, health check and recovery snapshot');
+    assert.equal((await readJson(path.join(state, 'last-apply.json'))).phase, 'committed');
+    assert.equal(await exists(path.join(state, 'recovery')), false);
+    assert.equal(await exists(path.join(state, 'jobs', manager.job.id, 'candidate')), false);
+    assert.ok(await exists(path.join(state, 'jobs', manager.job.id, 'outcome.json')));
+    checks.push('Protected plugin pull: verified stage, unpushed-change confirmation, owned stop, journal apply, healthy restart and automatic recovery cleanup after durable completion');
     const syncText = await fs.readFile(path.join(state, 'sync.log'), 'utf8');
     for (const label of ['上传到 VPS', '从 VPS 下载', '校验文件', '应用更新', '同步完成']) {
         assert.ok(syncText.includes(label), label); assert.ok(liveStdout.includes(label), label);
     }
     assert.ok(!syncText.includes(configurationBody.password));
     checks.push('Push/pull phase, file count, verification, restart and completion logs reach both the live console and sync.log without logging the saved password');
-    assert.equal((await api('status')).recovery.available, true);
-    await receipt(); await api('start', { direction: 'restore', tab, preview: false }); await handoff();
-    assert.equal(await exists(path.join(fixture, 'data/default-user/worlds/local-only.json')), true);
-    assert.equal((await api('status')).recovery.available, false); assert.ok((await api('status')).history.restore);
-    checks.push('Manual recovery restores pre-pull data through save ACK, owned stop and healthy same-port restart, then consumes the one-step backup');
+    assert.equal((await api('status')).recovery.available, false);
+    assert.equal(await exists(path.join(fixture, 'data/default-user/worlds/local-only.json')), false);
+    checks.push('Healthy completed pulls retain the current data and small receipt without an obsolete manual recovery option');
     assert.equal((await readJson(path.join(repository, '.tavernsyn-install.json'))).state, state);
     assert.ok(await exists(path.join(repository, 'helper/launcher.mjs')));
     assert.ok(liveStdout.split('TAVERN_SYN_FIXTURE_STDOUT').length >= 5);
@@ -330,6 +330,8 @@ try {
     checks.push('An uncertain handler still rejects a strict stop without clearing its diagnostics');
     // Reproduce both an active POST and a historical aborted request. Only the
     // normal save + page handoff may opt into interrupting this old instance.
+    // Model a device without a baseline, requiring explicit overwrite confirmation.
+    await fs.unlink(path.join(state, 'baseline.json'));
     let pendingRequest;
     const pendingResponse = new Promise((resolve, reject) => {
         pendingRequest = http.request(device.origin + '/api/plugins/sync-test-probe/pending', { method: 'POST', headers: {

@@ -230,7 +230,7 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(d.ProtocolError):
             self.store.published(dict(job=job, scope=["worlds"], snapshotDigest=manifest["digest"]))
 
-    def test_category_download_is_pinned_and_requires_a_complete_first_publication(self):
+    def test_category_download_resumes_until_a_successful_sync_supersedes_it(self):
         with self.assertRaises(d.ProtocolError):
             self.store.catalog(["worlds"])
         current = self.complete_publication()
@@ -242,9 +242,12 @@ class StoreTests(unittest.TestCase):
         self.assertIn("profile/group chats/g.jsonl", paths)
         self.assertNotIn("profile/settings.json", paths)
         self.store.close()
-        self.complete_publication()
         resumed = self.store.begin(dict(job=job, direction="pull", scope=["chats"], dataset=self.dataset, jobBound=True), self.device)
         self.assertEqual(resumed["generation"], current["generation"])
+        self.store.close()
+        self.complete_publication()
+        with self.assertRaisesRegex(d.ProtocolError, "NO_JOB"):
+            self.store.begin(dict(job=job, direction="pull", scope=["chats"], dataset=self.dataset, jobBound=True, resumeOnly=True), self.device)
 
     def test_new_root_only_and_empty_pull_refused(self):
         with self.assertRaises(d.ProtocolError):
@@ -265,16 +268,17 @@ class StoreTests(unittest.TestCase):
         self.store.finish(dict(job=second), self.device, abort=True)
         self.assertEqual(self.store.current()["generation"], first)
 
-    def test_commit_response_loss_is_idempotent_and_gc_retains_two(self):
+    def test_commit_response_loss_is_idempotent_and_gc_retains_only_current(self):
         first, _ = self.publish()
         second, manifest = self.publish("two")
-        # Reconnect with the same job; no new generation and no replacement of previous.
+        # Reconnect with the same job; publication and cleanup stay idempotent.
         self.begin(job=second)
         replay = self.store.commit(dict(job=second, manifest=manifest), self.device)
         self.assertEqual(replay["digest"], manifest["digest"])
-        self.assertEqual(d.read(self.root / "previous.json")["generation"], first)
+        self.assertFalse((self.root / "previous.json").exists())
+        self.assertFalse((self.root / "generations" / first).exists())
         third, _ = self.publish("three")
-        self.assertEqual({x.name for x in (self.root / "generations").iterdir()}, {second, third})
+        self.assertEqual({x.name for x in (self.root / "generations").iterdir()}, {third})
         self.assertFalse((self.root / "incoming" / second).exists())
 
     def test_recovery_after_rename_before_pointer_publish(self):
@@ -309,21 +313,63 @@ class StoreTests(unittest.TestCase):
             self.store.commit(dict(job=job, manifest=d.scan(payload)), self.device)
         self.assertIsNone(self.store.current())
 
-    def test_interrupted_download_is_pinned_across_new_publications(self):
+    def test_successful_publication_removes_superseded_download_and_uploads(self):
         published, manifest = self.publish()
         job = self.begin(direction="pull")
         active = self.store.active()
         self.assertEqual(active["generation"], published)
         self.assertEqual(active["manifest"]["digest"], manifest["digest"])
         self.store.close()
-        self.publish("two")
-        self.publish("three")
-        self.assertTrue((self.root / "generations" / published).is_dir())
-        self.begin(job=job, direction="pull")
-        self.assertEqual(self.store.active()["generation"], published)
-        self.store.finish(dict(job=job), self.device)
-        self.store.gc()
+        upload = self.begin()
+        self.payload(upload, "unfinished")
+        self.store.close()
+        archive = self.root / "private/archived-jobs" / str(uuid.uuid4())
+        archive.mkdir(parents=True)
+        (archive / "staging.bin").write_bytes(b"obsolete")
+        current, _ = self.publish("two")
         self.assertFalse((self.root / "generations" / published).exists())
+        self.assertFalse(self.store.parked_file(job).exists())
+        self.assertFalse((self.root / "incoming" / upload).exists())
+        self.assertFalse(archive.exists())
+        self.assertEqual(self.store.current()["generation"], current)
+
+    def test_successful_download_cleans_old_data_but_abort_preserves_recovery(self):
+        current, _ = self.publish()
+        old = self.begin()
+        payload, manifest = self.payload(old, "unfinished")
+        self.store.close()
+        job = self.begin(direction="pull")
+        self.store.finish(dict(job=job), self.device, abort=True)
+        self.assertEqual(d.scan(payload)["digest"], manifest["digest"])
+        job = self.begin(direction="pull")
+        self.store.finish(dict(job=job), self.device)
+        self.assertFalse(payload.exists())
+        self.assertFalse(self.store.parked_file(old).exists())
+        self.assertEqual(self.store.current()["generation"], current)
+
+    def test_download_cleanup_failure_is_success_with_warning_and_can_retry(self):
+        current, _ = self.publish()
+        job = self.begin(direction="pull")
+        with patch.object(self.store, "gc", side_effect=PermissionError()):
+            result = self.store.finish(dict(job=job), self.device)
+        self.assertEqual(result["phase"], "done")
+        self.assertEqual(result["maintenance"], ["generations"])
+        self.assertEqual(self.store.current()["generation"], current)
+        self.assertNotIn("maintenance", self.store.finish(dict(job=job), self.device))
+
+    def test_cleanup_refuses_unexpected_paths_without_deleting_valid_data(self):
+        current, _ = self.publish()
+        old = self.begin()
+        payload, manifest = self.payload(old)
+        self.store.close()
+        unexpected = self.root / "incoming/keep-me"
+        unexpected.mkdir()
+        job = self.begin(direction="pull")
+        result = self.store.finish(dict(job=job), self.device)
+        self.assertEqual(result["maintenance"], ["generations"])
+        self.assertTrue(unexpected.exists())
+        self.assertEqual(d.scan(payload)["digest"], manifest["digest"])
+        self.assertEqual(self.store.current()["generation"], current)
 
     def test_disconnect_parks_upload_without_losing_payload_and_same_job_resumes(self):
         job = self.begin()
@@ -360,10 +406,10 @@ class StoreTests(unittest.TestCase):
         payload, manifest = self.payload(old)
         self.store.close()
         current, _ = self.publish("newer")
-        with self.assertRaisesRegex(d.ProtocolError, "REMOTE_CHANGED"):
-            self.begin(job=old)
+        with self.assertRaisesRegex(d.ProtocolError, "NO_JOB"):
+            self.store.begin(dict(job=old, direction="push", dataset=self.dataset, jobBound=True, resumeOnly=True), self.device)
         self.assertEqual(self.store.current()["generation"], current)
-        self.assertEqual(d.scan(payload)["digest"], manifest["digest"])
+        self.assertFalse(payload.exists())
 
     def test_late_rsync_connection_cannot_write_into_a_different_job(self):
         old = self.begin()

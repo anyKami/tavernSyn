@@ -115,7 +115,8 @@ export async function executeScoped(manager) {
         remoteBegun = false;
         await verify(payload, downloaded.manifest); await validateContent(payload, downloaded.manifest, { scope });
         metadata = selectedMetadata(await readJson(path.join(payload, 'environment.json')), scope, downloaded.manifest);
-        remote = { generation: downloaded.generation, digest: downloaded.digest, snapshotDigest: downloaded.manifest.digest };
+        remote = { generation: downloaded.generation, digest: downloaded.digest, snapshotDigest: downloaded.manifest.digest,
+            ...(downloaded.maintenance?.length ? { maintenance: downloaded.maintenance } : {}) };
         await m.write('VERIFYING', { files: downloaded.manifest.files.length, bytes: downloaded.manifest.bytes, stats: downloaded.stats, remote });
         if (!m.lifecycle) {
             await m.write('PENDING_APPLY', { jobRoot: root, remote, reason: '分类数据已下载并校验；请从受控入口启动后继续确认和应用。' });
@@ -125,7 +126,7 @@ export async function executeScoped(manager) {
         const prepared = await prepare(device, payload, downloaded.manifest, root, { scope });
         local = await inventory();
         await m.write('PREPARING', { summary: difference(local, metadata.sourceState) });
-        const approved = await m.confirm(`仅以 VPS 为准替换本机的${scopeLabel(scope)}，包含上面列出的删除。应用前保留一次恢复副本，其他内容保持不变。`, local, remote.digest, metadata.sourceState);
+        const approved = await m.confirm(`仅以 VPS 为准替换本机的${scopeLabel(scope)}，包含上面列出的删除。恢复副本将在成功后自动删除，其他内容保持不变。`, local, remote.digest, metadata.sourceState);
         await m.saveAndStop();
         requireThat((await inventory()).digest === approved, 'LOCAL_CHANGED', '确认后所选数据发生变化，保留下载，请重新确认。');
         await retireRecovery(device);

@@ -99,7 +99,7 @@ function confirmDirection(direction, scope = null) {
         ? '将继续上传上次已保存的快照，复用 VPS 暂存文件。快照之后的新聊天和修改留待下次推送。是否继续？' : restore
         ? '将恢复到最近一次拉取前的本机配置、插件和用户数据，替换此后的本机改动。VPS 副本不会改变。本次恢复副本使用后将不再保留。是否继续？' : push
         ? '将以本机已保存的内容更新 VPS 同步副本，VPS 原有的共享数据可能被替换。是否继续？'
-        : '将以 VPS 同步副本更新本机，覆盖本机的共享配置、插件和用户数据。应用前会保留一次恢复副本。是否继续？';
+        : '将以 VPS 同步副本更新本机，覆盖本机的共享配置、插件和用户数据。恢复副本将在成功后自动删除。是否继续？';
     directionDialog.querySelector('.ts-accept').textContent = resume ? '继续上传' : restore ? '确认恢复' : push ? '确认推送' : '确认拉取';
     if (scope) {
         directionDialog.querySelector('h3').textContent = push ? '确认分类推送' : '确认分类拉取';
@@ -132,7 +132,7 @@ function render() {
     const when = value => value ? new Date(value).toLocaleString() : '尚无';
     text('.ts-history', `最近推送：${when(status.history?.push)}\n最近拉取：${when(status.history?.pull)}\n最近恢复：${when(status.history?.restore)}`);
     text('.ts-recovery', status.recovery?.available ? `可恢复到 ${when(status.recovery.created)} 拉取前的本机数据。`
-        : status.recovery?.reason || '暂无可用恢复副本；完成一次拉取更新后保留一版。');
+        : status.recovery?.reason || '暂无可用恢复副本；同步成功后自动删除备份。');
     dialog.querySelector('.ts-confirm').hidden = status.phase !== 'AWAITING_CONFIRMATION';
     dialog.querySelector('.ts-confirm').textContent = status.transferConfirmation ? status.direction === 'push' ? '开始上传' : '开始下载' : '确认覆盖并继续';
     dialog.querySelector('.ts-cancel').hidden = !['AWAITING_CONFIRMATION', 'AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);

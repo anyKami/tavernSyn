@@ -5,7 +5,7 @@ import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fixture, MemoryTransport, FakeLifecycle, phase, handoff } from './fixtures.mjs';
-import { atomicJson, readJson, run } from '../lib/io.mjs';
+import { atomicJson, exists, readJson, run } from '../lib/io.mjs';
 import { portableState, snapshot } from '../lib/snapshot.mjs';
 import { Manager } from '../helper/manager.mjs';
 import { prepare, buildPlan, applyPlan, preserveSyncCode, rollback } from '../helper/apply.mjs';
@@ -65,9 +65,9 @@ test('autosaves refresh the same downloaded pull and require a fresh explicit co
     assert.equal((await manager.status()).tab, reloadedTab);
     await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED');
-    const journal = await readJson(path.join(device.state, 'apply.json'));
+    const journal = await readJson(path.join(device.state, 'last-apply.json'));
     const oldProfile = journal.steps.find(s => s.live === path.join(device.dataRoot, device.profile)).old;
-    assert.equal((await readJson(path.join(oldProfile, 'QuickReplies/auto.json'))).saved, true);
+    assert.equal(await exists(oldProfile), false);
 });
 
 test('apply and restore preserve the original case of installed TavernSyn directories', async () => {

@@ -40,7 +40,7 @@ test('legacy verified pull recovers offline, then confirms, applies and restarts
     await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED');
     assert.equal(await exists(local), false); assert.equal(lifecycle.starts, 1);
-    assert.equal((await readJson(path.join(device.state, 'apply.json'))).phase, 'committed');
+    assert.equal((await readJson(path.join(device.state, 'last-apply.json'))).phase, 'committed');
 });
 
 test('download receipt pins the original generation even if hello saw a different publication', async () => {

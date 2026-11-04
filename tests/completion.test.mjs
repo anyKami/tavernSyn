@@ -26,6 +26,22 @@ async function pull(manager) {
 }
 const noRemote = { connect() { throw Error('local completion repair must not publish or download'); } };
 
+test('cleanup failure preserves success and recovery, then reconciliation retries locally', async () => {
+    const { device, manager } = await setup(); await push(manager);
+    await fs.writeFile(path.join(device.dataRoot, device.profile, 'worlds/local.json'), '{"old":true}');
+    const cleanup = manager.cleanupCompleted;
+    manager.cleanupCompleted = async () => { throw Object.assign(Error('synthetic locked backup'), { code: 'EPERM' }); };
+    await pull(manager);
+    const status = await manager.status();
+    assert.equal(status.phase, 'SUCCEEDED');
+    assert.deepEqual(status.maintenance.pending, ['cleanup']);
+    assert.equal(await exists(path.join(device.state, 'recovery')), true);
+    manager.cleanupCompleted = cleanup; manager.transport = noRemote;
+    assert.equal((await manager.action('reconcile', { id: status.id })).maintenancePending, false);
+    assert.equal(await exists(path.join(device.state, 'recovery')), false);
+    assert.equal(await exists(path.join(device.state, 'jobs', status.id, 'candidate')), false);
+});
+
 test('a published push survives cache ENOSPC and repairs maintenance without another transfer', async () => {
     const { device, remote, lifecycle, manager } = await setup(), cache = manager.cache.bind(manager);
     manager.cache = async () => { throw Object.assign(new Error('synthetic disk full'), { code: 'ENOSPC' }); };
@@ -112,7 +128,9 @@ test('a different remote generation cannot be mistaken for a committed failed pu
 test('a committed apply journal recovers a crash before the separate outcome/status record', async () => {
     const { device, manager, lifecycle } = await setup(); await push(manager);
     await fs.writeFile(path.join(device.dataRoot, device.profile, 'worlds/local.json'), '{"old":true}');
+    const cleanup = manager.cleanupCompleted; manager.cleanupCompleted = async () => {};
     await pull(manager); const success = await manager.status();
+    manager.cleanupCompleted = cleanup;
     await fs.unlink(completionPath(device, success.id));
     await atomicJson(path.join(device.state, 'status.json'), { ...success, phase: 'STARTING', commit: undefined });
     const oldOrigin = device.origin; device.origin = 'http://127.0.0.1:0';

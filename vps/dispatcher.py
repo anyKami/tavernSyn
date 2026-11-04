@@ -507,9 +507,6 @@ class Store:
                             os.fsync(fd)
                         finally:
                             os.close(fd)
-            current = self.current()
-            if current and current["generation"] != job["generation"]:
-                atomic(self.root / "previous.json", {k: current[k] for k in ("generation", "digest")})
             maintenance = []
             try:
                 atomic(self.root / "current.json", {"generation": job["generation"], "digest": manifest["digest"]})
@@ -536,18 +533,27 @@ class Store:
             return self.describe(job) | {"digest": manifest["digest"], **({"snapshotDigest": snapshot_digest} if scope else {}), **({"maintenance": maintenance} if maintenance else {})}
 
     def gc(self):
-        keep = {read(self.root / name)["generation"] for name in ("current.json", "previous.json") if (self.root / name).exists()}
-        paused = self.private / "paused-jobs"
-        for file in paused.glob("*.json") if paused.exists() else []:
-            check(ID.fullmatch(file.stem) and not file.is_symlink(), "unexpected paused job path")
-            job = read(file)
-            # Pin interrupted downloads and publications interrupted after rename.
-            check(ID.fullmatch(job.get("generation", "")), "invalid paused generation")
-            keep.add(job["generation"])
-        for entry in (self.root / "generations").iterdir():
-            check(ID.fullmatch(entry.name) and entry.is_dir() and not entry.is_symlink(), "unexpected generation path")
-            if entry.name not in keep:
+        # Call only after success, while holding BOTH exclusive locks. A completed
+        # sync supersedes paused jobs; failures keep their payloads for recovery.
+        current = self.current()
+        check(current is not None, "no published generation to retain")
+        obsolete = []
+        for parent in (self.root / "generations", self.root / "incoming", self.private / "archived-jobs", self.private / "paused-jobs"):
+            check(not parent.is_symlink(), "unsafe cleanup directory")
+            for entry in parent.iterdir() if parent.exists() else []:
+                record = parent.name == "paused-jobs"
+                check(not entry.is_symlink() and ID.fullmatch(entry.stem if record else entry.name)
+                      and (entry.is_file() and entry.suffix == ".json" if record else entry.is_dir()), "unexpected cleanup path")
+                if parent.name != "generations" or entry.name != current["generation"]:
+                    obsolete.append(entry)
+        previous = self.root / "previous.json"
+        check(not previous.is_symlink(), "unsafe previous pointer")
+        previous.unlink(missing_ok=True)
+        for entry in obsolete:
+            if entry.is_dir():
                 shutil.rmtree(entry)
+            else:
+                entry.unlink()
 
     def finish(self, message, device, abort=False):
         job = self.own_job(message, device)
@@ -562,6 +568,11 @@ class Store:
                 if stage.exists():
                     check(not stage.is_symlink(), "unsafe stage")
                     shutil.rmtree(stage)
+            if not abort:
+                try:
+                    self.gc()
+                except (OSError, ProtocolError):
+                    return self.describe(job) | {"maintenance": ["generations"]}
         return self.describe(job)
 
     def command(self, message, device):
@@ -570,7 +581,7 @@ class Store:
             current = self.current()
             active = self.active()
             pending = {k: active[k] for k in ("job", "direction", "phase")} if active and active["device"] == device and active["phase"] not in ("done", "aborted") else None
-            return {"protocol": 1, "version": "0.2.7", "capabilities": ["paused-jobs", "job-bound-rsync", "scoped-sync-v1"], "dataset": self.format["dataset"],
+            return {"protocol": 1, "version": "0.2.9", "capabilities": ["paused-jobs", "job-bound-rsync", "scoped-sync-v1"], "dataset": self.format["dataset"],
                     "current": {k: current[k] for k in ("generation", "digest")} if current else None, "pending": pending}
         if op == "begin":
             return self.begin(message, device)

@@ -129,7 +129,8 @@ test('fresh setup needs no device keys; reinstall preserves the saved password, 
     }
     assert.ok(await exists(path.join(options.st, 'public/scripts/extensions/third-party/tavernsyn/ui/index.js')));
     assert.equal(YAML.parse(await fs.readFile(path.join(options.st, 'config.yaml'), 'utf8')).untouched, 'keep');
-    assert.equal(YAML.parse(await fs.readFile(path.join(options.state, 'config.before-install.yaml'), 'utf8')).enableServerPlugins, false);
+    assert.equal(await exists(path.join(options.state, 'config.before-install.yaml')), false);
+    assert.equal((await fs.readdir(options.st)).some(name => name.startsWith('.tavernsyn-code-backup-')), false);
     if (process.platform === 'win32') {
         const downloadedOptions = await fixture();
         const mirror = path.join(path.dirname(options.st), 'published'), clone = path.join(downloadedOptions.st, 'plugins/tavernsyn');

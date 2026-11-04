@@ -125,14 +125,31 @@ async function rollback(install, journal) {
         await fs.rename(oldFront, path.join(front.root, journal.frontName));
     } else if (!journal.hadFront && front.existed) await fs.rename(path.join(front.root, front.name), path.join(stage, `failed-front-${randomUUID()}`));
 }
-async function recoverUpdate(install, state) {
+async function completeUpdate(install, state, journal) {
+    const stage = await ownedStage(install, journal.stage), backend = path.join(install, 'plugins/tavernsyn');
+    if (await exists(path.join(backend, 'bin/startup.mjs'))) await atomic(path.join(install, STARTUP), await fs.readFile(path.join(backend, 'bin/startup.mjs')));
+    const previous = await plain(path.join(install, '.tavernsyn-previous-code'));
+    if (await exists(previous)) {
+        const marker = await read(path.join(previous, 'startup-backup.json'));
+        if (marker.format !== 1 || marker.install !== install) throw fail('PATH', '上一版代码目录未能确认归属。');
+        await fs.rm(previous, { recursive: true, force: true });
+    }
+    await fs.rm(stage, { recursive: true, force: true });
+    await fs.unlink(path.join(state, 'startup-update.json'));
+}
+async function recoverUpdate(install, state, log) {
     const file = path.join(state, 'startup-update.json');
-    if (!await exists(file)) return;
+    if (!await exists(file)) return true;
     const journal = await read(file);
     if (journal.format !== 1 || journal.install !== install) throw fail('JOURNAL', '后端更新记录与当前安装不匹配。');
     await ownedStage(install, journal.stage);
-    if (journal.phase !== 'committed') await rollback(install, journal);
+    if (journal.phase === 'committed') {
+        try { await completeUpdate(install, state, journal); return true; }
+        catch { log('后端更新已完成；旧代码清理尚未完成，下次启动时重试。'); return false; }
+    }
+    await rollback(install, journal);
     await fs.unlink(file);
+    return true;
 }
 
 export async function autoUpdate({ install, state, repositoryUrl = REPOSITORY, checkTimeout = 8000, skipCheck = false, log = console.log, afterRename = () => {} }) {
@@ -152,10 +169,11 @@ export async function autoUpdate({ install, state, repositoryUrl = REPOSITORY, c
     }
     const nonce = randomUUID(); await lock.writeFile(JSON.stringify({ pid: process.pid, nonce })); await lock.close();
     try {
-        await recoverUpdate(install, state);
+        const cleaned = await recoverUpdate(install, state, log);
         const backend = await plain(path.join(install, 'plugins/tavernsyn'));
         const metadata = await read(path.join(backend, '.tavernsyn-install.json')), local = await read(path.join(backend, 'package.json'));
         if (path.resolve(metadata.state) !== state || local.name !== 'tavernsyn') throw fail('INSTALL', '当前后端与启动入口不匹配。');
+        if (!cleaned) return { status: 'current', version: local.version, maintenancePending: true };
         if (skipCheck) { log(`已跳过版本检查，启动后端 ${local.version}。`); return { status: 'skipped', version: local.version }; }
         const status = await read(path.join(state, 'status.json')).catch(error => { if (error.code === 'ENOENT') return { phase: 'IDLE' }; throw error; });
         if (!['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED'].includes(status.phase)) {
@@ -212,23 +230,13 @@ export async function autoUpdate({ install, state, repositoryUrl = REPOSITORY, c
             await fs.rename(source, backend); await afterRename('backend-installed');
             await fs.rename(nextFront, path.join(front.root, front.name)); await afterRename('front-installed');
             journal.phase = 'committed'; await atomic(journalFile, JSON.stringify(journal));
-            if (await exists(path.join(backend, 'bin/startup.mjs'))) await atomic(path.join(install, STARTUP), await fs.readFile(path.join(backend, 'bin/startup.mjs')));
-            // Keep one previous code version; user data and credentials never move.
-            const previous = await plain(path.join(install, '.tavernsyn-previous-code'));
-            if (await exists(previous)) {
-                const marker = await read(path.join(previous, 'startup-backup.json'));
-                if (marker.format !== 1 || marker.install !== install) throw fail('PATH', '上一版代码目录未能确认归属。');
-                if (!inside(install, previous)) throw fail('PATH', '上一版代码目录越界。');
-                await fs.rm(previous, { recursive: true, force: true });
-            }
-            await atomic(path.join(stage, 'startup-backup.json'), JSON.stringify({ format: 1, install }));
-            await fs.rename(stage, previous); await fs.unlink(journalFile);
+            await completeUpdate(install, state, journal);
             log(`后端已更新：${local.version} → ${latest.version}，开始启动酒馆。`);
             return { status: 'updated', version: latest.version };
         } catch (error) {
             if (journal?.phase === 'committed') {
-                log('后端更新已完成；上一版代码保留在更新暂存目录。');
-                return { status: 'updated', version: journal.version };
+                log('后端更新已完成；旧代码清理尚未完成，下次启动时重试。');
+                return { status: 'updated', version: journal.version, maintenancePending: true };
             }
             if (journal) {
                 try { await rollback(install, journal); await fs.unlink(path.join(state, 'startup-update.json')); }

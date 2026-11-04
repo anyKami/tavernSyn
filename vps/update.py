@@ -69,6 +69,14 @@ def pointers(root):
             for name in ("FORMAT.json", "current.json", "previous.json")}
 
 
+def cleanup_backup(backup, backup_root=Path("/var/backups")):
+    backup = plain(backup)
+    check(backup.parent == plain(backup_root) and re.fullmatch(r"tavernsyn-\d+\.\d+\.\d+-\d{8}-\d{6}-[a-f0-9]{8}", backup.name),
+          "Unexpected upgrade backup path")
+    check(read(backup / "RESULT.json").get("status") == "updated", "Upgrade is not confirmed; keeping recovery backup")
+    shutil.rmtree(backup)
+
+
 def main():
     import fcntl
     import pwd
@@ -178,10 +186,15 @@ print(json.dumps({"hello":h,"repairedStageModes":changed}))'''
                      "import os,sys; p=sys.argv[1]; t=p+'.rollback'; open(t,'w').write(sys.stdin.read()); os.replace(t,p)",
                      str(active_file)], input=(backup / "active-before.json").read_text())
             raise
-        result = dict(status="updated", version=version, dataset=args.dataset, root=str(root), backup=str(backup),
+        result = dict(status="updated", version=version, dataset=args.dataset, root=str(root),
                       dispatcherSha256=hashlib.sha256(dispatcher).hexdigest(), linuxTestsPassed=True,
                       publishedPointersUnchanged=True, payloadsPreserved=True, **probe)
         (backup / "RESULT.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        try:
+            cleanup_backup(backup)
+            result["backupRemoved"] = True
+        except OSError:
+            result.update(backupRemoved=False, backup=str(backup), maintenance=["upgrade-backup"])
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         for stream in reversed(locks):

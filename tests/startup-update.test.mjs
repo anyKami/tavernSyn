@@ -58,21 +58,40 @@ test('only newer stable versions update; generated launchers use the standalone 
     assert.ok(termuxLauncher({ node: '/data/node', install: '/home/ST', state: '/home/state' }).includes('exec'));
 });
 
-test('an actual tagged Git release replaces both components, preserves local state and keeps one code backup', async () => {
+test('an actual tagged Git release replaces both components, preserves local state and deletes old code', async () => {
     const f = await fixture(), files = [path.join(f.state, 'device.json'), path.join(f.state, 'credentials/ssh-password.json'), path.join(f.install, 'config.yaml'), path.join(f.install, 'data/default-user/settings.json')];
     const before = await Promise.all(files.map(file => fs.readFile(file, 'utf8')));
+    const previous = path.join(f.install, '.tavernsyn-previous-code'); await fs.mkdir(previous);
+    await atomicJson(path.join(previous, 'startup-backup.json'), { format: 1, install: f.install });
     const result = await autoUpdate(f); assert.deepEqual(result, { status: 'updated', version: '0.2.2' });
     assert.equal((await readJson(path.join(f.backend, 'package.json'))).version, '0.2.2');
     assert.equal((await readJson(path.join(f.front, 'manifest.json'))).version, '0.2.2');
     assert.equal((await readJson(path.join(f.backend, '.tavernsyn-install.json'))).state, f.state);
     assert.equal((await readJson(path.join(f.backend, '.tavernsyn-install.json'))).codeFingerprint, await codeFingerprint(f.backend));
     assert.deepEqual(await Promise.all(files.map(file => fs.readFile(file, 'utf8'))), before);
-    assert.equal((await readJson(path.join(f.install, '.tavernsyn-previous-code/old-backend/package.json'))).version, '0.1.3');
+    assert.equal(await exists(previous), false);
+    assert.equal((await fs.readdir(f.install)).some(name => name.startsWith('.tavernsyn-update-')), false);
     assert.equal(await exists(path.join(f.state, 'startup-update.json')), false);
     assert.equal(await exists(path.join(f.state, 'startup-update.lock')), false);
     assert.deepEqual(await autoUpdate(f), { status: 'current', version: '0.2.2' });
     await fs.appendFile(path.join(f.backend, 'helper/launcher.mjs'), '\n// local modification');
     assert.equal((await autoUpdate(f)).status, 'modified');
+});
+
+test('committed update cleanup retries on startup without rolling back the new code', async () => {
+    const f = await fixture(), previous = path.join(f.install, '.tavernsyn-previous-code');
+    await fs.mkdir(previous);
+    await atomicJson(path.join(previous, 'startup-backup.json'), { format: 1, install: 'unrelated-install' });
+    const result = await autoUpdate(f);
+    assert.equal(result.status, 'updated'); assert.equal(result.maintenancePending, true);
+    const journal = await readJson(path.join(f.state, 'startup-update.json'));
+    assert.equal(journal.phase, 'committed'); assert.equal(await exists(path.join(journal.stage, 'old-backend')), true);
+    assert.equal((await autoUpdate({ ...f, skipCheck: true })).maintenancePending, true);
+    assert.equal((await readJson(path.join(f.backend, 'package.json'))).version, '0.2.2');
+    await atomicJson(path.join(previous, 'startup-backup.json'), { format: 1, install: f.install });
+    assert.deepEqual(await autoUpdate({ ...f, skipCheck: true }), { status: 'skipped', version: '0.2.2' });
+    assert.equal(await exists(previous), false); assert.equal(await exists(journal.stage), false);
+    assert.equal(await exists(path.join(f.state, 'startup-update.json')), false);
 });
 
 test('offline checks, active processes and pending synchronization never replace the installed code', async () => {

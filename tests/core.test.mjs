@@ -107,7 +107,7 @@ test('two-button flow publishes a frozen snapshot; unpushed changes require mani
     assert.equal((await manager.status()).phase, 'SUCCEEDED');
     assert.equal((await readJson(path.join(device.dataRoot, device.profile, 'worlds/book.json'))).entries.one.content, 'synthetic world');
     assert.equal((await readJson(path.join(device.dataRoot, device.profile, 'settings.json'))).power_user.chat_width, 90);
-    assert.equal((await readJson(path.join(device.state, 'apply.json'))).phase, 'committed');
+    assert.equal((await readJson(path.join(device.state, 'last-apply.json'))).phase, 'committed');
 });
 test('failed startup rolls back only after confirmed exit, then starts the restored data', async () => {
     const device = await fixture(), remote = new MemoryTransport(path.join(device.root, 'vps')), lifecycle = new FakeLifecycle(); await fs.mkdir(remote.root);

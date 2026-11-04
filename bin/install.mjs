@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { PROJECT, loadDevice } from '../lib/device.mjs';
-import { atomicJson, cliOptions, exists, inside, noLinks, readJson, requireThat, run } from '../lib/io.mjs';
+import { atomicJson, cliOptions, exists, inside, noLinks, readJson, removeOwned, requireThat, run } from '../lib/io.mjs';
 import { copyTree } from '../lib/manifest.mjs';
 import { checkCompatibility } from '../adapters/release-1.19.mjs';
 import { prepareRepository, repositoryPath } from '../lib/repository.mjs';
@@ -62,7 +62,15 @@ export async function install({ st, state, profile = 'default-user', repository 
     } else {
         await fs.writeFile(path.join(directory, 'start-tavernsyn.sh'), termuxLauncher({ node: process.execPath, install: directory, state }), { mode: 0o700 });
     }
-    return { state, deviceId: (await readJson(deviceFile)).deviceId, install: directory, ...prepared };
+    let maintenance;
+    try {
+        if (prepared.repositoryBackup) {
+            await removeOwned(directory, prepared.repositoryBackup);
+            delete prepared.repositoryBackup;
+        }
+        await fs.unlink(backup);
+    } catch { maintenance = ['upgrade-backup']; }
+    return { state, deviceId: (await readJson(deviceFile)).deviceId, install: directory, ...prepared, ...(maintenance ? { maintenance } : {}) };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     install(cliOptions()).then(result => console.log(JSON.stringify({ ...result, next: '使用酒馆目录的 TavernSyn 启动入口，在扩展设置中配置 VPS。' }, null, 2))).catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -213,8 +213,15 @@ export class Manager {
             const directory = path.join(jobs, entry.name), marker = path.join(directory, 'job.json');
             if (directory === apply?.jobRoot || !await exists(marker)) continue;
             const old = await readJson(marker);
-            if (['SUCCEEDED', 'PREVIEW'].includes(old.phase) && !old.maintenancePending) await removeOwned(jobs, directory);
+            if (['SUCCEEDED', 'PREVIEW', 'FAILED'].includes(old.phase) && !old.maintenancePending) await removeOwned(jobs, directory);
         }
+    }
+    async cleanupCompleted(outcome) {
+        // Keep the latest transfer cache and the small, durable receipt.
+        await retireRecovery(this.device);
+        const root = path.dirname(completionPath(this.device, outcome.id));
+        for (const name of ['payload', 'candidate']) await removeOwned(root, path.join(root, name));
+        await this.pruneCompleted();
     }
     async confirm(reason, local, remote, incoming = null) {
         const token = digest({ direction: this.job.direction, local: local.digest, remote });
@@ -312,6 +319,8 @@ export class Manager {
             if (outcome.kind === 'restored') { if (await exists(file)) await fs.unlink(file); }
             else await atomicJson(file, { connection: this.connectionId(), local: outcome.localState, remote: outcome.remote, direction: this.job.direction, at: outcome.completedAt });
         });
+        // Discard recovery data only once all completion records are durable.
+        if (!pending.length) await attempt('cleanup', () => this.cleanupCompleted(outcome));
         const completed = completedStatus(outcome, pending);
         this.job.commit = completed.commit;
         if (!await attempt('status', () => this.write('SUCCEEDED', { ...completed, ...(history ? { history } : {}) }))) {
@@ -383,7 +392,7 @@ export class Manager {
     }
     connectionId() { return connectionId(this.device); }
     async restore() {
-        requireThat((await recoveryStatus(this.device)).available, 'NO_RECOVERY', '没有可用的上一版恢复副本；需要先完成一次拉取更新。');
+        requireThat((await recoveryStatus(this.device)).available, 'NO_RECOVERY', '没有可用的上一版恢复副本；同步成功后会自动删除备份。');
         const file = path.join(this.device.state, 'apply.json'), journal = await readJson(file), journalDigest = digest(journal);
         const approved = (await portableState(this.device)).digest;
         await this.write('PREPARING', { note: '准备恢复到最近一次拉取前的本机数据。' });
@@ -473,7 +482,8 @@ export class Manager {
                 requireThat(metadata.sourceState?.digest && Array.isArray(metadata.sourceState.files), 'MANIFEST', '远端缺少便携数据基准。');
                 let local = await portableState(this.device);
                 let summary = stateDifference(local, metadata.sourceState);
-                const remote = { generation: downloaded.generation, digest: downloaded.manifest.digest };
+                const remote = { generation: downloaded.generation, digest: downloaded.manifest.digest,
+                    ...(downloaded.maintenance?.length ? { maintenance: downloaded.maintenance } : {}) };
                 if (this.job.preview) { await this.cache(payload); await this.write('PREVIEW', { summary, remote, note: '以 VPS 为准替换当前设备共享内容；预览未应用。' }); return; }
                 if (!this.lifecycle) {
                     await verify(payload, downloaded.manifest); await validateContent(payload, downloaded.manifest);
@@ -491,7 +501,7 @@ export class Manager {
                 if (summary.deleted > local.files.length * 0.4 || clearsCore(local, metadata.sourceState)) reasons.push('本次将大量删除共享文件，或清空某类聊天、角色或世界书。');
                 if (metadata.warnings?.length) reasons.push(`远端设置含 ${metadata.warnings.length} 个设备绝对路径字段，请先核对设备字段保留策略；继续将按远端值同步。`);
                 this.approvedLocal = reasons.length
-                    ? await this.confirm(`${reasons.join('')}继续会以 VPS 为准替换共享内容，并保留一份恢复数据。`, local, remote.digest, metadata.sourceState)
+                    ? await this.confirm(`${reasons.join('')}继续会以 VPS 为准替换共享内容；恢复副本将在成功后自动删除。`, local, remote.digest, metadata.sourceState)
                     : local.digest;
                 try {
                     await this.saveAndStop();

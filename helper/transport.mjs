@@ -308,9 +308,9 @@ export async function pull(session, device, job, payload, onProgress, onBegin, {
     await atomicJson(path.join(path.dirname(payload), 'download.json'), {
         format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest,
     });
-    // finish only releases a read job. A lost cleanup ACK cannot invalidate bytes
+    // finish releases the read job and cleans obsolete data. A lost ACK cannot invalidate bytes
     // already checked against the manifest pinned by this authenticated session.
-    try { await control.request('finish', { job }, 15_000); }
+    try { begun.maintenance = (await control.request('finish', { job }, 15_000)).maintenance; }
     catch (error) {
         if (!['SSH', 'SSH_TIMEOUT'].includes(error.code)) throw error;
         session.log?.('VPS 结束回执未收到；下载文件已全量校验，继续准备应用。控制连接关闭后 VPS 会释放占用。');
@@ -354,7 +354,7 @@ async function pullScoped(session, device, job, payload, onProgress, onBegin, sc
     await onProgress?.({ stage: 'transferred', stats });
     await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
     await atomicJson(path.join(path.dirname(payload), 'download.json'), { format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest, scope, publicationDigest: begun.publicationDigest });
-    try { if (begun.phase !== 'done') await control.request('finish', { job }, 15_000); }
+    try { if (begun.phase !== 'done') begun.maintenance = (await control.request('finish', { job }, 15_000)).maintenance; }
     catch (error) { if (!['SSH', 'SSH_TIMEOUT'].includes(error.code)) throw error; }
     finally { control.close(); }
     return { ...begun, digest: begun.publicationDigest, manifest, stats };

@@ -204,7 +204,7 @@ export async function preserveSyncCode(device, journal) {
     }
 }
 export async function retireRecovery(device) {
-    // Only called before a new operation after verifying the previous transaction was healthy.
+    // Called after durable success, or before a new operation once rollback is complete.
     const file = path.join(device.state, 'apply.json');
     if (!await exists(file)) return;
     const journal = await readJson(file);
