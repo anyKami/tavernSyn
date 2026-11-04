@@ -144,7 +144,10 @@ export class Manager {
     async waitFor(name, phase, fields = {}) {
         let timeout;
         const promise = new Promise((resolve, reject) => {
-            timeout = setTimeout(() => { delete this.wake[name]; reject(new SyncError('USER_TIMEOUT', '等待保存或确认超时；未替换数据。')); }, 10 * 60 * 1000);
+            // User confirmation waits until explicitly confirmed or cancelled.
+            if (phase !== 'AWAITING_CONFIRMATION') {
+                timeout = setTimeout(() => { delete this.wake[name]; reject(new SyncError('USER_TIMEOUT', '等待保存或页面交接超时；未替换数据。')); }, 10 * 60 * 1000);
+            }
             this.wake[name] = error => { clearTimeout(timeout); delete this.wake[name]; if (error) reject(error); else resolve(); };
         });
         try { await this.write(phase, fields); await promise; }
