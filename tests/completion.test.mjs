@@ -20,8 +20,6 @@ async function push(manager) {
 }
 async function pull(manager) {
     await manager.start({ direction: 'pull', tab: randomUUID() });
-    const confirm = await phase(manager, 'AWAITING_CONFIRMATION');
-    await manager.action('confirm', { id: confirm.id, token: confirm.confirmationToken });
     await handoff(manager); await manager.done;
 }
 const noRemote = { connect() { throw Error('local completion repair must not publish or download'); } };

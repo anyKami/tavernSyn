@@ -34,40 +34,46 @@ test('pull inventories the current local data after preparation finishes', async
         if (!changed && line.includes('(PREPARING)')) { changed = true; writeFileSync(file, '{"savedDuringPreparation":true}'); }
     });
     await manager.start({ direction: 'pull', tab: randomUUID() });
-    const confirmation = await phase(manager, 'AWAITING_CONFIRMATION');
-    assert.equal(confirmation.localDigest, (await portableState(device)).digest);
-    assert.equal(confirmation.summary.changed, 1);
-    await manager.action('cancel', { id: confirmation.id }); await manager.done;
+    const saving = await phase(manager, 'AWAITING_SAVE');
+    assert.equal(saving.localDigest, (await portableState(device)).digest);
+    assert.equal(saving.summary.changed, 1);
+    await handoff(manager); await manager.done;
+    assert.equal((await manager.status()).phase, 'SUCCEEDED');
 });
 
-test('autosaves refresh the same downloaded pull and require a fresh explicit confirmation', async () => {
+test('a reloaded sole page can automatically save and own the handoff without another confirmation', async () => {
     const { device, remote } = await published();
     const book = path.join(device.dataRoot, device.profile, 'worlds/book.json');
     await atomicJson(book, { local: true });
     const manager = new Manager(device, new FakeLifecycle(), remote);
     await manager.start({ direction: 'pull', tab: randomUUID() });
-    const original = await phase(manager, 'AWAITING_CONFIRMATION');
-    const quickReply = path.join(device.dataRoot, device.profile, 'QuickReplies/auto.json');
-    await atomicJson(quickReply, { saved: true });
-    const settingsFile = path.join(device.dataRoot, device.profile, 'settings.json');
-    const settings = await readJson(settingsFile); settings.username = 'autosaved'; await atomicJson(settingsFile, settings);
-    assert.deepEqual(await manager.action('confirm', { id: original.id, token: original.confirmationToken }), { ok: false, refreshed: true });
-    const refreshed = await manager.status();
-    assert.equal(refreshed.phase, 'AWAITING_CONFIRMATION');
-    assert.equal(refreshed.id, original.id); assert.deepEqual(refreshed.remote, original.remote);
-    assert.notEqual(refreshed.confirmationToken, original.confirmationToken);
-    assert.equal(refreshed.summary.deleted, 1); assert.equal(refreshed.summary.changed, 2);
-    assert.equal(await fs.stat(path.join(device.state, 'apply.json')).catch(() => null), null);
-    await assert.rejects(manager.action('confirm', { id: original.id, token: original.confirmationToken }), { code: 'CONFIRMATION' });
-    await assert.rejects(manager.action('confirm', { id: refreshed.id, token: refreshed.confirmationToken, tab: 'invalid' }), { code: 'INPUT' });
+    const saving = await phase(manager, 'AWAITING_SAVE');
+    await assert.rejects(manager.action('ready', { id: saving.id, tab: 'invalid', receipt: randomUUID() }), { code: 'INPUT' });
     const reloadedTab = randomUUID();
-    await manager.action('confirm', { id: refreshed.id, token: refreshed.confirmationToken, tab: reloadedTab });
-    assert.equal((await manager.status()).tab, reloadedTab);
-    await handoff(manager); await manager.done;
+    await manager.action('ready', { id: saving.id, tab: reloadedTab, receipt: randomUUID() });
+    const page = await phase(manager, 'WAITING_PAGE');
+    assert.equal(page.tab, reloadedTab);
+    await assert.rejects(manager.action('page', { id: page.id, tab: saving.tab, ticket: page.ticket }), { code: 'JOB' });
+    await manager.action('page', { id: page.id, tab: reloadedTab, ticket: page.ticket }); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED');
     const journal = await readJson(path.join(device.state, 'last-apply.json'));
     const oldProfile = journal.steps.find(s => s.live === path.join(device.dataRoot, device.profile)).old;
     assert.equal(await exists(oldProfile), false);
+});
+
+test('first overwrite and clearing the worldbook category proceed with only the initial sync consent', async () => {
+    const { device, remote } = await published();
+    const other = await fixture(), phases = [];
+    const replacement = new Manager(other, new FakeLifecycle(), remote, job => phases.push(job.phase));
+    await fs.unlink(path.join(other.dataRoot, other.profile, 'worlds/book.json'));
+    // No baseline on this device, and the VPS already contains another copy.
+    await replacement.start({ direction: 'push', tab: randomUUID() }); await handoff(replacement); await replacement.done;
+    assert.equal((await replacement.status()).phase, 'SUCCEEDED');
+    const pull = new Manager(device, new FakeLifecycle(), remote, job => phases.push(job.phase));
+    await pull.start({ direction: 'pull', tab: randomUUID() }); await handoff(pull); await pull.done;
+    assert.equal((await pull.status()).phase, 'SUCCEEDED');
+    assert.equal(await exists(path.join(device.dataRoot, device.profile, 'worlds/book.json')), false);
+    assert.ok(!phases.includes('AWAITING_CONFIRMATION'));
 });
 
 test('apply and restore preserve the original case of installed TavernSyn directories', async () => {

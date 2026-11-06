@@ -22,7 +22,7 @@ async function downloaded() {
     return { device, root, status, manifest: frozen.manifest };
 }
 
-test('legacy verified pull recovers offline, then confirms, applies and restarts once', async () => {
+test('legacy verified pull recovers offline, then automatically applies and restarts once', async () => {
     const { device, root, status } = await downloaded();
     const local = path.join(device.dataRoot, device.profile, 'worlds/local-only.json');
     await fs.writeFile(local, '{"entries":{}}');
@@ -35,8 +35,7 @@ test('legacy verified pull recovers offline, then confirms, applies and restarts
         connect() { throw Error('offline continuation must not connect or redownload'); },
     });
     await manager.action('resume-pending', { tab: randomUUID() });
-    const confirmation = await phase(manager, 'AWAITING_CONFIRMATION');
-    await manager.action('confirm', { id: confirmation.id, token: confirmation.confirmationToken });
+
     await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED');
     assert.equal(await exists(local), false); assert.equal(lifecycle.starts, 1);

@@ -223,11 +223,32 @@ export async function push(session, device, job, payload, manifest, onProgress, 
 // only this retained job; begin/resume and commit enforce ownership and base.
 export async function finalizeUpload(session, device, job, payload, manifest, stats, onProgress, phase = 'transfer', options = {}) {
     const scope = normalizeScope(options.scope);
-    let recoveries = 0;
+    const maxReconnects = 5;
+    let recoveries = 0, reconnect = false;
     const dataset = session.hello.dataset ?? device.remote.dataset;
     const base = options.base === undefined ? session.hello.current?.digest ?? null : options.base;
     for (;;) {
         try {
+            if (reconnect) {
+                recoveries++;
+                session.log?.(`上传后的 SSH 控制连接中断，正在重连并核验同一任务（${recoveries}/${maxReconnects}）；保留已上传文件。`);
+                await session.reconnect();
+                let resumed;
+                for (let attempt = 0; ; attempt++) {
+                    try {
+                        resumed = await session.control.request('begin', { job, dataset, direction: 'push', base, jobBound: true, resumeOnly: true, ...(scope ? { scope } : {}) });
+                        break;
+                    } catch (retryError) {
+                        if (retryError.code !== 'BUSY' || attempt >= 4) throw retryError;
+                        await delay(Math.min(2000, 500 * 2 ** attempt));
+                    }
+                }
+                requireThat(resumed.job === job && resumed.generation === job
+                    && ['transfer', 'finalizing', 'done'].includes(resumed.phase) && (resumed.base ?? null) === base && sameScope(resumed.scope, scope),
+                'REMOTE_PROTOCOL', 'VPS 续接回执与原上传任务不一致，已停止发布。');
+                phase = resumed.phase; reconnect = false;
+                session.log?.(`SSH 已恢复同一上传任务：${phase}；继续校验与发布。`);
+            }
             if (!['done', 'finalizing'].includes(phase)) {
                 const diff = await session.control.request('inspect', { job, manifest });
                 session.log?.(`VPS 内容校验：待补传 ${diff.changed.length} 个文件，额外 ${diff.extra.length} 个文件`);
@@ -243,25 +264,8 @@ export async function finalizeUpload(session, device, job, payload, manifest, st
                 && /^[a-f0-9]{64}$/.test(published.digest), 'REMOTE_PROTOCOL', 'VPS 发布回执与源快照不匹配。');
             return { ...published, stats };
         } catch (error) {
-            if (!['SSH', 'SSH_TIMEOUT'].includes(error.code) || recoveries >= 2 || typeof session.reconnect !== 'function') throw error;
-            recoveries++;
-            session.log?.(`上传后的 SSH 控制连接中断，正在重连并核验同一任务（${recoveries}/2）；保留已上传文件。`);
-            await session.reconnect();
-            let resumed;
-            for (let attempt = 0; ; attempt++) {
-                try {
-                    resumed = await session.control.request('begin', { job, dataset, direction: 'push', base, jobBound: true, resumeOnly: true, ...(scope ? { scope } : {}) });
-                    break;
-                } catch (retryError) {
-                    if (retryError.code !== 'BUSY' || attempt >= 4) throw retryError;
-                    await delay(Math.min(2000, 500 * 2 ** attempt));
-                }
-            }
-            requireThat(resumed.job === job && resumed.generation === job
-                && ['transfer', 'finalizing', 'done'].includes(resumed.phase) && (resumed.base ?? null) === base && sameScope(resumed.scope, scope),
-            'REMOTE_PROTOCOL', 'VPS 续接回执与原上传任务不一致，已停止发布。');
-            phase = resumed.phase;
-            session.log?.(`SSH 已恢复同一上传任务：${phase}；继续校验与发布。`);
+            if (!['SSH', 'SSH_TIMEOUT'].includes(error.code) || recoveries >= maxReconnects || typeof session.reconnect !== 'function') throw error;
+            reconnect = true;
         }
     }
 }

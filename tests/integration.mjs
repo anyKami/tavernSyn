@@ -284,23 +284,23 @@ try {
     const normalConnect = remote.connect;
     remote.connect = () => { throw Error('recovery must reuse local download'); };
     await api('resume-pending', { tab });
-    const confirmation = await phase(manager, 'AWAITING_CONFIRMATION', 60000);
+    const saving = await phase(manager, 'AWAITING_SAVE', 60000);
     await api('tabs', { tab });
-    const conflictingTab = await request('/api/plugins/tavernsyn/confirm', { method: 'POST',
-        body: { id: confirmation.id, token: confirmation.confirmationToken, tab: randomUUID() } });
+    const conflictingTab = await request('/api/plugins/tavernsyn/ready', { method: 'POST',
+        body: { id: saving.id, receipt: await receipt(), tab: randomUUID() } });
     assert.equal(conflictingTab.status, 409); assert.equal((await conflictingTab.json()).error, 'OTHER_TABS');
-    assert.equal((await manager.status()).phase, 'AWAITING_CONFIRMATION');
-    await api('confirm', { id: confirmation.id, token: confirmation.confirmationToken, tab }); await handoff();
+    assert.equal((await manager.status()).phase, 'AWAITING_SAVE');
+    await handoff();
     remote.connect = normalConnect; remote.pull = normalPull;
     assert.notEqual(lifecycle.nonce, prePullEpoch);
-    checks.push('Legacy SSH failure after complete download: offline SHA-256 recovery, original-generation confirmation, real ST same-port restart and successful application without reconnecting');
-    checks.push('Confirmation binds the save handoff to its current page and refuses another still-active TavernSyn tab');
+    checks.push('Legacy SSH failure after complete download: offline SHA-256 recovery, original-generation automatic continuation, real ST same-port restart and successful application without reconnecting');
+    checks.push('Automatic save binds the handoff to its current page and refuses another still-active TavernSyn tab');
     assert.equal(await exists(path.join(fixture, 'data/default-user/worlds/local-only.json')), false);
     assert.equal((await readJson(path.join(state, 'last-apply.json'))).phase, 'committed');
     assert.equal(await exists(path.join(state, 'recovery')), false);
     assert.equal(await exists(path.join(state, 'jobs', manager.job.id, 'candidate')), false);
     assert.ok(await exists(path.join(state, 'jobs', manager.job.id, 'outcome.json')));
-    checks.push('Protected plugin pull: verified stage, unpushed-change confirmation, owned stop, journal apply, healthy restart and automatic recovery cleanup after durable completion');
+    checks.push('Protected plugin pull: verified stage, automatic overwrite, owned stop, journal apply, healthy restart and automatic recovery cleanup after durable completion');
     const syncText = await fs.readFile(path.join(state, 'sync.log'), 'utf8');
     for (const label of ['上传到 VPS', '从 VPS 下载', '校验文件', '应用更新', '同步完成']) {
         assert.ok(syncText.includes(label), label); assert.ok(liveStdout.includes(label), label);
@@ -330,7 +330,7 @@ try {
     checks.push('An uncertain handler still rejects a strict stop without clearing its diagnostics');
     // Reproduce both an active POST and a historical aborted request. Only the
     // normal save + page handoff may opt into interrupting this old instance.
-    // Model a device without a baseline, requiring explicit overwrite confirmation.
+    // Model a device without a baseline; the initial user consent covers overwrite.
     await fs.unlink(path.join(state, 'baseline.json'));
     let pendingRequest;
     const pendingResponse = new Promise((resolve, reject) => {
@@ -345,8 +345,6 @@ try {
     const oldChild = lifecycle.child, oldExit = lifecycle.exit;
     try {
         await api('start', { direction: 'push', tab, preview: false });
-        const confirmation = await phase(manager, 'AWAITING_CONFIRMATION', 60000);
-        await api('confirm', { id: confirmation.id, tab, token: confirmation.confirmationToken });
         await handoff();
         await Promise.race([disconnected, delay(5000).then(() => { throw new Error('Blocked POST was not disconnected'); })]);
         assert.equal((await oldExit).code, 0); assert.notEqual(lifecycle.child.pid, oldChild.pid);

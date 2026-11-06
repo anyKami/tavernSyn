@@ -80,17 +80,17 @@ export async function executeScoped(manager) {
                 local = await inventory();
                 const summary = difference(metadata.sourceState, local);
                 await m.write('PREFLIGHT', { summary });
-                const approved = await m.confirm(`仅以本机为准更新 VPS 的${scopeLabel(scope)}，包含上面列出的删除。其他内容保持不变。`, local, remote.digest, metadata.sourceState);
+                const approved = local.digest;
                 await m.saveAndStop();
                 try {
-                    requireThat((await inventory()).digest === approved, 'LOCAL_CHANGED', '确认后所选内容有更新，请重新预览确认；未发布。');
+                    requireThat((await inventory()).digest === approved, 'LOCAL_CHANGED', '保存交接期间所选内容有更新，请重新发起同步；未发布。');
                     await m.write('SNAPSHOT'); frozen = await snapshot(device, payload, { scope });
                     requireThat(frozen.metadata.sourceState.digest === approved, 'LOCAL_CHANGED', '创建快照期间所选数据发生变化，未上传。');
                 } finally { if (m.lifecycle.stopped) { await m.write('STARTING'); await m.lifecycle.start(); } else await m.lifecycle.resume(); }
                 await atomicJson(path.join(root, 'manifest.json'), frozen.manifest);
             }
             await m.write('UPLOADING', { snapshotReady: true, snapshotDigest: frozen.manifest.digest, files: frozen.manifest.files.length, bytes: frozen.manifest.bytes });
-            const published = await m.transport.push(session, device, m.job.id, payload, frozen.manifest, m.progress, onBegin, { scope, onPlan: m.confirmTransfer });
+            const published = await m.transport.push(session, device, m.job.id, payload, frozen.manifest, m.progress, onBegin, { scope, onPlan: m.reportTransfer });
             remoteBegun = false;
             await m.success(frozen.metadata.sourceState, { generation: published.generation, digest: published.digest, snapshotDigest: published.snapshotDigest,
                 ...(published.maintenance?.length ? { maintenance: published.maintenance } : {}) }, published.stats);
@@ -111,7 +111,7 @@ export async function executeScoped(manager) {
             await copyTree(path.join(old.jobRoot, 'payload'), payload);
             await atomicJson(path.join(root, 'manifest.json'), manifest);
             downloaded = { generation: old.remote.generation, digest: old.remote.digest, manifest, stats: old.stats };
-        } else downloaded = await m.transport.pull(session, device, m.job.id, payload, m.progress, onBegin, { scope, onPlan: m.confirmTransfer });
+        } else downloaded = await m.transport.pull(session, device, m.job.id, payload, m.progress, onBegin, { scope, onPlan: m.reportTransfer });
         remoteBegun = false;
         await verify(payload, downloaded.manifest); await validateContent(payload, downloaded.manifest, { scope });
         metadata = selectedMetadata(await readJson(path.join(payload, 'environment.json')), scope, downloaded.manifest);
@@ -119,16 +119,16 @@ export async function executeScoped(manager) {
             ...(downloaded.maintenance?.length ? { maintenance: downloaded.maintenance } : {}) };
         await m.write('VERIFYING', { files: downloaded.manifest.files.length, bytes: downloaded.manifest.bytes, stats: downloaded.stats, remote });
         if (!m.lifecycle) {
-            await m.write('PENDING_APPLY', { jobRoot: root, remote, reason: '分类数据已下载并校验；请从受控入口启动后继续确认和应用。' });
+            await m.write('PENDING_APPLY', { jobRoot: root, remote, reason: '分类数据已下载并校验；请从受控入口启动后继续应用。' });
             return;
         }
         await m.write('PREPARING');
         const prepared = await prepare(device, payload, downloaded.manifest, root, { scope });
         local = await inventory();
         await m.write('PREPARING', { summary: difference(local, metadata.sourceState) });
-        const approved = await m.confirm(`仅以 VPS 为准替换本机的${scopeLabel(scope)}，包含上面列出的删除。恢复副本将在成功后自动删除，其他内容保持不变。`, local, remote.digest, metadata.sourceState);
+        const approved = local.digest;
         await m.saveAndStop();
-        requireThat((await inventory()).digest === approved, 'LOCAL_CHANGED', '确认后所选数据发生变化，保留下载，请重新确认。');
+        requireThat((await inventory()).digest === approved, 'LOCAL_CHANGED', '应用前所选数据发生变化，保留下载，请重新发起同步。');
         await retireRecovery(device);
         m.plan = await buildPlan(device, prepared, root);
         await m.write('APPLYING'); await applyPlan(device, m.plan);

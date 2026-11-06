@@ -128,17 +128,17 @@ settings.json 大部分字段共享。设备字段用受版本管理的 JSON Poi
 ```text
 IDLE -> PREFLIGHT -> SNAPSHOT/DOWNLOADING -> VERIFYING
 push: VERIFIED -> UPLOADING -> REMOTE_FINALIZING -> PUBLISHED -> SUCCEEDED
-pull: VERIFIED -> CHECK_LOCAL -> [AWAITING_CONFIRMATION]
+pull: VERIFIED -> CHECK_LOCAL
       -> SAVE_ACK -> WAITING_PAGES -> QUIESCING -> STOPPED
       -> APPLYING -> STARTING -> HEALTH_CHECK -> SUCCEEDED
 分支: PENDING_APPLY / FAILED / ROLLING_BACK / RECOVERY_REQUIRED
 ```
 
-推送在 SNAPSHOT 内保存、停机、复制后重启；从静态副本上传。源冻结后新增的本机聊天不会混入已上传批次，成功状态同时告知“快照之后的改动尚未上传”。远端基准在预检后发生变化时停止/要求确认，防止旧设备静默覆盖新代次。
+推送在 SNAPSHOT 内保存、停机、复制后重启；从静态副本上传。源冻结后新增的本机聊天不会混入已上传批次，成功状态同时告知“快照之后的改动尚未上传”。远端基准在预检后发生变化时停止，防止覆盖未核对的新代次。
 
-拉取先占用远端锁固定 generation、下载并验证；下载期间本机仍可使用。应用前重新确认本机自上次成功同步基准后的共享内容变化，排除设备字段及可再生缓存。存在未上传内容时确认一次覆盖；确认绑定当前本机 manifest 和远端 generation，过期必须重查。没有同步基准时保守视为需确认，不靠时间戳猜测。
+拉取先占用远端锁固定 generation、下载并验证；下载期间本机仍可使用。准备完成后重新核对本机共享内容，排除设备字段及可再生缓存。0.2.10 起，开始时的一次方向确认包含后续传输、覆盖和删除；首次同步及有未上传内容时也不再追加确认。应用前仍核对本机 manifest 和固定远端 generation，保存交接期间本机内容变化会停止替换。
 
-空载荷不得覆盖已有镜像；未初始化远端不得拉取；删除全部核心内容或异常大批删除进入异常预览/确认。正常两按钮流程不增加形式性确认。预览明确显示方向、新增/修改/删除文件与不支持项；dry-run 不能承诺准确传输字节。
+空载荷不得覆盖已有镜像；未初始化远端不得拉取。删除全部核心内容或大量删除由开始时的确认授权，进度继续显示差异；完整和分类同步均不再追加确认。预览明确显示方向、新增/修改/删除文件与不支持项；dry-run 不能承诺准确传输字节。
 
 ## 8. 本机安全应用、恢复与降级
 

@@ -17,7 +17,6 @@ async function withRecovery({ legacy = false } = {}) {
     const cleanup = manager.cleanupCompleted;
     if (legacy) manager.cleanupCompleted = async () => {};
     await manager.start({ direction: 'pull', tab: randomUUID() });
-    const confirm = await phase(manager, 'AWAITING_CONFIRMATION'); await manager.action('confirm', { id: confirm.id, token: confirm.confirmationToken });
     await handoff(manager); await manager.done; assert.equal((await manager.status()).phase, 'SUCCEEDED');
     manager.cleanupCompleted = cleanup;
     assert.equal(await exists(local), false); assert.equal((await recoveryStatus(device)).available, legacy);

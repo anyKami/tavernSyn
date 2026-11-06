@@ -4,7 +4,7 @@ export function progressDetail(status) {
     if (status.noChanges) return `待${status.direction === 'pull' ? '下载' : '上传'}文件总大小：0 B（0 个新增、修改文件）。\n无需文件传输；本次仅检查本机状态和 VPS 版本。`;
     const mib = value => `${((value ?? 0) / 1024 / 1024).toFixed(2)} MiB`;
     const lines = [], progress = status.progress;
-    if (status.transferPlan && ['AWAITING_CONFIRMATION', 'UPLOADING', 'DOWNLOADING'].includes(status.phase)) {
+    if (status.transferPlan && ['UPLOADING', 'DOWNLOADING'].includes(status.phase)) {
         const { bytes, files } = status.transferPlan, units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
         const unit = Math.min(bytes > 0 ? Math.floor(Math.log(bytes) / Math.log(1024)) : 0, units.length - 1);
         const size = `${(bytes / 1024 ** unit).toFixed(unit ? 2 : 0)} ${units[unit]}`;

@@ -91,14 +91,15 @@ test('the running manager uses the saved password configuration on the next chec
     await assert.rejects(manager.action('check'), { code: 'BUSY' });
 });
 
-test('a different dataset requires fresh overwrite confirmation even with an identical remote digest', async () => {
+test('a different dataset cannot reuse the unchanged fast path even with an identical remote digest', async () => {
     const device = await fixture(), remote = new MemoryTransport(path.join(device.root, 'vps')); await fs.mkdir(remote.root);
     const manager = new Manager(device, new FakeLifecycle(), remote);
     await manager.start({ direction: 'push', tab: randomUUID() }); await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED');
     device.remote.dataset = randomUUID();
     await manager.start({ direction: 'push', tab: randomUUID() });
-    const confirmation = await phase(manager, 'AWAITING_CONFIRMATION');
-    assert.match(confirmation.reason, /尚未建立同步基准/);
-    await manager.action('cancel', { id: confirmation.id }); await manager.done;
+    const confirmation = await phase(manager, 'AWAITING_SAVE');
+    assert.equal(confirmation.noChanges, undefined);
+    await handoff(manager); await manager.done;
+    assert.equal((await manager.status()).phase, 'SUCCEEDED');
 });

@@ -72,10 +72,39 @@ test('permission and integrity errors never trigger automatic reconnect or publi
     }
 });
 
-test('control reconnection stops after two attempts and never declares success while still disconnected', async () => {
+test('control reconnection stops after five attempts and never declares success while still disconnected', async () => {
     const f = fixture({ alwaysFail: true });
     await assert.rejects(finalizeUpload(f.session, f.device, f.job, 'unused', manifest, stats), { code: 'SSH' });
-    assert.equal(f.reconnects(), 2); assert.ok(!f.events.includes('commit'));
+    assert.equal(f.reconnects(), 5); assert.ok(!f.events.includes('commit'));
+    assert.match(f.logs.at(-1), /5\/5|已恢复同一上传任务/);
+});
+
+test('failed reconnects share the five-attempt budget and the fifth attempt can still succeed', async () => {
+    const f = fixture(), reconnect = f.session.reconnect;
+    let attempts = 0;
+    f.session.reconnect = async () => {
+        if (++attempts < 5) throw new SyncError('SSH_TIMEOUT', 'synthetic failed reconnect');
+        await reconnect();
+    };
+    assert.equal((await finalizeUpload(f.session, f.device, f.job, 'unused', manifest, stats)).digest, manifest.digest);
+    assert.equal(attempts, 5); assert.ok(f.logs.some(line => line.includes('5/5')));
+});
+
+test('five failed reconnect handshakes stop without publication', async () => {
+    const f = fixture(); let attempts = 0;
+    f.session.reconnect = async () => { attempts++; throw new SyncError('SSH', 'still offline'); };
+    await assert.rejects(finalizeUpload(f.session, f.device, f.job, 'unused', manifest, stats), { code: 'SSH' });
+    assert.equal(attempts, 5); assert.ok(!f.events.includes('commit'));
+});
+
+test('a disconnect while reclaiming the retained job also consumes the same reconnect budget', async () => {
+    const f = fixture(), reconnect = f.session.reconnect;
+    f.session.reconnect = async () => {
+        await reconnect();
+        f.session.control.request = async op => { f.events.push(op); throw new SyncError('SSH', 'lost resume acknowledgement'); };
+    };
+    await assert.rejects(finalizeUpload(f.session, f.device, f.job, 'unused', manifest, stats), { code: 'SSH' });
+    assert.equal(f.reconnects(), 5); assert.ok(!f.events.includes('commit'));
 });
 
 test('an idle control exit is logged immediately with its exit code even without pending requests', () => {

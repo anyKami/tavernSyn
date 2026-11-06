@@ -94,15 +94,13 @@ test('rsync statistics distinguish actual protocol bytes and logical/literal byt
     assert.equal(stats.sentBytes, 1234); assert.equal(stats.receivedBytes, 56); assert.equal(stats.literalBytes, 7890);
     assert.ok(RSYNC_ARGS.includes('--no-whole-file')); assert.ok(!RSYNC_ARGS.some(x => ['--inplace', '--append', '-a'].includes(x)));
 });
-test('two-button flow publishes a frozen snapshot; unpushed changes require manifest-bound confirmation', async () => {
+test('two-button flow publishes a frozen snapshot; unpushed changes are replaced without another confirmation', async () => {
     const device = await fixture(), remote = new MemoryTransport(path.join(device.root, 'vps')), lifecycle = new FakeLifecycle(); await fs.mkdir(remote.root);
     const manager = new Manager(device, lifecycle, remote);
     await manager.start({ direction: 'push', tab: randomUUID() }); await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED'); assert.equal(lifecycle.starts, 1);
     await atomicJson(path.join(device.dataRoot, device.profile, 'worlds/book.json'), { local: 'unpublished' });
-    await manager.start({ direction: 'pull', tab: randomUUID() }); const confirmation = await phase(manager, 'AWAITING_CONFIRMATION');
-    await assert.rejects(manager.action('confirm', { id: confirmation.id, token: 'wrong' }), { code: 'CONFIRMATION' });
-    await manager.action('confirm', { id: confirmation.id, token: confirmation.confirmationToken });
+    await manager.start({ direction: 'pull', tab: randomUUID() });
     await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED');
     assert.equal((await readJson(path.join(device.dataRoot, device.profile, 'worlds/book.json'))).entries.one.content, 'synthetic world');
@@ -115,8 +113,7 @@ test('failed startup rolls back only after confirmed exit, then starts the resto
     await manager.start({ direction: 'push', tab: randomUUID() }); await handoff(manager); await manager.done;
     await fs.writeFile(path.join(device.dataRoot, device.profile, 'worlds/local.json'), '{"keep":true}');
     const original = (await portableState(device)).digest;
-    await manager.start({ direction: 'pull', tab: randomUUID() }); const confirmation = await phase(manager, 'AWAITING_CONFIRMATION');
-    await manager.action('confirm', { id: confirmation.id, token: confirmation.confirmationToken });
+    await manager.start({ direction: 'pull', tab: randomUUID() });
     lifecycle.failNext = true; await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'FAILED'); assert.equal(lifecycle.stopped, false);
     assert.equal((await portableState(device)).digest, original);
@@ -151,13 +148,12 @@ test('core JSON validation refuses a self-consistent but broken source payload',
     await fs.writeFile(path.join(device.dataRoot, device.profile, 'worlds/book.json'), '{broken');
     await assert.rejects(snapshot(device, path.join(device.root, 'payload')), { code: 'INVALID_JSON' });
 });
-test('post-confirm local changes cancel application and restart the original instance', async () => {
+test('post-preparation local changes cancel application and restart the original instance', async () => {
     const device = await fixture(), remote = new MemoryTransport(path.join(device.root, 'vps')), lifecycle = new FakeLifecycle(); await fs.mkdir(remote.root);
     const manager = new Manager(device, lifecycle, remote);
     await manager.start({ direction: 'push', tab: randomUUID() }); await handoff(manager); await manager.done;
     const file = path.join(device.dataRoot, device.profile, 'worlds/local.json'); await fs.writeFile(file, '{"one":1}');
-    await manager.start({ direction: 'pull', tab: randomUUID() }); const confirmation = await phase(manager, 'AWAITING_CONFIRMATION');
-    await manager.action('confirm', { id: confirmation.id, token: confirmation.confirmationToken });
+    await manager.start({ direction: 'pull', tab: randomUUID() });
     await phase(manager, 'AWAITING_SAVE'); await fs.writeFile(file, '{"two":2}');
     await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'FAILED'); assert.equal((await manager.status()).error.code, 'LOCAL_CHANGED');

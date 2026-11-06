@@ -1,0 +1,53 @@
+{
+  "version": "0.2.10",
+  "date": "2026-11-06",
+  "platform": "win32",
+  "node": "v25.8.2",
+  "sillyTavern": "1.19.0 (06bde939fb1e9c4c8d8641d810f0a916b5bce127)",
+  "status": "passed",
+  "checks": [
+    {
+      "command": "node --test tests/*.test.mjs",
+      "passed": 170,
+      "failed": 0,
+      "skipped": 1,
+      "skipReason": "POSIX owner execution requires a POSIX filesystem."
+    },
+    {
+      "command": "node tests/integration.mjs",
+      "passed": 28,
+      "report": "implementation-windows.json",
+      "transport": "MemoryTransport; real isolated SillyTavern lifecycle"
+    },
+    {
+      "command": "node tests/rsync.mjs <prepared-rsync-binary>",
+      "passed": 8,
+      "report": "rsync-windows.json"
+    },
+    {
+      "command": "python -m unittest discover -s tests -p test_vps*.py -v",
+      "passed": 30,
+      "failed": 0,
+      "skipped": 5,
+      "skipReason": "Linux file locking and descriptor checks."
+    }
+  ],
+  "coverage": [
+    "Full and scoped push/pull each retain one initial direction dialog; declining starts no task.",
+    "Transfer sizes display without waiting; uploads retain the frozen snapshot after later live edits.",
+    "First overwrite, local unpushed changes and clearing a selected category require no further confirmation.",
+    "Automatic save handoff supports a reloaded sole page and waits for old tab heartbeats to expire.",
+    "Concurrent local edits, failed receipts, active tabs and integrity failures remain blocked.",
+    "Reconnect succeeds on attempt five or fails after exactly five attempts, including reconnect and resume failures.",
+    "Retained job, dataset, generation, base, scope and commit receipts remain checked."
+  ],
+  "environmentNotes": [
+    "Two integration attempts in the system temporary directory failed replacing status.json with Windows EPERM. The complete integration run passed with TEMP/TMP set to an isolated workspace test directory; shared file I/O code was unchanged.",
+    "The final Node suite also passed using the isolated workspace temporary directory."
+  ],
+  "untested": [
+    "Physical Android Termux device",
+    "Production VPS transfer and live user data",
+    "Real browser interaction; direction and waiting-page behavior used VM fixtures"
+  ]
+}

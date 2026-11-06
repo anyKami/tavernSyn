@@ -14,7 +14,7 @@ import { normalizeScope } from '../lib/scope.mjs';
 import { executeScoped } from './scoped.mjs';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'PREVIEW', 'PENDING_APPLY', 'RECOVERY_REQUIRED']);
-const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '从 VPS 下载', VERIFYING: '校验文件', PREPARING: '准备插件', AWAITING_CONFIRMATION: '等待覆盖确认',
+const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '从 VPS 下载', VERIFYING: '校验文件', PREPARING: '准备插件',
     AWAITING_SAVE: '核对保存', WAITING_PAGE: '等待页面交接', QUIESCING: '安全停止酒馆', SNAPSHOT: '创建独立快照', UPLOADING: '上传到 VPS',
     APPLYING: '应用更新', RESTORING: '恢复上一版', STARTING: '重新启动酒馆', ROLLING_BACK: '回滚数据', SUCCEEDED: '同步完成',
     FAILED: '同步失败', PREVIEW: '预览完成', PENDING_APPLY: '等待受控应用', RECOVERY_REQUIRED: '需要人工恢复' };
@@ -26,10 +26,6 @@ export function stateDifference(before, after) {
     const a = entries(before), b = entries(after);
     return { added: [...b.keys()].filter(k => !a.has(k)).length, changed: [...b.keys()].filter(k => a.has(k) && a.get(k) !== b.get(k)).length,
         deleted: [...a.keys()].filter(k => !b.has(k)).length, files: b.size };
-}
-function clearsCore(before, after) {
-    const patterns = [/^profile\/chats\//, /^profile\/group chats\//, /^profile\/characters\/[^/]+\.png$/i, /^profile\/worlds\//];
-    return patterns.some(pattern => before?.files.some(f => pattern.test(f.path)) && !after.files.some(f => pattern.test(f.path)));
 }
 export class Manager {
     constructor(device, lifecycle, transportAdapter = transport, logger = () => {}) {
@@ -94,34 +90,14 @@ export class Manager {
             requireThat(pending.jobRoot === path.join(this.device.state, 'jobs', pending.id), 'JOURNAL', '待应用记录路径无效。');
             return this.start({ direction: 'pull', tab: payload.tab, preview: false, pending });
         }
-        if (action === 'confirm') {
-            requireThat(this.job?.id === payload.id && this.job.phase === 'AWAITING_CONFIRMATION' && payload.token === this.job.confirmationToken, 'CONFIRMATION', '确认已过期，请重新预览。');
-            requireThat(payload.tab === undefined || (typeof payload.tab === 'string' && /^[a-f0-9-]{36}$/.test(payload.tab)), 'INPUT', '浏览器标签页标识无效。');
-            // The upload snapshot / download generation is already pinned. New
-            // live edits belong to a later sync and must not invalidate this size.
-            if (this.job.transferConfirmation) { this.wake.confirm?.(); return { ok: true }; }
-            const local = await portableState(this.device, { scope: this.job.scope });
-            if (local.digest !== this.job.localDigest && this.confirmationTarget) {
-                await this.write('AWAITING_CONFIRMATION', {
-                    localDigest: local.digest,
-                    confirmationToken: digest({ direction: this.job.direction, local: local.digest, remote: this.confirmationRemote }),
-                    summary: this.job.scope && this.job.direction === 'push' ? stateDifference(this.confirmationTarget, local) : stateDifference(local, this.confirmationTarget),
-                    ...(payload.tab ? { tab: payload.tab } : {}),
-                    reason: `本机内容在等待期间有更新，已重新核对差异。请再次确认。${this.confirmationReason}`,
-                });
-                return { ok: false, refreshed: true };
-            }
-            requireThat(local.digest === this.job.localDigest, 'CONFIRMATION', '确认期间本机数据发生变化，请重新执行同步。');
-            // The browser may have reloaded while dependencies were prepared.
-            // Its confirmation owns the subsequent save/page handoff.
-            if (payload.tab && payload.tab !== this.job.tab) await this.write('AWAITING_CONFIRMATION', { tab: payload.tab });
-            this.wake.confirm?.(); return { ok: true };
-        }
         if (action === 'ready') {
-            requireThat(this.job?.id === payload.id && this.job.phase === 'AWAITING_SAVE' && payload.tab === this.job.tab, 'JOB', '任务状态已改变。');
+            requireThat(this.job?.id === payload.id && this.job.phase === 'AWAITING_SAVE', 'JOB', '任务状态已改变。');
+            requireThat(typeof payload.tab === 'string' && /^[a-f0-9-]{36}$/.test(payload.tab), 'INPUT', '浏览器标签页标识无效。');
             requireThat(this.lifecycle, 'UNMANAGED', '请使用受控入口启动。');
             const receipt = await this.lifecycle.receipt(payload.receipt);
             await this.lifecycle.verifyReceipt(receipt); this.receipt = receipt;
+            // The sole active page may have reloaded during preparation.
+            if (payload.tab !== this.job.tab) await this.write('AWAITING_SAVE', { tab: payload.tab });
             this.wake.ready?.(); return { id: this.job.id, ticket: this.job.ticket };
         }
         if (action === 'page') {
@@ -129,7 +105,7 @@ export class Manager {
             this.wake.page?.(); return { ok: true };
         }
         if (action === 'cancel') {
-            requireThat(this.job?.id === payload.id && ['AWAITING_CONFIRMATION', 'AWAITING_SAVE', 'WAITING_PAGE'].includes(this.job.phase), 'JOB', '当前阶段不能取消。');
+            requireThat(this.job?.id === payload.id && ['AWAITING_SAVE', 'WAITING_PAGE'].includes(this.job.phase), 'JOB', '当前阶段不能取消。');
             for (const wake of Object.values(this.wake)) wake(new SyncError('CANCELLED', '用户取消了本次同步。')); return { ok: true };
         }
         if (action === 'check') {
@@ -144,10 +120,7 @@ export class Manager {
     async waitFor(name, phase, fields = {}) {
         let timeout;
         const promise = new Promise((resolve, reject) => {
-            // User confirmation waits until explicitly confirmed or cancelled.
-            if (phase !== 'AWAITING_CONFIRMATION') {
-                timeout = setTimeout(() => { delete this.wake[name]; reject(new SyncError('USER_TIMEOUT', '等待保存或页面交接超时；未替换数据。')); }, 10 * 60 * 1000);
-            }
+            timeout = setTimeout(() => { delete this.wake[name]; reject(new SyncError('USER_TIMEOUT', '等待保存或页面交接超时；未替换数据。')); }, 10 * 60 * 1000);
             this.wake[name] = error => { clearTimeout(timeout); delete this.wake[name]; if (error) reject(error); else resolve(); };
         });
         try { await this.write(phase, fields); await promise; }
@@ -178,7 +151,7 @@ export class Manager {
             this.progressTime = 0;
             this.job = { ...(resume ?? {}), id: resume?.id ?? randomUUID(), direction, tab, preview, ticket: randomUUID(),
                 ...(scope ? { scope } : {}),
-                started: resume?.started ?? new Date().toISOString(), error: null, progress: null, transferPlan: null, transferConfirmation: false,
+                started: resume?.started ?? new Date().toISOString(), error: null, progress: null, transferPlan: null,
                 ...(resume ? { resumedAt: new Date().toISOString(), note: '正在继续上次的已保存快照；此后的本机改动留待下次推送。' } : {}) };
             await handle.writeFile(JSON.stringify({ id: this.job.id, pid: process.pid })); await handle.sync();
             this.log(`${resume ? '续传' : '开始'}任务 ${this.job.id}；${preview ? '仅预览；' : ''}VPS：${this.device.remote?.user ?? ''}@${this.device.remote?.host ?? '未配置'}`);
@@ -223,23 +196,12 @@ export class Manager {
         for (const name of ['payload', 'candidate']) await removeOwned(root, path.join(root, name));
         await this.pruneCompleted();
     }
-    async confirm(reason, local, remote, incoming = null) {
-        const token = digest({ direction: this.job.direction, local: local.digest, remote });
-        this.confirmationTarget = incoming; this.confirmationRemote = remote; this.confirmationReason = reason;
-        try {
-            await this.waitFor('confirm', 'AWAITING_CONFIRMATION', { reason, localDigest: local.digest, confirmationToken: token });
-            return this.job.localDigest;
-        } finally { this.confirmationTarget = null; this.confirmationRemote = null; this.confirmationReason = null; }
-    }
-    confirmTransfer = async transferPlan => {
+    reportTransfer = async transferPlan => {
         requireThat(Number.isSafeInteger(transferPlan.files) && transferPlan.files >= 0
             && Number.isSafeInteger(transferPlan.bytes) && transferPlan.bytes >= 0, 'MANIFEST', '待传输文件大小无效。');
         const phase = this.job.direction === 'push' ? 'UPLOADING' : 'DOWNLOADING';
-        try {
-            await this.waitFor('confirm', 'AWAITING_CONFIRMATION', { transferPlan, transferConfirmation: true,
-                confirmationToken: randomUUID(), reason: '已核对待传输文件，请确认总大小后开始传输。' });
-            await this.write(phase, { transferConfirmation: false, reason: '' });
-        } finally { this.job.transferConfirmation = false; }
+        await this.write(phase, { transferPlan });
+        this.log(`待${this.job.direction === 'push' ? '上传' : '下载'}文件总大小：${transferPlan.bytes} 字节（${transferPlan.files} 个新增、修改文件）`);
     };
     async saveAndStop({ skipStop } = {}) {
         await this.waitFor('ready', 'AWAITING_SAVE');
@@ -450,9 +412,8 @@ export class Manager {
                 } else {
                     const local = await portableState(this.device);
                     if (this.job.preview) { await this.write('PREVIEW', { summary: stateDifference(baseline?.local, local), remote: session.hello.current, note: '以当前设备为准更新 VPS；预览不制作停机快照。' }); return; }
-                    if (session.hello.current && baseline?.remote?.digest !== session.hello.current.digest) await this.confirm('VPS 已有另一份数据，或本机尚未建立同步基准。推送会以本机为准替换它。', local, session.hello.current.digest);
                     const diff = stateDifference(baseline?.local, local);
-                    if ((diff.deleted && diff.deleted > (baseline?.local?.files.length ?? Infinity) * 0.4) || clearsCore(baseline?.local, local)) await this.confirm('本次将大量删除共享文件，或清空某类聊天、角色或世界书，请确认方向。', local, session.hello.current?.digest ?? null);
+                    await this.write('PREFLIGHT', { summary: diff });
                     if (!await this.saveAndStop({ skipStop: () => this.skipUnchanged(session, baseline) })) return;
                     try { await this.write('SNAPSHOT'); frozen = await snapshot(this.device, payload); }
                     finally { if (this.lifecycle.stopped) { await this.write('STARTING'); await this.lifecycle.start(); } else await this.lifecycle.resume(); }
@@ -460,7 +421,7 @@ export class Manager {
                 }
                 await this.write('UPLOADING', { files: frozen.manifest.files.length, bytes: frozen.manifest.bytes,
                     snapshotReady: true, snapshotDigest: frozen.manifest.digest });
-                const published = await this.transport.push(session, this.device, this.job.id, payload, frozen.manifest, this.progress, onBegin, { onPlan: this.confirmTransfer });
+                const published = await this.transport.push(session, this.device, this.job.id, payload, frozen.manifest, this.progress, onBegin, { onPlan: this.reportTransfer });
                 remoteBegun = false;
                 await this.success(frozen.metadata.sourceState, { generation: published.generation, digest: published.digest,
                     ...(published.maintenance?.length ? { maintenance: published.maintenance } : {}) }, published.stats, { cache: true });
@@ -475,7 +436,7 @@ export class Manager {
                     await copyTree(path.join(old.jobRoot, 'payload'), payload);
                     downloaded = { generation: old.remote.generation, manifest, stats: old.stats };
                     await atomicJson(path.join(root, 'manifest.json'), manifest);
-                } else downloaded = await this.transport.pull(session, this.device, this.job.id, payload, this.progress, onBegin, { onPlan: this.confirmTransfer });
+                } else downloaded = await this.transport.pull(session, this.device, this.job.id, payload, this.progress, onBegin, { onPlan: this.reportTransfer });
                 remoteBegun = false;
                 await this.write('VERIFYING', { files: downloaded.manifest.files.length, bytes: downloaded.manifest.bytes, stats: downloaded.stats });
                 const metadata = await readJson(path.join(payload, 'environment.json'));
@@ -495,17 +456,12 @@ export class Manager {
                 // Dependency installation can take minutes while ST continues saving data.
                 local = await portableState(this.device);
                 summary = stateDifference(local, metadata.sourceState);
-                await this.write('PREPARING', { summary });
-                const reasons = [];
-                if (!baseline || baseline.local.digest !== local.digest) reasons.push('本机有尚未推送的修改，或这是首次拉取。');
-                if (summary.deleted > local.files.length * 0.4 || clearsCore(local, metadata.sourceState)) reasons.push('本次将大量删除共享文件，或清空某类聊天、角色或世界书。');
-                if (metadata.warnings?.length) reasons.push(`远端设置含 ${metadata.warnings.length} 个设备绝对路径字段，请先核对设备字段保留策略；继续将按远端值同步。`);
-                this.approvedLocal = reasons.length
-                    ? await this.confirm(`${reasons.join('')}继续会以 VPS 为准替换共享内容；恢复副本将在成功后自动删除。`, local, remote.digest, metadata.sourceState)
-                    : local.digest;
+                await this.write('PREPARING', { summary, localDigest: local.digest,
+                    ...(metadata.warnings?.length ? { note: `远端设置含 ${metadata.warnings.length} 个设备绝对路径字段，按现有设备字段保留策略同步。` } : {}) });
+                this.approvedLocal = local.digest;
                 try {
                     await this.saveAndStop();
-                    requireThat((await portableState(this.device)).digest === this.approvedLocal, 'LOCAL_CHANGED', '确认后共享数据发生变化，保留下载并停止覆盖。');
+                    requireThat((await portableState(this.device)).digest === this.approvedLocal, 'LOCAL_CHANGED', '应用前共享数据发生变化，保留下载并停止覆盖；请重新发起同步。');
                     await retireRecovery(this.device);
                     this.plan = await buildPlan(this.device, prepared, root);
                     await this.write('APPLYING'); await applyPlan(this.device, this.plan);

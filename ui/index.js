@@ -2,7 +2,7 @@ import { progressDetail } from './progress.js';
 
 const BASE = '/api/plugins/tavernsyn/';
 const tab = crypto.randomUUID();
-const labels = { IDLE: '就绪', PREFLIGHT: '正在检查环境', DOWNLOADING: '正在从 VPS 下载', VERIFYING: '正在校验文件', PREPARING: '正在准备插件', AWAITING_CONFIRMATION: '需要确认覆盖', AWAITING_SAVE: '正在确认保存', WAITING_PAGE: '正在交接重启任务', QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建快照', UPLOADING: '正在上传到 VPS', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复旧数据', SUCCEEDED: '同步完成', PREVIEW: '预览完成', PENDING_APPLY: '已下载，等待受控启动后应用', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
+const labels = { IDLE: '就绪', PREFLIGHT: '正在检查环境', DOWNLOADING: '正在从 VPS 下载', VERIFYING: '正在校验文件', PREPARING: '正在准备插件', AWAITING_SAVE: '正在核对保存', WAITING_PAGE: '正在交接重启任务', QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建快照', UPLOADING: '正在上传到 VPS', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复旧数据', SUCCEEDED: '同步完成', PREVIEW: '预览完成', PENDING_APPLY: '已下载，等待受控启动后应用', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
 let status = { phase: 'IDLE' }, handlingSave = false, starting = false, resumed = false, localError = '';
 let setupBusy = false, configLoaded = false, configLoading = false, savedTarget = '', passwordSaved = false;
 const context = () => SillyTavern.getContext();
@@ -79,7 +79,7 @@ root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle in
 <button type="button" class="menu_button ts-preview-push">预览推送</button><button type="button" class="menu_button ts-preview-pull">预览拉取</button>
 </details></div></div>`;
 const dialog = document.createElement('dialog'); dialog.className = 'ts-dialog';
-dialog.innerHTML = '<h3>同步酒馆</h3><p class="ts-phase"></p><p class="ts-detail"></p><div class="ts-dialog-actions"><button type="button" class="menu_button ts-cancel" hidden>取消</button><button type="button" class="menu_button ts-confirm" hidden>确认覆盖并继续</button></div>';
+dialog.innerHTML = '<h3>同步酒馆</h3><p class="ts-phase"></p><p class="ts-detail"></p><div class="ts-dialog-actions"><button type="button" class="menu_button ts-cancel" hidden>取消</button></div>';
 dialog.addEventListener('cancel', event => event.preventDefault());
 dialog.addEventListener('click', event => event.stopPropagation());
 document.body.append(dialog);
@@ -103,9 +103,9 @@ function confirmDirection(direction, scope = null) {
     directionDialog.querySelector('.ts-accept').textContent = resume ? '继续上传' : restore ? '确认恢复' : push ? '确认推送' : '确认拉取';
     if (scope) {
         directionDialog.querySelector('h3').textContent = push ? '确认分类推送' : '确认分类拉取';
-        directionDialog.querySelector('.ts-detail').textContent = `仅同步${scopeText(scope)}，以${push ? '本机' : 'VPS'}为准，包含修改和删除。其他类别、配置及插件保持不变。下一步会显示实际文件差异，确认后继续。`;
+        directionDialog.querySelector('.ts-detail').textContent = `仅同步${scopeText(scope)}，以${push ? '本机' : 'VPS'}为准，包含修改和删除。其他类别、配置及插件保持不变。是否继续？`;
     }
-    if (['push', 'pull'].includes(direction)) directionDialog.querySelector('.ts-detail').textContent += '\n实际传输前会显示待上传或待下载文件总大小，再次确认后开始传输。';
+    if (['push', 'pull'].includes(direction)) directionDialog.querySelector('.ts-detail').textContent += '\n确认后自动完成传输、覆盖及删除，不再逐步询问；待上传或待下载文件总大小会在进度中显示。';
     if (restore && status.recovery?.scope) directionDialog.querySelector('.ts-detail').textContent = `将恢复${scopeText(status.recovery.scope)}到最近一次分类拉取前的状态，替换此后这些类别的改动。其他类别、配置及插件保持不变。是否继续？`;
     return new Promise(resolve => {
         const finish = result => { directionDialog.close(); resolve(result); };
@@ -122,8 +122,8 @@ const field = name => form.elements.namedItem(name);
 function text(selector, value) { for (const parent of [root, dialog]) { const element = parent.querySelector(selector); if (element) element.textContent = value; } }
 function render() {
     text('.ts-device', `${status.deviceName ?? ''}${status.host ? ` · ${status.host}` : ' · 尚未配置 VPS'}`);
-    text('.ts-phase', localError ? '本次操作未开始，请处理提示' : status.transferConfirmation ? '请核对待传输文件大小' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : labels[status.phase] ?? status.phase);
-    let detail = localError || status.error?.message || (status.phase === 'AWAITING_CONFIRMATION' ? status.reason : '') || status.note || '';
+    text('.ts-phase', localError ? '本次操作未开始，请处理提示' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : labels[status.phase] ?? status.phase);
+    let detail = localError || status.error?.message || status.note || '';
     if (status.summary) detail += `\n新增 ${status.summary.added}，修改 ${status.summary.changed}，删除 ${status.summary.deleted} 个文件。`;
     if (status.scope) detail += `\n范围：${scopeText(status.scope)}（包含删除）。`;
     const progressText = progressDetail(status);
@@ -133,9 +133,7 @@ function render() {
     text('.ts-history', `最近推送：${when(status.history?.push)}\n最近拉取：${when(status.history?.pull)}\n最近恢复：${when(status.history?.restore)}`);
     text('.ts-recovery', status.recovery?.available ? `可恢复到 ${when(status.recovery.created)} 拉取前的本机数据。`
         : status.recovery?.reason || '暂无可用恢复副本；同步成功后自动删除备份。');
-    dialog.querySelector('.ts-confirm').hidden = status.phase !== 'AWAITING_CONFIRMATION';
-    dialog.querySelector('.ts-confirm').textContent = status.transferConfirmation ? status.direction === 'push' ? '开始上传' : '开始下载' : '确认覆盖并继续';
-    dialog.querySelector('.ts-cancel').hidden = !['AWAITING_CONFIRMATION', 'AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);
+    dialog.querySelector('.ts-cancel').hidden = !['AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);
     const terminal = ['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
     for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy;
     for (const checkbox of root.querySelectorAll('.ts-scope input')) checkbox.disabled = !terminal || starting || setupBusy;
@@ -246,14 +244,6 @@ root.querySelector('.ts-check').onclick = async () => {
     catch (error) { text('.ts-check-result', error.message); }
     finally { setupBusy = false; render(); }
 };
-dialog.querySelector('.ts-confirm').onclick = async () => {
-    const button = dialog.querySelector('.ts-confirm'); button.disabled = true;
-    try {
-        await api('confirm', { id: status.id, token: status.confirmationToken, tab });
-        localError = ''; status = await api('status'); render();
-    } catch (error) { showError(error); }
-    finally { button.disabled = false; }
-};
 dialog.querySelector('.ts-cancel').onclick = async () => {
     try { await api('cancel', { id: status.id }); } catch (error) { showError(error); }
 };
@@ -264,14 +254,18 @@ async function poll() {
         if (status.phase === 'PENDING_APPLY' && status.managed && !resumed) {
             await resumePending();
         }
-        if (status.phase === 'AWAITING_SAVE' && status.tab === tab && !handlingSave) {
+        if (status.phase === 'AWAITING_SAVE' && !handlingSave) {
             handlingSave = true;
             try {
                 const receipt = await flush();
                 const ready = await api('ready', { id: status.id, receipt, tab });
                 location.assign(`${BASE}wait?${new URLSearchParams({ id: ready.id, tab, ticket: ready.ticket })}`);
                 return;
-            } catch (error) { await api('cancel', { id: status.id }).catch(() => {}); handlingSave = false; showError(error); }
+            } catch (error) {
+                handlingSave = false;
+                if (error.code === 'OTHER_TABS') text('.ts-phase', error.message);
+                else { await api('cancel', { id: status.id }).catch(() => {}); showError(error); }
+            }
         }
     } catch (error) { if (!starting) text('.ts-phase', error.message); }
     setTimeout(poll, 1200);
