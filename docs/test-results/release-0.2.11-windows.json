@@ -1,0 +1,66 @@
+{
+  "version": "0.2.11",
+  "date": "2026-11-07T14:10:17.580Z",
+  "clientDate": "2026-11-07",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "status": "passed",
+  "source": {
+    "baseRevision": "8a97a4a2ce6af83ee13973ee1bedecfc44fb6a1f",
+    "codeFingerprint": "6c1161758822a337e3716ec5d6551ea56bfbd1d2c97f7590cac2bfe01f1ed5ed"
+  },
+  "checks": [
+    {
+      "command": "node --test --test-concurrency=2 --test-timeout=180000 --test-reporter=tap tests/*.test.mjs",
+      "tests": 190,
+      "passed": 189,
+      "failed": 0,
+      "skipped": 1,
+      "skipReason": "POSIX owner executable mode requires a POSIX filesystem."
+    },
+    {
+      "command": "python -B -m unittest discover -s tests -p test_vps*.py -v",
+      "tests": 35,
+      "passed": 30,
+      "failed": 0,
+      "skipped": 5,
+      "skipReason": "Real Linux file-locking and descriptor checks."
+    },
+    {
+      "command": "node tests/integration.mjs",
+      "passed": 28,
+      "report": "implementation-windows.json",
+      "transport": "MemoryTransport with actual isolated SillyTavern lifecycle"
+    },
+    {
+      "command": "node tests/rsync.mjs <prepared-rsync-binary>",
+      "passed": 8,
+      "report": "rsync-windows.json",
+      "binary": "rsync  version 3.5.1  protocol version 33"
+    }
+  ],
+  "coverage": [
+    "Real OpenSSH password authentication and native rsync recover after the owned TCP transport is reset during protocol exchange.",
+    "Same download UUID, dataset, generation, scope, manifest digest and scoped environment/publication digest are retained; changed receipts cannot trigger another transfer.",
+    "Existing partial markers survive interruption and disappear only after successful transfer; final SHA-256 and download receipt checks pass.",
+    "Full/scoped recovery, corrective-transfer budget sharing, five failed handshakes, fifth-attempt success and BUSY resume replies are bounded.",
+    "Permissions, authentication, changed host keys, corrupted manifests, local I/O and intentional cancellation never trigger automatic recovery.",
+    "Replacement control environment is used for retries and finish; successful transfer statistics identify potentially missing interrupted-attempt traffic.",
+    "Existing real scoped protocol/rsync mirroring with deletion, native bracket-path correction and unchanged-content fast paths continue to pass."
+  ],
+  "testFixtureNotes": [
+    "ssh2 server connections are interrupted by destroying their owned test TCP socket; ServerConnection does not expose Client.destroy().",
+    "The loopback rsync daemon uses a lock file inside its isolated fixture, without requiring the minimal Windows runtime to provide /var/run."
+  ],
+  "deployment": {
+    "localUpgradePerformed": false,
+    "installedBackendVersionObserved": "0.2.10",
+    "frontendUpgradeRequired": false,
+    "vpsUpgradeRequired": false
+  },
+  "untested": [
+    "Physical Android Termux device",
+    "Production VPS transfer of live data with this patch",
+    "Post-push Linux CI execution"
+  ]
+}

@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { once } from 'node:events';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import ssh2 from 'ssh2';
 import { PROJECT } from '../lib/device.mjs';
@@ -17,6 +19,9 @@ import { fixture, temporary } from './fixtures.mjs';
 // PEM fixtures avoid intermittent malformed OpenSSH output from ssh2's test key generator.
 const hostKey = () => generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
+// ssh2's server connection exposes end(), not destroy(). The test deliberately
+// destroys its owned TCP socket to reproduce a transport reset rather than EOF.
+const disconnect = client => client._sock.destroy();
 
 test('VPS SSH account rules permit password sync only inside Tailscale and preserve other users', async t => {
     const runtime = process.env.TAVERNSYN_TEST_RUNTIME ?? path.join(PROJECT, '.local/msys64');
@@ -59,7 +64,8 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     await configureDevice(device, 'configure', { host: '100.100.100.100', user: 'tavernsyn', password });
     const serverPayload = path.join(device.root, 'server-payload'); await fs.mkdir(serverPayload);
     let dataset = randomUUID(), current = null, active = null, rsyncConfig, toolEnv, server, serverOpen = false, authAttempts = 0, finishMode = 'normal';
-    let inspectMode = 'normal', commitMode = 'normal', nextDataset;
+    let inspectMode = 'normal', commitMode = 'normal', nextDataset, rsyncMode = 'normal', session;
+    const transferLog = [], downloadLogs = [];
     const connections = new Set(), children = new Set(), commands = [];
     const operations = [];
     async function startServer(port = 0) {
@@ -76,10 +82,21 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
                     commands.push(info.command);
                     if (info.command === `tavernsyn-rsync-v2 ${device.deviceId} ${active?.job} --server --daemon .`) {
                         const channel = accept(); channel.on('error', () => {});
+                        const interrupt = rsyncMode === 'disconnect'; rsyncMode = 'normal';
                         const child = spawn(toolEnv.rsync, ['--server', '--daemon', `--config=${rsyncConfig}`, '.'],
                             { windowsHide: true, env: { ...process.env, LC_ALL: 'C' }, stdio: ['pipe', 'pipe', 'pipe'] });
                         children.add(child); child.stdin.on('error', () => {});
                         channel.pipe(child.stdin); child.stdout.pipe(channel, { end: false }); child.stderr.pipe(channel.stderr, { end: false });
+                        if (interrupt) {
+                            let greeting = '', cut = false;
+                            child.stdout.on('data', chunk => {
+                                greeting = (greeting + chunk.toString()).slice(-1024);
+                                if (!cut && greeting.includes('@RSYNCD: OK')) {
+                                    cut = true; child.stdout.pause();
+                                    setTimeout(() => { disconnect(client); child.kill(); }, 50);
+                                }
+                            });
+                        }
                         child.on('close', code => { children.delete(child); channel.exit(code ?? 1); channel.end(); });
                         child.on('error', () => { channel.exit(1); channel.end(); });
                         return;
@@ -104,15 +121,15 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
                                         active = { ...message, phase: 'transfer', generation: message.direction === 'push' ? message.job : current.generation };
                                     }
                                     await fs.writeFile(path.join(device.root, 'rsync.conf'), [
-                                        'use chroot = no', 'log file = /dev/null', 'timeout = 120', 'incoming chmod = Du+rwx,Fu+rw', '[payload]',
+                                        'use chroot = no', 'log file = /dev/null', `lock file = ${await toolEnv.posix(path.join(device.root, 'rsync.lock'))}`, 'timeout = 120', 'incoming chmod = Du+rwx,Fu+rw', '[payload]',
                                         `path = ${await toolEnv.posix(serverPayload)}`, 'list = false',
                                         `read only = ${message.direction === 'push' ? 'false' : 'true'}`, '',
                                     ].join('\n'));
-                                    result = { job: message.job, phase: active.phase, generation: active.generation, base: active.base, ...(message.direction === 'pull' ? { manifest: current.manifest } : {}) };
+                                    result = { job: message.job, direction: active.direction, phase: active.phase, generation: active.generation, base: active.base, ...(message.direction === 'pull' ? { manifest: current.manifest } : {}) };
                                 } else if (message.op === 'inspect') {
                                     if (inspectMode === 'disconnect') {
                                         inspectMode = 'normal'; if (nextDataset) { dataset = nextDataset; nextDataset = undefined; }
-                                        client.destroy(); return;
+                                        disconnect(client); return;
                                     }
                                     result = difference(message.manifest, await scan(serverPayload));
                                 }
@@ -120,10 +137,10 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
                                     await verify(serverPayload, message.manifest);
                                     current = { generation: active.job, digest: message.manifest.digest, manifest: message.manifest };
                                     active.phase = 'done';
-                                    if (commitMode === 'disconnect') { commitMode = 'normal'; client.destroy(); return; }
+                                    if (commitMode === 'disconnect') { commitMode = 'normal'; disconnect(client); return; }
                                     result = { generation: current.generation, digest: current.digest };
                                 } else if (message.op === 'finish') {
-                                    if (finishMode === 'disconnect') { client.destroy(); return; }
+                                    if (finishMode === 'disconnect') { disconnect(client); return; }
                                     if (finishMode === 'reject') {
                                         channel.write(`${JSON.stringify({ id: message.id, ok: false, code: 'PERMISSION', error: 'synthetic permission failure' })}\n`); return;
                                     }
@@ -143,10 +160,14 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     }
     const stopServer = async () => {
         for (const child of children) child.kill();
-        for (const client of connections) client.destroy();
+        for (const client of connections) disconnect(client);
         if (serverOpen) { serverOpen = false; await new Promise(resolve => server.close(resolve)); }
     };
-    t.after(stopServer);
+    t.after(async () => {
+        if (process.env.TAVERNSYN_TEST_DEBUG) t.diagnostic(transferLog.slice(-20).join('\n'));
+        session?.control.close();
+        await stopServer();
+    });
     const port = await startServer();
     let pathSsh = false;
     const localEnvironment = async currentDevice => {
@@ -160,8 +181,8 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
         toolEnv = env; rsyncConfig = await env.posix(path.join(device.root, 'rsync.conf'));
         return env;
     };
-    let session = await connect(device, localEnvironment);
-    const transferLog = [];
+    try {
+    session = await connect(device, localEnvironment);
     session.log = message => transferLog.push(message);
     assert.equal(device.remote.dataset, dataset); assert.equal((await readJson(path.join(device.state, 'device.json'))).remote.dataset, dataset);
     assert.equal(await exists(device.remote.knownHostsFile), true);
@@ -204,6 +225,24 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     }
     // Later pull cases use the publication that now includes both fixture files.
     const recoveredManifest = await scan(payload);
+    // Interrupt the real rsync SSH channel, then reclaim the same download.
+    // Existing partials survive the failure and only disappear after validation.
+    session = await connect(device, localEnvironment);
+    const resumedTarget = path.join(device.root, 'resumed-control/download'), partial = path.join(resumedTarget, '.tavernsyn-partial/retained');
+    await fs.mkdir(path.dirname(partial), { recursive: true }); await fs.writeFile(partial, 'synthetic partial bytes');
+    let partialRetained = false, beginCallbacks = 0;
+    session.log = line => { downloadLogs.push(line); if (line.includes('下载连接中断')) partialRetained = existsSync(partial); };
+    rsyncMode = 'disconnect';
+    const resumedJob = randomUUID();
+    const resumedPull = await pull(session, device, resumedJob, resumedTarget, undefined, () => { beginCallbacks++; });
+    await verify(resumedTarget, recoveredManifest);
+    assert.equal(beginCallbacks, 1); assert.equal(partialRetained, true); assert.equal(await exists(partial), false);
+    assert.equal(resumedPull.stats.reconnects, 1); assert.equal(resumedPull.stats.incompleteNetworkStats, true);
+    assert.ok(downloadLogs.some(line => line.includes('SSH 已恢复同一下载任务')));
+    assert.equal((await readJson(path.join(device.root, 'resumed-control/download.json'))).job, resumedJob);
+    assert.equal(session.control.intentional, true, 'finish closes the replacement control, not the original dead one');
+    if (!session.control.closed) await once(session.control.child, 'close');
+    assert.equal(session.control.closed, true);
     // Reproduce a closed control SSH while real rsync has delivered all files.
     session = await connect(device, localEnvironment);
     const closedSession = session, closedLog = [];
@@ -262,4 +301,5 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     const before = authAttempts;
     await assert.rejects(connect(device, localEnvironment), { code: 'SSH' });
     assert.equal(authAttempts, before, 'a changed host must be rejected before the password is sent');
+    } catch (error) { error.message += '\n' + (downloadLogs.length ? downloadLogs : transferLog).slice(-25).join('\n'); throw error; }
 });

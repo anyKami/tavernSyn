@@ -4,7 +4,7 @@ SillyTavern 跨设备手动同步插件，面向 Windows 和 Android Termux。�
 
 ## 当前版本
 
-**0.2.10，适配 SillyTavern 1.19.0。** 上传、拉取只在点击按钮后确认一次，文件大小、覆盖和删除不再重复询问；待传输总大小继续显示。上传后的 SSH 控制连接断开时，最多自动重连 5 次。本次只需更新本机前后端；0.2.9 的自动清理功能仍需兼容的 VPS。支持聊天记录、角色卡、世界书分类增量同步，见[分类同步说明](docs/scoped-sync.md)、[更新记录](CHANGELOG.md)、[增量实测](docs/incremental-sync.md)与[审查修复及限制](docs/review-fixes.md)。
+**0.2.11，适配 SillyTavern 1.19.0。** 完整和分类下载在 SSH/rsync 网络中断后最多自动重连 5 次，复用原任务和断点，核对原代次与清单后继续；权限和完整性错误仍停止。上传后的 SSH 控制连接也保留最多 5 次重连。本次只需更新本机后端；0.2.9 的自动清理功能仍需兼容的 VPS。上传、拉取仍只在开始时确认一次，继续显示待传输总大小。支持聊天记录、角色卡、世界书分类增量同步，见[分类同步说明](docs/scoped-sync.md)、[更新记录](CHANGELOG.md)、[增量实测](docs/incremental-sync.md)与[审查修复及限制](docs/review-fixes.md)。
 
 本版本已清理旧 Git 历史，已有旧克隆请重新克隆后更新，见[历史清理说明](docs/security-audit-0.2.0.md#历史清理)。
 

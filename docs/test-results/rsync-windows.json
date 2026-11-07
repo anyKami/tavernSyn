@@ -1,6 +1,6 @@
 {
   "status": "passed",
-  "date": "2026-11-06T11:10:43.767Z",
+  "date": "2026-11-07T14:04:55.870Z",
   "platform": "win32",
   "version": "rsync  version 3.5.1  protocol version 33",
   "root": "<isolated-test-directory>",
@@ -59,7 +59,7 @@
       "test": "real read-only daemon download mirrors local stage",
       "stats": {
         "sentBytes": 45,
-        "receivedBytes": 79,
+        "receivedBytes": 78,
         "literalBytes": 0,
         "matchedBytes": 0,
         "transferredFiles": 0,

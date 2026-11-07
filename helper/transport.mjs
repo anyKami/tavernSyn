@@ -12,6 +12,7 @@ import { rsyncOutputLog } from './sync-log.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { seedDownloadBasis } from '../lib/download-basis.mjs';
 import { normalizeScope, sameScope, inScope } from '../lib/scope.mjs';
+import { createDownloadRecovery, permanentTransportFailure } from './download-reconnect.mjs';
 
 export const RSYNC_ARGS = ['-rt', '--compress', '--omit-dir-times', '--no-whole-file', '--delete-delay', '--partial-dir=.tavernsyn-partial', '--fsync', '--info=progress2,stats2', '--stats', '--itemize-changes', '--8-bit-output', '--outbuf=L', '--timeout=120', '--modify-window=0'];
 const ALIAS = 'tavernsyn-vps';
@@ -37,7 +38,8 @@ export class Control {
         this.log = log; this.started = Date.now(); this.intentional = false; this.exitLogged = false;
         child.stdin.on('error', () => {});
         const stderr = rsyncOutputLog(line => this.log(`SSH: ${line.slice('rsync: '.length)}`));
-        child.stderr.setEncoding('utf8'); child.stderr.on('data', text => stderr.write(text)); child.stderr.once('end', () => stderr.end());
+        let stderrTail = '';
+        child.stderr.setEncoding('utf8'); child.stderr.on('data', text => { stderrTail = (stderrTail + text).slice(-8192); stderr.write(text); }); child.stderr.once('end', () => stderr.end());
         child.stdout.setEncoding('utf8');
         child.stdout.on('data', text => {
             this.buffer += text;
@@ -62,14 +64,15 @@ export class Control {
                 } catch { this.fail(new SyncError('REMOTE_PROTOCOL', 'VPS 返回了无法识别的控制消息。')); }
             }
         });
-        child.once('error', () => { this.closed = true; this.fail(new SyncError('SSH', '无法启动 SSH。')); });
+        child.once('error', () => { this.closed = true; this.fail(Object.assign(new SyncError('SSH', '无法启动 SSH。'), { transportRetryable: false })); });
         const exited = (code, signal) => {
             this.closed = true;
             if (!this.exitLogged) {
                 this.exitLogged = true;
                 this.log(`SSH 控制进程${this.intentional ? '主动结束' : '退出'}：退出码 ${Number.isInteger(code) ? code : '无'}，信号 ${signal ?? '无'}，存续 ${Math.round((Date.now() - this.started) / 1000)} 秒。`);
             }
-            this.fail(new SyncError('SSH', 'SSH 连接已结束，请检查 Tailscale、账号密码和 VPS 密码登录配置；服务器身份改变也会阻止连接。'));
+            this.fail(Object.assign(new SyncError('SSH', 'SSH 连接已结束，请检查 Tailscale、账号密码和 VPS 密码登录配置；服务器身份改变也会阻止连接。'),
+                { transportRetryable: !this.intentional && !permanentTransportFailure(stderrTail) }));
         };
         child.once('exit', exited);
         child.once('close', (code, signal) => { stderr.end(); exited(code, signal); });
@@ -184,7 +187,10 @@ async function transfer(env, direction, job, payload, onProgress, correction, lo
             tail = (tail + text).slice(-8192);
             const progress = [...tail.matchAll(/([\d,]+)\s+(\d+)%\s+[^\r\n]+/g)].at(-1);
             if (progress) onProgress?.({ logicalBytes: Number(progress[1].replaceAll(',', '')), percent: Number(progress[2]) });
-        } }); } finally { output.end(); }
+        } }); } catch (error) {
+        if (permanentTransportFailure(tail)) error.transportRetryable = false;
+        throw error;
+    } finally { output.end(); }
     log(`rsync ${direction === 'push' ? '上传' : '下载'}结束`);
     return parseStats(result.stdout);
 }
@@ -272,8 +278,7 @@ export async function finalizeUpload(session, device, job, payload, manifest, st
 export async function pull(session, device, job, payload, onProgress, onBegin, { scope = null, onPlan } = {}) {
     scope = normalizeScope(scope);
     if (scope) return pullScoped(session, device, job, payload, onProgress, onBegin, scope, onPlan);
-    const { control, env } = session;
-    const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: env.jobBound === true });
+    const begun = await session.control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: session.env.jobBound === true });
     await onBegin?.(begun);
     const manifest = validateManifest(begun.manifest);
     requireThat(uuidPattern.test(begun.generation), 'REMOTE_PROTOCOL', 'VPS 下载代次无效。');
@@ -284,7 +289,7 @@ export async function pull(session, device, job, payload, onProgress, onBegin, {
         await atomicJson(path.join(path.dirname(payload), 'download.json'), {
             format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest,
         });
-        control.close();
+        session.control.close();
         return { ...begun, manifest, stats: { note: '先前完成的下载已重新校验，本次没有传输文件。' } };
     }
     await enoughSpace(device.state, manifest.bytes);
@@ -298,13 +303,15 @@ export async function pull(session, device, job, payload, onProgress, onBegin, {
         }
     }
     if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload))));
-    let stats = await transfer(env, 'pull', job, payload, onProgress, undefined, session.log);
+    const recovery = createDownloadRecovery(session, device, job, begun);
+    let stats = await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log));
     await partialCleanup(payload);
     const diff = difference(manifest, await scan(payload));
     requireThat(!diff.extra.length, 'INTEGRITY', '下载暂存区仍含额外文件。');
     const correction = [...diff.missing, ...diff.changed];
     session.log?.(`本机内容校验：缺失 ${diff.missing.length}，不一致 ${diff.changed.length}，额外 ${diff.extra.length} 个文件`);
-    if (correction.length) stats = addStats(stats, await transfer(env, 'pull', job, payload, onProgress, correction, session.log));
+    if (correction.length) stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log)));
+    stats = recovery.stats(stats);
     await onProgress?.({ stage: 'transferred', stats });
     await partialCleanup(payload); await verify(payload, manifest);
     session.log?.('下载文件 SHA-256 全量校验通过');
@@ -314,11 +321,11 @@ export async function pull(session, device, job, payload, onProgress, onBegin, {
     });
     // finish releases the read job and cleans obsolete data. A lost ACK cannot invalidate bytes
     // already checked against the manifest pinned by this authenticated session.
-    try { begun.maintenance = (await control.request('finish', { job }, 15_000)).maintenance; }
+    try { begun.maintenance = (await session.control.request('finish', { job }, 15_000)).maintenance; }
     catch (error) {
         if (!['SSH', 'SSH_TIMEOUT'].includes(error.code)) throw error;
         session.log?.('VPS 结束回执未收到；下载文件已全量校验，继续准备应用。控制连接关闭后 VPS 会释放占用。');
-    } finally { control.close(); }
+    } finally { session.control.close(); }
     return { ...begun, manifest, stats };
 }
 function requireScoped(session) {
@@ -334,8 +341,7 @@ export async function catalog(session, _device, scope) {
 }
 async function pullScoped(session, device, job, payload, onProgress, onBegin, scope, onPlan) {
     requireScoped(session);
-    const { control, env } = session;
-    const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: env.jobBound === true, scope });
+    const begun = await session.control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: session.env.jobBound === true, scope });
     await onBegin?.(begun);
     const manifest = validateManifest(begun.manifest);
     requireThat(sameScope(begun.scope, scope) && uuidPattern.test(begun.generation) && /^[a-f0-9]{64}$/.test(begun.publicationDigest ?? '')
@@ -346,20 +352,25 @@ async function pullScoped(session, device, job, payload, onProgress, onBegin, sc
     await fs.writeFile(path.join(payload, 'environment.json'), begun.environment, { mode: 0o600 });
     if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload))));
     const selection = manifest.files.filter(file => file.path !== 'environment.json').map(file => file.path);
+    const recovery = createDownloadRecovery(session, device, job, begun, { scope });
     let stats = { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 };
-    if (begun.phase !== 'done' && selection.length) stats = await transfer(env, 'pull', job, payload, onProgress, undefined, session.log, selection);
+    if (begun.phase !== 'done' && selection.length) stats = await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log, selection));
     await partialCleanup(payload);
     const diff = difference(manifest, await scan(payload));
     requireThat(!diff.extra.length, 'INTEGRITY', '分类下载暂存含额外文件。');
     const correction = [...diff.missing, ...diff.changed];
     requireThat(!correction.includes('environment.json'), 'REMOTE_PROTOCOL', 'VPS 分类元数据摘要不匹配。');
-    if (correction.length) stats = addStats(stats, await transfer(env, 'pull', job, payload, onProgress, correction, session.log));
+    if (correction.length) {
+        requireThat(begun.phase !== 'done', 'INTEGRITY', '先前完成的分类下载文件不完整，请重新拉取。');
+        stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log)));
+    }
+    stats = recovery.stats(stats);
     await partialCleanup(payload); await verify(payload, manifest);
     await onProgress?.({ stage: 'transferred', stats });
     await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
     await atomicJson(path.join(path.dirname(payload), 'download.json'), { format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest, scope, publicationDigest: begun.publicationDigest });
-    try { if (begun.phase !== 'done') begun.maintenance = (await control.request('finish', { job }, 15_000)).maintenance; }
+    try { if (begun.phase !== 'done') begun.maintenance = (await session.control.request('finish', { job }, 15_000)).maintenance; }
     catch (error) { if (!['SSH', 'SSH_TIMEOUT'].includes(error.code)) throw error; }
-    finally { control.close(); }
+    finally { session.control.close(); }
     return { ...begun, digest: begun.publicationDigest, manifest, stats };
 }
