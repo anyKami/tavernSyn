@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { checkRemoteConfig, uuidPattern } from '../lib/device.mjs';
 import { readPassword } from '../lib/connection.mjs';
 import { atomicJson, exists, noLinks, readJson, requireThat, run, SyncError, removeOwned, canonical, renamePath } from '../lib/io.mjs';
-import { copyTree, difference, scan, transferSummary, validateManifest, verify } from '../lib/manifest.mjs';
+import { copyTree, difference, hashFile, scan, transferSummary, validateManifest, verify } from '../lib/manifest.mjs';
 import { enoughSpace } from '../lib/content.mjs';
 import { rsyncOutputLog } from './sync-log.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -15,6 +15,7 @@ import { normalizeScope, sameScope, inScope } from '../lib/scope.mjs';
 import { createDownloadRecovery, permanentTransportFailure, retryableDownloadError } from './download-reconnect.mjs';
 import { connectionId } from '../lib/completion.mjs';
 import { validateDownloadBinding, bindingMatches, loadDownloadBinding } from './download-binding.mjs';
+import { HYBRID_PROTOCOL, validatePlan, createBundle, verifyBundle, applyBundle } from '../lib/hybrid.mjs';
 
 export const RSYNC_ARGS = ['-rt', '--compress', '--omit-dir-times', '--no-whole-file', '--delete-delay', '--partial-dir=.tavernsyn-partial', '--fsync', '--info=progress2,stats2', '--stats', '--itemize-changes', '--8-bit-output', '--outbuf=L', '--timeout=120', '--modify-window=0'];
 const ALIAS = 'tavernsyn-vps';
@@ -132,7 +133,8 @@ export async function connect(device, makeEnvironment = environment, log = () =>
     const child = spawn(env.ssh, ['-F', env.config, ALIAS, 'tavernsyn-control-v1', device.deviceId], { env: { ...process.env, ...env.authEnv }, windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     const control = new Control(child, log);
     try {
-        const hello = await control.request('hello');
+        const hello = await control.request('hello', { requiredProtocol: HYBRID_PROTOCOL });
+        requireThat(hello.hybridProtocol === HYBRID_PROTOCOL && hello.capabilities?.includes(HYBRID_PROTOCOL) && hello.capabilities?.includes('job-bound-rsync'), 'UPGRADE_REQUIRED', '请先将本设备和 VPS 同时更新到支持混合传输的版本。');
         env.jobBound = hello.capabilities?.includes('job-bound-rsync') === true;
         requireThat(hello.protocol === 1 && uuidPattern.test(hello.dataset)
             && (!env.remote.dataset || hello.dataset === env.remote.dataset), 'REMOTE_DATASET', '连接到的数据集与本机登记信息不一致。');
@@ -189,8 +191,8 @@ async function partialCleanup(root) {
         }
     }
 }
-async function transfer(env, direction, job, payload, onProgress, correction, log = () => {}, selection) {
-    const local = `${(await env.posix(payload)).replace(/\/$/, '')}/`, remote = `${ALIAS}::payload/`;
+async function transfer(env, direction, job, payload, onProgress, correction, log = () => {}, selection, module = 'payload') {
+    const local = `${(await env.posix(payload)).replace(/\/$/, '')}/`, remote = `${ALIAS}::${module}/`;
     const args = [...RSYNC_ARGS];
     if (correction || selection) {
         const list = path.join(path.dirname(payload), `correction-${randomUUID()}.txt`);
@@ -202,7 +204,7 @@ async function transfer(env, direction, job, payload, onProgress, correction, lo
         args.push('--from0', `--include-from=${await env.posix(list)}`, '--exclude=*');
         if (correction) args.push('--ignore-times');
     }
-    args.push(`--rsync-path=${env.jobBound ? `tavernsyn-rsync-v2 ${env.deviceId} ${job}` : `tavernsyn-rsync-v1 ${env.deviceId}`}`, `--rsh=${env.rsh}`, '--', ...(direction === 'push' ? [local, remote] : [remote, local]));
+    args.push(`--rsync-path=tavernsyn-rsync-v3 ${env.deviceId} ${job} ${module}`, `--rsh=${env.rsh}`, '--', ...(direction === 'push' ? [local, remote] : [remote, local]));
     let tail = '';
     log(`rsync ${direction === 'push' ? '上传' : '下载'}开始${correction ? `：定向补传 ${correction.length} 个文件` : '：增量传输，逐文件显示变更'}`);
     const output = rsyncOutputLog(log);
@@ -281,6 +283,60 @@ export function createUploadRecovery(session, device, job, begun, { scope = null
         },
     };
 }
+function checkedHybridPlan(plan, manifest, job, dataset, generation, base, scope) {
+    validatePlan(plan, manifest);
+    requireThat(plan.job === job && plan.dataset === dataset && plan.generation === generation && plan.base === base && sameScope(plan.scope, scope), 'REMOTE_PROTOCOL', '混合传输计划绑定不一致。');
+    return plan;
+}
+async function cleanHybridStage(root, manifest) {
+    await noLinks(root); const wanted = new Set(manifest.files.map(f => f.path));
+    async function visit(dir, prefix = '') {
+        for (const item of await fs.readdir(dir, { withFileTypes: true })) {
+            const relative = prefix ? `${prefix}/${item.name}` : item.name, full = path.join(dir, item.name);
+            const stat = await fs.lstat(full); requireThat(!stat.isSymbolicLink() && (stat.isDirectory() || stat.isFile()), 'LINK', '暂存区含链接或特殊文件。');
+            if (stat.isDirectory()) {
+                if (item.name === '.tavernsyn-partial') {
+                    for (const partial of await fs.readdir(full, { withFileTypes: true })) {
+                        const candidate = prefix ? `${prefix}/${partial.name}` : partial.name;
+                        const entry = path.join(full, partial.name), info = await fs.lstat(entry);
+                        requireThat(info.isFile() && !info.isSymbolicLink(), 'LINK', '传输断点含链接或特殊文件。');
+                        if (!wanted.has(candidate)) await fs.unlink(entry);
+                    }
+                } else await visit(full, relative);
+                if (!(await fs.readdir(full)).length) await fs.rmdir(full);
+            } else if (!wanted.has(relative)) await fs.unlink(full);
+        }
+    }
+    await visit(root);
+}
+async function hybridDownload(session, device, job, payload, manifest, begun, scope, recovery, onProgress) {
+    const have = await scan(payload, { ignorePartials: true });
+    const response = await recovery.run(() => session.control.request('hybrid-plan', { job, have }));
+    const plan = checkedHybridPlan(response.plan, manifest, job, device.remote.dataset, begun.generation, begun.base ?? null, scope);
+    const descriptors = response.descriptors;
+    requireThat(Array.isArray(descriptors) && descriptors.length === plan.groups.length && descriptors.every(d => Number.isSafeInteger(d?.size) && d.size >= 12 && /^[a-f0-9]{64}$/.test(d.sha256)), 'REMOTE_PROTOCOL', '混合包描述无效。');
+    const saved = path.join(path.dirname(payload), 'hybrid-plan.json');
+    if (await exists(saved)) requireThat(canonical(await readJson(saved)) === canonical({ plan, descriptors }), 'DOWNLOAD_BINDING', '恢复时混合计划已改变。');
+    else await atomicJson(saved, { plan, descriptors });
+    const wire = path.join(path.dirname(payload), 'wire'); await noLinks(wire); await fs.mkdir(wire, { recursive: true });
+    let stats;
+    if (descriptors.length) stats = await recovery.run(() => transfer(session.env, 'pull', job, wire, onProgress, undefined, session.log, descriptors.map((_, i) => `${i}.bundle`), 'wire'));
+    for (let i = 0; i < descriptors.length; i++) {
+        const file = path.join(wire, `${i}.bundle`);
+        try { requireThat((await fs.lstat(file)).size === descriptors[i].size, 'INTEGRITY', '包大小不匹配。'); await verifyBundle(file, plan, manifest, i, descriptors[i].sha256); }
+        catch { stats = { ...addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, wire, onProgress, [`${i}.bundle`], session.log, undefined, 'wire'))), corrected: true }; await verifyBundle(file, plan, manifest, i, descriptors[i].sha256); }
+    }
+    await cleanHybridStage(payload, manifest);
+    if (plan.large.length) stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log, plan.large)));
+    for (let i = 0; i < descriptors.length; i++) await applyBundle(path.join(wire, `${i}.bundle`), payload, plan, manifest, i, descriptors[i].sha256);
+    await partialCleanup(payload);
+    let diff = difference(manifest, await scan(payload));
+    const correction = [...diff.missing, ...diff.changed];
+    requireThat(!diff.extra.length && correction.every(name => plan.large.includes(name)), 'INTEGRITY', '下载暂存与固定计划不一致。');
+    if (correction.length) { stats = { ...addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log))), corrected: true }; await partialCleanup(payload); await verify(payload, manifest); }
+    else await verify(payload, manifest);
+    return stats ?? { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 };
+}
 export async function push(session, device, job, payload, manifest, onProgress, onBegin, { scope = null, onPlan } = {}) {
     scope = normalizeScope(scope); validateManifest(manifest);
     if (scope) requireScoped(session);
@@ -288,26 +344,30 @@ export async function push(session, device, job, payload, manifest, onProgress, 
     requireThat(begun.job === job && begun.direction === 'push' && begun.generation === job && sameScope(begun.scope, scope), 'REMOTE_PROTOCOL', 'VPS 上传任务回执不一致。');
     await onBegin?.(begun);
     const recovery = createUploadRecovery(session, device, job, begun, { scope, onInterrupted: () => onProgress?.({ stage: 'interrupted', incompleteNetworkStats: true }) });
-    let stats;
-    if (!['done', 'finalizing'].includes(begun.phase)) {
-        if (onPlan && session.hello.capabilities?.includes('inspect-preserves-partials')) await onPlan(transferSummary(manifest, await recovery.run(() => session.control.request('inspect', { job, manifest }))));
-        else if (onPlan) session.log?.('VPS 尚不支持保留断点的上传预检查，跳过精确传输计划。');
-        stats = await recovery.run(() => ['done', 'finalizing'].includes(recovery.phase) ? undefined : transfer(session.env, 'push', job, payload, onProgress, undefined, session.log), true);
-        await onProgress?.({ stage: 'transferred', stats: recovery.stats(stats) });
-    }
-    return finalizeUpload(session, device, job, payload, manifest, stats, onProgress, begun.phase, { scope, base: begun.base, recovery });
+    return finalizeUpload(session, device, job, payload, manifest, undefined, onProgress, begun.phase, { scope, base: begun.base, recovery, onPlan });
 }
 export async function finalizeUpload(session, device, job, payload, manifest, stats, onProgress, phase = 'transfer', options = {}) {
     const scope = normalizeScope(options.scope);
     const recovery = options.recovery ?? createUploadRecovery(session, device, job, { phase, base: options.base ?? session.hello.current?.digest ?? null }, { scope, onInterrupted: () => onProgress?.({ stage: 'interrupted', incompleteNetworkStats: true }) });
     return recovery.run(async () => {
         if (!['done', 'finalizing'].includes(recovery.phase)) {
-            const diff = await session.control.request('inspect', { job, manifest });
-            requireThat(!diff.extra.length, 'INTEGRITY', '上传目录仍含额外文件，拒绝发布。');
-            if (diff.changed.length) {
-                stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, payload, onProgress, diff.changed, session.log), true));
-                await onProgress?.({ stage: 'transferred', stats: recovery.stats(stats) });
+            const result = await session.control.request('hybrid-plan', { job, manifest });
+            const plan = checkedHybridPlan(result.plan, manifest, job, device.remote.dataset, job, options.base ?? session.hello.current?.digest ?? null, scope);
+            if (options.onPlan) await options.onPlan({ files: plan.groups.reduce((n, g) => n + g.length, 0) + plan.large.length,
+                bytes: [...plan.groups.flat(), ...manifest.files.filter(f => plan.large.includes(f.path))].reduce((n, f) => n + f.size, 0) });
+            const wire = path.join(path.dirname(payload), 'wire'); await noLinks(wire); await fs.mkdir(wire, { recursive: true });
+            const descriptors = [];
+            for (let i = 0; i < plan.groups.length; i++) descriptors.push(await createBundle(payload, path.join(wire, `${i}.bundle`), plan, manifest, i));
+            await session.control.request('hybrid-descriptors', { job, descriptors });
+            if (descriptors.length) stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, wire, onProgress, descriptors.map((_, i) => `${i}.bundle`), session.log, undefined, 'wire'), true));
+            if (plan.large.length) {
+                stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, payload, onProgress, undefined, session.log, plan.large), true));
+                const diff = await session.control.request('inspect', { job, manifest });
+                const correction = diff.changed.filter(name => plan.large.includes(name));
+                if (correction.length) stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, payload, onProgress, correction, session.log), true));
             }
+            await session.control.request('hybrid-apply', { job });
+            await onProgress?.({ stage: 'transferred', stats: recovery.stats(stats) });
         }
         const published = await session.control.request('commit', { job, manifest });
         requireThat((scope ? published.snapshotDigest : published.digest) === manifest.digest && /^[a-f0-9]{64}$/.test(published.digest), 'REMOTE_PROTOCOL', 'VPS 发布回执与源快照不匹配。');
@@ -345,22 +405,11 @@ export async function pull(session, device, job, payload, onProgress, onBegin, {
             session.log?.(`下载缓存缺失，已从本机共享目录建立 ${basis.files} 个文件的差分基础；下载后仍执行完整校验。`);
         }
     }
+    if (begun.phase !== 'done') await cleanHybridStage(payload, manifest);
     if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload, { ignorePartials: true }))));
     const recovery = createDownloadRecovery(session, device, job, begun, { onInterrupted: () => onProgress?.({ stage: 'interrupted', incompleteNetworkStats: true }) });
-    let stats = await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log));
-    await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
-    await partialCleanup(payload);
-    const diff = difference(manifest, await scan(payload));
-    requireThat(!diff.extra.length, 'INTEGRITY', '下载暂存区仍含额外文件。');
-    const correction = [...diff.missing, ...diff.changed];
-    session.log?.(`本机内容校验：缺失 ${diff.missing.length}，不一致 ${diff.changed.length}，额外 ${diff.extra.length} 个文件`);
-    if (correction.length) {
-        stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log)));
-        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
-    }
-    stats = recovery.stats(stats);
+    let stats = recovery.stats(await hybridDownload(session, device, job, payload, manifest, begun, scope, recovery, onProgress));
     await onProgress?.({ stage: 'transferred', stats });
-    if (correction.length || resume || recovery.reconnects || begun.phase === 'done') { await partialCleanup(payload); await verify(payload, manifest); }
     session.log?.('下载文件 SHA-256 全量校验通过');
     await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
     await atomicJson(path.join(path.dirname(payload), 'download.json'), {
@@ -405,26 +454,19 @@ async function pullScoped(session, device, job, payload, onProgress, onBegin, sc
         if (!resume) await seedDownloadBasis(device, payload, manifest);
     }
     if (begun.phase !== 'done') await writeScopedEnvironment(payload, begun.environment);
+    else {
+        const target = path.join(payload, 'environment.json'), expected = manifest.files.find(file => file.path === 'environment.json');
+        await noLinks(target);
+        const info = await fs.lstat(target).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+        requireThat(info?.isFile() && !info.isSymbolicLink() && expected && info.size === expected.size && await hashFile(target) === expected.sha256,
+            'REMOTE_PROTOCOL', '已完成分类任务的元数据与清单不一致。');
+    }
+    if (begun.phase !== 'done') await cleanHybridStage(payload, manifest);
     if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload, { ignorePartials: true }))));
-    const selection = manifest.files.filter(file => file.path !== 'environment.json').map(file => file.path);
     const recovery = createDownloadRecovery(session, device, job, begun, { scope, onInterrupted: () => onProgress?.({ stage: 'interrupted', incompleteNetworkStats: true }) });
     let stats = { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 };
-    if (begun.phase !== 'done' && selection.length) {
-        stats = await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log, selection));
-        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
-    }
-    await partialCleanup(payload);
-    const diff = difference(manifest, await scan(payload));
-    requireThat(!diff.extra.length, 'INTEGRITY', '分类下载暂存含额外文件。');
-    const correction = [...diff.missing, ...diff.changed];
-    requireThat(!correction.includes('environment.json'), 'REMOTE_PROTOCOL', 'VPS 分类元数据摘要不匹配。');
-    if (correction.length) {
-        requireThat(begun.phase !== 'done', 'INTEGRITY', '先前完成的分类下载文件不完整，请重新拉取。');
-        stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log)));
-        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
-    }
-    stats = recovery.stats(stats);
-    if (correction.length || resume || recovery.reconnects || begun.phase === 'done') { await partialCleanup(payload); await verify(payload, manifest); }
+    if (begun.phase !== 'done') stats = recovery.stats(await hybridDownload(session, device, job, payload, manifest, begun, scope, recovery, onProgress));
+    else { await partialCleanup(payload); await verify(payload, manifest); }
     await onProgress?.({ stage: 'transferred', stats });
     await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
     await atomicJson(path.join(path.dirname(payload), 'download.json'), { format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest, scope, publicationDigest: begun.publicationDigest });

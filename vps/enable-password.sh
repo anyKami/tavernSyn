@@ -23,6 +23,7 @@ PY
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 install -d -o root -g root -m 755 /usr/local/libexec/tavernsyn /etc/ssh/tavernsyn
 install -o root -g root -m 755 "$script_dir/dispatcher.py" /usr/local/libexec/tavernsyn/password-dispatcher.py
+install -o root -g root -m 644 "$script_dir/hybrid.py" /usr/local/libexec/tavernsyn/hybrid.py
 config=/etc/ssh/sshd_config
 snippet="/etc/ssh/tavernsyn/$sync_user.conf"
 [[ -f $config && ! -L $config && ! -L $snippet ]] || exit 1

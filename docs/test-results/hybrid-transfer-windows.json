@@ -1,0 +1,84 @@
+{
+  "version": "0.2.13",
+  "platform": "Windows, Node 24.18.0, Python 3.14.0, MSYS2 OpenSSH and rsync 3.5.1",
+  "reproduction": {
+    "workingDirectory": "Repository root",
+    "powershellEnvironment": [
+      "$env:PYTHON = 'C:\\Python314\\python.exe'",
+      "$env:TAVERNSYN_TEST_RUNTIME = 'D:\\tavern\\.tavernsyn-runtime-SillyTavern'",
+      "$env:SILLYTAVERN_SOURCE = '<directory with node_modules/yaml>'"
+    ],
+    "environmentNotes": "Use equivalent local executable and runtime paths. Install the repository dev dependencies for ssh2. SILLYTAVERN_SOURCE is used by the test fixture to resolve yaml; the tests construct their data under .tmp. MSYS2 subprocesses and loopback SSH need an environment that permits them.",
+    "node": "& 'D:\\nodejs\\node.exe' --test tests/scoped.test.mjs tests/password-ssh.test.mjs tests/hybrid.test.mjs tests/download-recovery.test.mjs tests/upload-reconnect.test.mjs tests/download-reconnect.test.mjs",
+    "wireAuthorizationRetest": "& 'D:\\nodejs\\node.exe' --test --test-name-pattern='interrupted real' tests/scoped.test.mjs",
+    "python": "& 'C:\\Python314\\python.exe' -B -m unittest discover -s tests -p 'test_vps*.py' -v"
+  },
+  "productionSha256Lf": {
+    "helper/manager.mjs": "d82e67fc328abfd14cc3b2dc333c7677fa3ae0d4200c44720449ed9495827a6e",
+    "helper/transport.mjs": "a4afbb68f58c15a23b97d50b583228091b827a3562d4cad0379243fcf751d3b0",
+    "lib/hybrid.mjs": "f328b22ffb590f414ed051baddf1f57d2858547d0ebd2ea21dc50233ae82295e",
+    "vps/dispatcher.py": "394e37959a7dde37370462da993d5e156f61ddd233e0be1197999fcc5d49917a",
+    "vps/hybrid.py": "64f1558f857e41e1cf7b5d949d191b712cd91600e80fc9c98f19078706594f27",
+    "vps/enable-password.sh": "e97f09e4aa28dbf65f2c6b8fbb34720dff670a41281f08b94e25d95f42078e3a",
+    "vps/update.py": "bad05adeff10d5ce68d8c448203f0e9c3dde2dab37e3b5b5be7d0ccfbb34f2f3",
+    "manifest.json": "2265c14947b334cc11cf138d8c4a784e67fa9d0413a799d8907a467ec818d7df",
+    "package.json": "dbc7ded966af9da73310d28df8d601c201546cf27b0735f1a3e0d36112794c75",
+    "package-lock.json": "176dd190c62031b3d02d09f67d00baaa82908b6ef63dfcfd4de35a3016f7c603"
+  },
+  "node": {
+    "passed": 69,
+    "failed": 0,
+    "skipped": 0,
+    "exitCode": 0,
+    "localLog": ".tmp/hybrid-release-node.log"
+  },
+  "wireAuthorizationRetest": {
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "exitCode": 0,
+    "localLog": ".tmp/hybrid-wire.log",
+    "note": "Retest of one case already counted in the Node suite, with added real daemon filter assertion."
+  },
+  "python": {
+    "passed": 34,
+    "failed": 0,
+    "skipped": 6,
+    "exitCode": 0,
+    "localLog": ".tmp/hybrid-final-python.log",
+    "skipReasons": [
+      "Four Linux flock and SSH entry subprocess cases",
+      "One Linux read-only fsync case",
+      "One Windows directory symlink privilege case"
+    ]
+  },
+  "observations": {
+    "scopedUpload": {
+      "sentBytes": 2794,
+      "receivedBytes": 8782,
+      "matchedBytes": 2091360
+    },
+    "scopedDownload": {
+      "sentBytes": 8939,
+      "receivedBytes": 2325,
+      "matchedBytes": 2091360
+    },
+    "trafficUnit": "rsync protocol bytes; excludes SSH and Tailscale overhead"
+  },
+  "verified": [
+    "Deterministic Node and Python bundle bytes, hashes and mtimes, file-size/count/byte group boundaries, and rebuilt corrupted cache",
+    "Unsafe or repeated paths, bad bundle digest, invalid binding, oversized bundle, old hello and old job refusal",
+    "Full and scoped push and pull using real rsync with production-generated daemon configuration, deletion, empty scope category, scope isolation, path type conversion, stale temporary file cleanup and same-size/same-mtime correction",
+    "Rsync wire filter rejects a bundle absent from the frozen descriptors",
+    "Real rsync daemon pipe interruption, same-job resume, lost commit acknowledgement after publication and idempotent reconciliation",
+    "Lost download finish acknowledgement permits verified staging; explicit finish refusal fails",
+    "Real loopback OpenSSH negotiation rejects old peers, changed dataset on reconnect, wrong passwords and changed host keys",
+    "Frozen push plan replay after missing bundle and interrupted apply, retained-job checks and bounded reconnect/BUSY behavior"
+  ],
+  "boundaries": [
+    "Synthetic data under repository .tmp; no production local data, live VPS, Android or deployed installation",
+    "Rsync uses a fixture pipe instead of SSH; real loopback OpenSSH exercises authentication, host identity and control negotiation separately",
+    "Windows fixture substitutes Linux flock and cp; the updater unit tests do not execute a production update",
+    "Only targeted Node tests were run"
+  ]
+}

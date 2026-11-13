@@ -376,7 +376,7 @@ export class Manager {
         if (local.digest !== baseline.local.digest) return false;
         // Recheck the publication after local inventory/save; a stale hello must
         // never let us skip another device's newly published update.
-        const latest = await session.control.request('hello');
+        const latest = await session.control.request('hello', { requiredProtocol: 'hybrid-v1' });
         requireThat(latest.dataset === this.device.remote.dataset, 'REMOTE_DATASET', 'VPS 数据集已经改变，停止跳过同步。');
         if (latest.current?.digest !== baseline.remote.digest) return false;
         if ((await portableState(this.device)).digest !== local.digest) return false;

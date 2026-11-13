@@ -95,6 +95,7 @@ def main():
     for directory in (root, root / "private", root / "incoming", root / "generations"):
         check(plain(directory).is_dir() and directory.stat().st_uid == account.pw_uid, "Unexpected storage owner: " + str(directory))
     target = plain("/usr/local/libexec/tavernsyn/password-dispatcher.py")
+    hybrid_target = plain("/usr/local/libexec/tavernsyn/hybrid.py")
     config = plain(Path("/etc/ssh/tavernsyn") / (args.account + ".conf"))
     for file in (target, config):
         check(file.is_file() and file.stat().st_uid == 0, "Expected existing managed root-owned file: " + str(file))
@@ -105,6 +106,8 @@ def main():
     check(re.fullmatch(r"\d+\.\d+\.\d+", version), "Invalid source release version")
     dispatcher = (source / "dispatcher.py").read_bytes()
     compile(dispatcher, "dispatcher.py", "exec")
+    hybrid_module = (source / "hybrid.py").read_bytes()
+    compile(hybrid_module, "hybrid.py", "exec")
     updated_config = keepalive(config.read_text(encoding="utf-8"), args.account).encode()
 
     # Run the real Linux flock/EOF/read-only tests as the unprivileged sync account.
@@ -116,9 +119,10 @@ def main():
         os.chown(work / ".tmp", account.pw_uid, account.pw_gid)
         (work / ".tmp").chmod(0o700)
         (work / "vps/dispatcher.py").write_bytes(dispatcher)
+        (work / "vps/hybrid.py").write_bytes(hybrid_module)
         shutil.copyfile(source / "storage-status.py", work / "vps/storage-status.py")
         shutil.copyfile(source.parent / "tests/test_vps.py", work / "tests/test_vps.py")
-        for file in (work / "vps/dispatcher.py", work / "vps/storage-status.py", work / "tests/test_vps.py"):
+        for file in (work / "vps/dispatcher.py", work / "vps/hybrid.py", work / "vps/storage-status.py", work / "tests/test_vps.py"):
             file.chmod(0o644)
         tested = subprocess.run(["runuser", "-u", args.account, "--", "/usr/bin/python3", "-B", "-m", "unittest", "discover", "-s", "tests", "-p", "test_vps.py", "-v"],
                                 cwd=work, check=True, text=True, capture_output=True, timeout=90)
@@ -145,11 +149,16 @@ def main():
         (backup / "linux-tests.log").write_text(tests, encoding="utf-8")
         for file in (target, config):
             shutil.copy2(file, backup / file.name)
+        had_hybrid = hybrid_target.exists()
+        if had_hybrid:
+            check(hybrid_target.is_file() and hybrid_target.stat().st_uid == 0, "Unexpected hybrid module")
+            shutil.copy2(hybrid_target, backup / hybrid_target.name)
         active_file = root / "private/active.json"
         if active_file.exists():
             shutil.copy2(active_file, backup / "active-before.json")
         (backup / "pointers-before.json").write_text(json.dumps(before, indent=2), encoding="utf-8")
         try:
+            replace(hybrid_target, hybrid_module, 0o644)
             replace(target, dispatcher, 0o755)
             replace(config, updated_config, 0o600)
             run(["/usr/sbin/sshd", "-t"])
@@ -171,7 +180,7 @@ if j and j["direction"]=="push" and j["phase"] not in ("done","aborted"):
     mode=stat.S_IMODE(info.st_mode)|stat.S_IRUSR|stat.S_IWUSR|(stat.S_IXUSR if stat.S_ISDIR(info.st_mode) else 0)
     if stat.S_IMODE(info.st_mode)!=mode:os.chmod(file,mode);changed+=1
 if j:s.park(j)
-h=s.command({"op":"hello"},j["device"] if j else "00000000-0000-4000-8000-000000000000")
+h=s.command({"op":"hello","requiredProtocol":"hybrid-v1"},j["device"] if j else "00000000-0000-4000-8000-000000000000")
 print(json.dumps({"hello":h,"repairedStageModes":changed}))'''
             probe = json.loads(run(["runuser", "-u", args.account, "--", "/usr/bin/python3", "-B", "-c", code, str(target), str(root)]))
             check(pointers(root) == before, "Published pointers changed unexpectedly")
@@ -179,6 +188,10 @@ print(json.dumps({"hello":h,"repairedStageModes":changed}))'''
             run(["systemctl", "reload", "ssh"])
         except BaseException:
             replace(target, (backup / target.name).read_bytes(), 0o755)
+            if had_hybrid:
+                replace(hybrid_target, (backup / hybrid_target.name).read_bytes(), 0o644)
+            else:
+                hybrid_target.unlink(missing_ok=True)
             replace(config, (backup / config.name).read_bytes(), 0o600)
             if (backup / "active-before.json").exists():
                 # Restore through the sync account so active.json retains its ownership.

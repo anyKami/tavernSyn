@@ -55,6 +55,19 @@ class StoreTests(unittest.TestCase):
         self.store.begin(dict(job=job, direction=direction, dataset=self.dataset, base=current["digest"] if current else None, jobBound=True), self.device)
         return job
 
+    def commit(self, message, device):
+        # Most publication tests start with a fully staged payload. Run the
+        # protocol against those same bytes before exercising publication.
+        job = self.store.active()
+        if job and job["job"] == message["job"] and job["phase"] == "transfer":
+            if self.store.inspect(message, device)["equal"]:
+                plan = self.store.hybrid_plan(message, device)["plan"]
+                self.assertEqual(plan["groups"], [])
+                self.assertEqual(plan["large"], [])
+                self.store.hybrid_descriptors(dict(job=job["job"], descriptors=[]), device)
+                self.store.hybrid_apply(dict(job=job["job"]), device)
+        return self.store.commit(message, device)
+
     def test_atomic_failures_remove_temporary_files_and_keep_the_original(self):
         file = self.work / "atomic.json"
         for where in ("write", "sync", "rename"):
@@ -77,12 +90,12 @@ class StoreTests(unittest.TestCase):
             save(value)
 
         with patch.object(self.store, "save", side_effect=fail_done), patch.object(self.store, "gc", side_effect=PermissionError()):
-            result = self.store.commit(dict(job=job, manifest=manifest), self.device)
+            result = self.commit(dict(job=job, manifest=manifest), self.device)
         self.assertEqual(result["phase"], "done")
         self.assertEqual(set(result["maintenance"]), {"job-record", "generations"})
         self.assertEqual(self.store.current()["generation"], job)
         self.assertEqual(self.store.current()["digest"], manifest["digest"])
-        self.assertEqual(self.store.commit(dict(job=job, manifest=manifest), self.device)["phase"], "done")
+        self.assertEqual(self.commit(dict(job=job, manifest=manifest), self.device)["phase"], "done")
 
     def test_pointer_replaced_before_sync_failure_is_reported_as_published_with_warning(self):
         job = self.begin()
@@ -95,7 +108,7 @@ class StoreTests(unittest.TestCase):
                 raise OSError("synthetic directory sync failure after replace")
 
         with patch.object(d, "atomic", side_effect=fail_after_pointer):
-            result = self.store.commit(dict(job=job, manifest=manifest), self.device)
+            result = self.commit(dict(job=job, manifest=manifest), self.device)
         self.assertEqual(result["phase"], "done")
         self.assertEqual(result["maintenance"], ["publication-sync"])
         self.assertEqual(self.store.current()["generation"], job)
@@ -127,7 +140,7 @@ class StoreTests(unittest.TestCase):
     def publish(self, value="one"):
         job = self.begin()
         payload, manifest = self.payload(job, value)
-        self.store.commit(dict(job=job, manifest=manifest), self.device)
+        self.commit(dict(job=job, manifest=manifest), self.device)
         return job, manifest
 
     def complete_publication(self):
@@ -148,7 +161,7 @@ class StoreTests(unittest.TestCase):
         metadata["sourceState"] = d.source_state(metadata, d.scan(payload)["files"])
         d.atomic(payload / "environment.json", metadata)
         manifest = d.scan(payload)
-        self.store.commit(dict(job=job, manifest=manifest), self.device)
+        self.commit(dict(job=job, manifest=manifest), self.device)
         return self.store.current()
 
     def category_upload(self, scope, empty=False):
@@ -194,7 +207,7 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(self.store.inspect(request, self.device)["extra"], ["profile/business.txt"])
                 self.assertEqual(partial.read_bytes(), b"retained incomplete transfer")
                 extra.unlink()
-                receipt = self.store.commit(request, self.device)
+                receipt = self.commit(request, self.device)
                 generation = self.root / "generations" / job
                 self.assertEqual(receipt["generation"], job)
                 self.assertEqual(receipt.get("snapshotDigest", receipt["digest"]), manifest["digest"])
@@ -229,7 +242,7 @@ class StoreTests(unittest.TestCase):
                 before = self.complete_publication()
                 expected = {file["path"]: file["sha256"] for file in before["manifest"]["files"] if file["path"] != "environment.json" and not d.in_scope(file["path"], scope)}
                 job, _, manifest = self.category_upload(scope)
-                result = self.store.commit(dict(job=job, manifest=manifest), self.device)
+                result = self.commit(dict(job=job, manifest=manifest), self.device)
                 current = self.store.current()
                 self.assertEqual(result["snapshotDigest"], manifest["digest"])
                 self.assertEqual(result["digest"], current["digest"])
@@ -248,7 +261,7 @@ class StoreTests(unittest.TestCase):
     def test_empty_category_is_an_explicit_delete_not_an_empty_full_snapshot(self):
         self.complete_publication()
         job, _, manifest = self.category_upload(["worlds"], empty=True)
-        self.store.commit(dict(job=job, manifest=manifest), self.device)
+        self.commit(dict(job=job, manifest=manifest), self.device)
         current = self.store.current()
         self.assertFalse(any(d.in_scope(file["path"], ["worlds"]) for file in current["manifest"]["files"]))
         self.assertTrue(any(file["path"] == "profile/characters/old.png" for file in current["manifest"]["files"]))
@@ -258,7 +271,7 @@ class StoreTests(unittest.TestCase):
         job, upload, _ = self.category_upload(["worlds"])
         (upload / "profile/settings.json").write_text('{"unexpected":true}', encoding="utf-8")
         with self.assertRaises(d.ProtocolError):
-            self.store.commit(dict(job=job, manifest=d.scan(upload)), self.device)
+            self.commit(dict(job=job, manifest=d.scan(upload)), self.device)
         self.assertEqual(self.store.current()["generation"], before["generation"])
         with self.assertRaises(d.ProtocolError):
             self.store.begin(dict(job=job, direction="push", scope=["characters"], dataset=self.dataset, jobBound=True), self.device)
@@ -273,10 +286,10 @@ class StoreTests(unittest.TestCase):
             return atomic(file, value)
         with patch.object(d, "atomic", side_effect=fail_pointer):
             with self.assertRaises(OSError):
-                self.store.commit(dict(job=job, manifest=manifest), self.device)
+                self.commit(dict(job=job, manifest=manifest), self.device)
         self.assertEqual(self.store.current()["generation"], before["generation"])
-        published = self.store.commit(dict(job=job, manifest=manifest), self.device)
-        replay = self.store.commit(dict(job=job, manifest=manifest), self.device)
+        published = self.commit(dict(job=job, manifest=manifest), self.device)
+        replay = self.commit(dict(job=job, manifest=manifest), self.device)
         self.assertEqual(published["digest"], replay["digest"])
         self.assertEqual(self.store.published(dict(job=job, scope=["characters"], snapshotDigest=manifest["digest"]))["digest"], published["digest"])
         with self.assertRaises(d.ProtocolError):
@@ -314,7 +327,7 @@ class StoreTests(unittest.TestCase):
         payload, manifest = self.payload(second, "two")
         (payload / "profile" / "世界书.txt").write_text("corruption", encoding="utf-8")
         with self.assertRaises(d.ProtocolError):
-            self.store.commit(dict(job=second, manifest=manifest), self.device)
+            self.commit(dict(job=second, manifest=manifest), self.device)
         self.assertEqual(self.store.current()["generation"], first)
         self.assertEqual(self.store.active()["phase"], "transfer")
         self.store.finish(dict(job=second), self.device, abort=True)
@@ -325,7 +338,7 @@ class StoreTests(unittest.TestCase):
         second, manifest = self.publish("two")
         # Reconnect with the same job; publication and cleanup stay idempotent.
         self.begin(job=second)
-        replay = self.store.commit(dict(job=second, manifest=manifest), self.device)
+        replay = self.commit(dict(job=second, manifest=manifest), self.device)
         self.assertEqual(replay["digest"], manifest["digest"])
         self.assertFalse((self.root / "previous.json").exists())
         self.assertFalse((self.root / "generations" / first).exists())
@@ -346,10 +359,10 @@ class StoreTests(unittest.TestCase):
 
         with patch.object(d, "atomic", side_effect=fail_pointer):
             with self.assertRaises(OSError):
-                self.store.commit(dict(job=second, manifest=manifest), self.device)
+                self.commit(dict(job=second, manifest=manifest), self.device)
         self.assertEqual(self.store.current()["generation"], first)
         self.assertTrue((self.root / "generations" / second / "COMPLETE.json").exists())
-        self.store.commit(dict(job=second, manifest=manifest), self.device)
+        self.commit(dict(job=second, manifest=manifest), self.device)
         self.assertEqual(self.store.current()["generation"], second)
 
     def test_device_binding_path_validation_and_empty_upload(self):
@@ -362,7 +375,7 @@ class StoreTests(unittest.TestCase):
         (payload / "profile").mkdir()
         (payload / "profile" / "settings.json").write_text("{}", encoding="utf-8")
         with self.assertRaises(d.ProtocolError):
-            self.store.commit(dict(job=job, manifest=d.scan(payload)), self.device)
+            self.commit(dict(job=job, manifest=d.scan(payload)), self.device)
         self.assertIsNone(self.store.current())
 
     def test_successful_publication_removes_superseded_download_and_uploads(self):
@@ -433,7 +446,7 @@ class StoreTests(unittest.TestCase):
         self.begin(job=job)
         self.assertEqual(self.store.active()["phase"], "transfer")
         self.assertFalse(self.store.parked_file(job).exists())
-        self.store.commit(dict(job=job, manifest=manifest), self.device)
+        self.commit(dict(job=job, manifest=manifest), self.device)
         self.assertEqual(self.store.current()["digest"], manifest["digest"])
 
     def test_legacy_or_crashed_control_record_does_not_permanently_block_next_job(self):
@@ -487,7 +500,7 @@ class StoreTests(unittest.TestCase):
 
         try:
             with patch("builtins.open", side_effect=readable_only):
-                self.store.commit(dict(job=job, manifest=manifest), self.device)
+                self.commit(dict(job=job, manifest=manifest), self.device)
             self.assertEqual(self.store.current()["digest"], manifest["digest"])
         finally:
             for file in self.root.rglob("世界书.txt"):
@@ -519,8 +532,13 @@ class StoreTests(unittest.TestCase):
 
     def test_password_entry_accepts_only_fixed_commands_and_valid_device_ids(self):
         self.assertEqual(d.ssh_command(f"tavernsyn-control-v1 {self.device}"), ("control", self.device))
-        self.assertEqual(d.ssh_command(f"tavernsyn-rsync-v1 {self.device} --server --daemon ."), ("rsync", self.device))
-        self.assertEqual(d.ssh_command(f"tavernsyn-rsync-v2 {self.device} {str(uuid.uuid4())} --server --daemon ."), ("rsync", self.device))
+        job = str(uuid.uuid4())
+        for module in ("wire", "payload"):
+            self.assertEqual(d.ssh_command(f"tavernsyn-rsync-v3 {self.device} {job} {module} --server --daemon ."), ("rsync", self.device))
+        for command in (f"tavernsyn-rsync-v1 {self.device} --server --daemon .",
+                        f"tavernsyn-rsync-v2 {self.device} {job} --server --daemon ."):
+            with self.assertRaisesRegex(d.ProtocolError, "UPGRADE_REQUIRED"):
+                d.ssh_command(command)
         for command in ("sh", f"tavernsyn-control-v1 {self.device}; id", "tavernsyn-control-v1 ../bad",
                         f"tavernsyn-rsync-v1 {self.device} --server --daemon /etc", f"tavernsyn-control-v1 {self.device} extra"):
             with self.assertRaises(d.ProtocolError):
@@ -531,6 +549,62 @@ class StoreTests(unittest.TestCase):
             self.assertTrue(d.tailscale_source(source))
         for source in ("", "127.0.0.1 22 127.0.0.1 22", "203.0.113.1 22 x 22", "100.128.0.1 22 x 22"):
             self.assertFalse(d.tailscale_source(source))
+
+    def test_hybrid_hello_and_old_job_fail_before_changing_storage(self):
+        job = str(uuid.uuid4())
+        request = dict(op="begin", job=job, direction="push", dataset=self.dataset, jobBound=True)
+        for message in (request, dict(op="hello"), dict(op="hello", requiredProtocol="old")):
+            with self.assertRaisesRegex(d.ProtocolError, "UPGRADE_REQUIRED"):
+                self.store.command(message, self.device)
+        self.assertFalse((self.root / "incoming" / job).exists())
+        self.assertIsNone(self.store.current())
+        hello = self.store.command(dict(op="hello", requiredProtocol="hybrid-v1"), self.device)
+        self.assertEqual(hello["hybridProtocol"], "hybrid-v1")
+        self.store.command(request, self.device)
+        active = self.store.active()
+        active.pop("protocol")
+        d.atomic(self.store.private / "active.json", active)
+        self.store.close()
+        with self.assertRaisesRegex(d.ProtocolError, "UPGRADE_REQUIRED"):
+            self.store.begin({**request, "resumeOnly": True}, self.device)
+
+    def test_frozen_upload_replays_after_missing_bundle_and_interrupted_apply(self):
+        job = self.begin()
+        stage, _ = self.payload(job)
+        source = self.work / "source"
+        shutil.copytree(stage, source)
+        for name in ("first.txt", "second.txt"):
+            (source / "profile" / name).write_text(name, encoding="utf-8")
+        manifest = d.scan(source)
+        request = dict(job=job, manifest=manifest)
+        plan = self.store.hybrid_plan(request, self.device)["plan"]
+        self.assertEqual([[f["path"] for f in group] for group in plan["groups"]],
+                         [["profile/first.txt", "profile/second.txt"]])
+        wire = self.store.hybrid_dir(self.store.active()) / "wire" / "0.bundle"
+        local = self.work / "local.bundle"
+        descriptor = d.hybrid.create_bundle(source, local, plan, manifest, 0)
+        self.store.hybrid_descriptors(dict(job=job, descriptors=[descriptor]), self.device)
+        with self.assertRaises(OSError):
+            self.store.hybrid_apply(request, self.device)
+        self.assertIsNone(self.store.current())
+        shutil.copyfile(local, wire)
+        apply = d.hybrid.apply_bundle
+
+        def stop_after_write(*args):
+            apply(*args)
+            raise OSError("fixture interruption before applied record")
+
+        with patch.object(d.hybrid, "apply_bundle", side_effect=stop_after_write):
+            with self.assertRaisesRegex(OSError, "fixture interruption"):
+                self.store.hybrid_apply(request, self.device)
+        self.assertIsNone(self.store.current())
+        self.store.close()
+        self.begin(job)
+        self.assertEqual(self.store.hybrid_plan(request, self.device), dict(plan=plan, descriptors=[descriptor]))
+        with self.assertRaises(d.ProtocolError):
+            self.store.hybrid_descriptors(dict(job=job, descriptors=[{**descriptor, "sha256": "0" * 64}]), self.device)
+        self.assertEqual(self.store.hybrid_apply(request, self.device)["planDigest"], plan["digest"])
+        self.assertEqual(self.store.commit(request, self.device)["digest"], manifest["digest"])
         env = {**os.environ, "SSH_ORIGINAL_COMMAND": f"tavernsyn-control-v1 {self.device}", "SSH_CONNECTION": "203.0.113.1 12345 100.100.1.1 22"}
         result = subprocess.run([os.sys.executable, str(PROJECT / 'vps/dispatcher.py'), '--root', str(self.root)], env=env, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
@@ -583,11 +657,13 @@ class LinuxLockTests(unittest.TestCase):
             store, device, message = self.store(Path(temp) / "store")
             env = {**os.environ, "SSH_ORIGINAL_COMMAND": f"tavernsyn-control-v1 {device}",
                    "SSH_CONNECTION": "100.64.0.1 12345 100.64.0.2 22"}
+            hello = json.dumps(dict(op="hello", requiredProtocol="hybrid-v1", id=1))
+            begin = json.dumps({**message, "id": 2, "op": "begin"})
             result = subprocess.run([os.sys.executable, str(PROJECT / "vps/dispatcher.py"), "--root", str(store.root)],
-                                    input=json.dumps({**message, "id": 1, "op": "begin"}) + "\n", text=True,
+                                    input=hello + "\n" + begin + "\n", text=True,
                                     capture_output=True, env=env, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(json.loads(result.stdout)["ok"], result.stdout)
+            self.assertEqual([json.loads(line)["ok"] for line in result.stdout.splitlines()], [True, True], result.stdout)
             self.assertEqual(store.active()["phase"], "paused")
             with d.Lock(store.private / "operation.lock"), d.Lock(store.private / "transfer.lock"):
                 pass

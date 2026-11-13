@@ -24,6 +24,17 @@ if os.name == "nt":
             return subprocess.CompletedProcess(args, 0)
         return original_run(args, **kwargs)
     d.subprocess.run = run
+if sys.argv[1] == "--rsync-config":
+    _, root, device, job, module, config_path = sys.argv[1:]
+
+    def capture(args, **kwargs):
+        config = Path(args[3].removeprefix("--config=")).read_text(encoding="utf-8")
+        Path(config_path).write_text(config, encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0)
+
+    d.subprocess.run = capture
+    sys.exit(d.serve_rsync(d.Store(root), device, job, module))
+
 root, device, dataset = sys.argv[1:]
 if not (Path(root) / "FORMAT.json").exists():
     d.initialize(root, dataset)

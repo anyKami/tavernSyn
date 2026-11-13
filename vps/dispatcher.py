@@ -15,6 +15,11 @@ import sys
 import time
 import unicodedata
 import uuid
+import importlib.util
+
+_spec = importlib.util.spec_from_file_location("tavernsyn_hybrid", Path(__file__).with_name("hybrid.py"))
+hybrid = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(hybrid)
 
 try:
     import fcntl
@@ -218,6 +223,7 @@ class Store:
         check(self.format.get("format") == 1 and ID.fullmatch(self.format.get("dataset", "")), "not initialized")
         self.lock = None
         self.job = None
+        self.hello_checked = False
 
     def current(self):
         pointer = self.root / "current.json"
@@ -285,6 +291,7 @@ class Store:
             prior = active if active and active["job"] == message["job"] else read(parked) if parked.exists() else None
             check(prior or not message.get("resumeOnly"), "NO_JOB: no retained job with this id")
             if prior:
+                check(prior.get("protocol") == hybrid.PROTOCOL, "UPGRADE_REQUIRED: old job cannot resume")
                 check(prior["device"] == device and prior["direction"] == direction, "wrong job owner or direction")
                 check(scope_valid(prior.get("scope")) == scope, "job categories changed")
                 check(prior["phase"] != "aborted", "job was aborted; start a new job")
@@ -349,7 +356,7 @@ class Store:
                 else:
                     payload.mkdir(mode=0o700)
             job = dict(job=message["job"], device=device, direction=direction, generation=generation,
-                       phase="transfer", base=current["digest"] if current else None, payload=str(payload))
+                       phase="transfer", base=current["digest"] if current else None, payload=str(payload), protocol=hybrid.PROTOCOL)
             if scope:
                 job["scope"] = scope
                 job["baseGeneration"] = current["generation"]
@@ -464,6 +471,8 @@ class Store:
         job = self.own_job(message, device)
         manifest = manifest_valid(message["manifest"])
         payload_paths(manifest)
+        frozen = self.hybrid_record(job)
+        check(frozen.get("applied") is True and frozen.get("manifest") == manifest, "INTEGRITY: hybrid plan not applied")
         scope = scope_valid(job.get("scope"))
         current = self.current()
         if scope and current and current["generation"] == job["generation"]:
@@ -555,6 +564,17 @@ class Store:
         previous = self.root / "previous.json"
         check(not previous.is_symlink(), "unsafe previous pointer")
         previous.unlink(missing_ok=True)
+        keep_hybrid = {job["job"] for job in [self.active()] if job}
+        paused = self.private / "paused-jobs"
+        if paused.exists():
+            keep_hybrid.update(f.stem for f in paused.glob("*.json") if ID.fullmatch(f.stem))
+        hybrid_root = self.private / "hybrid"
+        if hybrid_root.exists():
+            check(not hybrid_root.is_symlink(), "unsafe hybrid root")
+            for entry in hybrid_root.iterdir():
+                check(not entry.is_symlink() and entry.is_dir() and ID.fullmatch(entry.name), "unsafe hybrid job")
+                if entry.name not in keep_hybrid:
+                    shutil.rmtree(entry)
         for entry in obsolete:
             if entry.is_dir():
                 shutil.rmtree(entry)
@@ -569,6 +589,11 @@ class Store:
             job["phase"] = "aborted" if abort else "done"
             self.save(job)
             self.parked_file(job["job"]).unlink(missing_ok=True)
+            if abort:
+                hybrid_dir = self.hybrid_dir(job)
+                if hybrid_dir.exists():
+                    check(not hybrid_dir.is_symlink() and hybrid_dir.is_dir(), "unsafe hybrid job")
+                    shutil.rmtree(hybrid_dir)
             if abort and job["direction"] == "push":
                 stage = self.root / "incoming" / job["generation"]
                 if stage.exists():
@@ -581,14 +606,160 @@ class Store:
                     return self.describe(job) | {"maintenance": ["generations"]}
         return self.describe(job)
 
+    def hybrid_dir(self, job):
+        check(ID.fullmatch(job["job"]), "invalid job")
+        directory = self.private / "hybrid" / job["job"]
+        hybrid.no_links(directory)
+        return directory
+
+    def hybrid_record(self, job):
+        directory = self.hybrid_dir(job)
+        check((directory / "record.json").is_file(), "INTEGRITY: hybrid plan missing")
+        return read(directory / "record.json")
+
+    def hybrid_plan(self, message, device):
+        job = self.own_job(message, device)
+        check(job["phase"] == "transfer" and job.get("protocol") == hybrid.PROTOCOL, "invalid hybrid job")
+        directory = self.hybrid_dir(job)
+        with Lock(self.private / "transfer.lock"):
+            if (directory / "record.json").exists():
+                record = self.hybrid_record(job)
+                supplied = message.get("manifest") if job["direction"] == "push" else job["manifest"]
+                check(record["manifest"] == supplied, "INTEGRITY: frozen manifest changed")
+                if job["direction"] == "push":
+                    self.hybrid_clean_stage(job, record["manifest"])
+                return {"plan": record["plan"], "descriptors": record.get("descriptors")}
+            manifest = manifest_valid(message["manifest"] if job["direction"] == "push" else job["manifest"])
+            payload_paths(manifest)
+            scope = scope_valid(job.get("scope"))
+            check(not scope or all(f["path"] == "environment.json" or in_scope(f["path"], scope) for f in manifest["files"]), "scope violation")
+            if job["direction"] == "push":
+                changed = difference(manifest, scan(job["payload"], ignore_partials=True))["changed"]
+            else:
+                have = manifest_valid(message["have"])
+                changed = difference(manifest, have)["changed"]
+            plan = hybrid.create_plan(dict(job=job["job"], dataset=self.format["dataset"], generation=job["generation"], base=job["base"], scope=scope), manifest, changed)
+            directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+            wire = directory / "wire"
+            wire.mkdir(mode=0o700, exist_ok=True)
+            record = dict(plan=plan, manifest=manifest)
+            if job["direction"] == "pull":
+                source = directory / "source"
+                source.mkdir(mode=0o700, exist_ok=True)
+                for group in plan["groups"]:
+                    for f in group:
+                        dst = source.joinpath(*f["path"].split("/"))
+                        dst.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                        if scope and f["path"] == "environment.json":
+                            dst.write_text(job["environment"], encoding="utf-8", newline="")
+                        else:
+                            src = Path(job["payload"]).joinpath(*f["path"].split("/"))
+                            hybrid.regular(src)
+                            shutil.copyfile(src, dst)
+                record["descriptors"] = [hybrid.create_bundle(source, wire / (str(i) + ".bundle"), plan, manifest, i) for i in range(len(plan["groups"]))]
+            atomic(directory / "record.json", record)
+            if job["direction"] == "push":
+                self.hybrid_clean_stage(job, manifest)
+            return {"plan": plan, "descriptors": record.get("descriptors")}
+
+    def hybrid_descriptors(self, message, device):
+        job = self.own_job(message, device)
+        check(job["direction"] == "push" and job["phase"] == "transfer", "not an upload")
+        with Lock(self.private / "transfer.lock"):
+            record = self.hybrid_record(job)
+            desc = message.get("descriptors")
+            check(isinstance(desc, list) and len(desc) == len(record["plan"]["groups"]), "invalid descriptors")
+            for item in desc:
+                check(isinstance(item, dict) and set(item) == {"size", "sha256"} and type(item["size"]) is int and 12 <= item["size"] <= 12 + hybrid.HEADER_LIMIT + hybrid.BUNDLE_LIMIT and re.fullmatch(r"[a-f0-9]{64}", item["sha256"]), "invalid descriptor")
+            check("descriptors" not in record or record["descriptors"] == desc, "descriptors changed")
+            record["descriptors"] = desc
+            atomic(self.hybrid_dir(job) / "record.json", record)
+            return {"descriptors": desc}
+
+    def hybrid_clean_stage(self, job, manifest):
+        root = Path(job["payload"])
+        hybrid.no_links(root)
+        wanted = {f["path"] for f in manifest["files"]}
+        visited = []
+        for directory, dirs, files in os.walk(root, topdown=True, followlinks=False):
+            visited.append(Path(directory))
+            for name in list(dirs):
+                folder = Path(directory) / name
+                check(stat.S_ISDIR(folder.lstat().st_mode) and not folder.is_symlink(), "unsafe stage directory")
+                if name == ".tavernsyn-partial":
+                    dirs.remove(name)
+                    for item in folder.iterdir():
+                        check(stat.S_ISREG(item.lstat().st_mode), "unsafe partial file")
+                        candidate = (Path(directory) / item.name).relative_to(root).as_posix()
+                        if candidate not in wanted:
+                            item.unlink()
+                    if not any(folder.iterdir()):
+                        folder.rmdir()
+            for name in files:
+                file = Path(directory) / name
+                check(stat.S_ISREG(file.lstat().st_mode), "unsafe stage file")
+                if file.relative_to(root).as_posix() not in wanted:
+                    file.unlink()
+        for folder in reversed(visited[1:]):
+            if not any(folder.iterdir()):
+                folder.rmdir()
+        return root
+
+    def hybrid_prepare(self, message, device):
+        job = self.own_job(message, device)
+        check(job["direction"] == "push" and job["phase"] == "transfer", "not an upload")
+        with Lock(self.private / "transfer.lock"):
+            record = self.hybrid_record(job)
+            descriptors = record.get("descriptors")
+            check(isinstance(descriptors, list) and len(descriptors) == len(record["plan"]["groups"]), "descriptors missing")
+            for i, desc in enumerate(descriptors):
+                bundle = self.hybrid_dir(job) / "wire" / (str(i) + ".bundle")
+                check(hybrid.regular(bundle).st_size == desc["size"], "bundle size mismatch")
+                hybrid.verify_bundle(bundle, record["plan"], record["manifest"], i, desc["sha256"])
+            self.hybrid_clean_stage(job, record["manifest"])
+            return {"prepared": True, "planDigest": record["plan"]["digest"]}
+
+    def hybrid_apply(self, message, device):
+        job = self.own_job(message, device)
+        check(job["direction"] == "push" and job["phase"] == "transfer", "not an upload")
+        with Lock(self.private / "transfer.lock"):
+            record = self.hybrid_record(job)
+            plan, manifest = record["plan"], record["manifest"]
+            descriptors = record.get("descriptors")
+            check(isinstance(descriptors, list) and len(descriptors) == len(plan["groups"]), "descriptors missing")
+            wire = self.hybrid_dir(job) / "wire"
+            for i, desc in enumerate(descriptors):
+                bundle = wire / (str(i) + ".bundle"
+                )
+                check(hybrid.regular(bundle).st_size == desc["size"], "bundle size mismatch")
+                hybrid.verify_bundle(bundle, plan, manifest, i, desc["sha256"])
+            root = self.hybrid_clean_stage(job, manifest)
+            for i, desc in enumerate(descriptors):
+                hybrid.apply_bundle(wire / (str(i) + ".bundle"), root, plan, manifest, i, desc["sha256"])
+            check(difference(manifest, scan(root, ignore_partials=True))["equal"], "INTEGRITY: hybrid upload incomplete")
+            record["applied"] = True
+            atomic(self.hybrid_dir(job) / "record.json", record)
+            return {"applied": True, "planDigest": plan["digest"]}
+
     def command(self, message, device):
         op = message.get("op")
         if op == "hello":
+            check(message.get("requiredProtocol") == hybrid.PROTOCOL, "UPGRADE_REQUIRED: hybrid protocol required")
+            self.hello_checked = True
             current = self.current()
             active = self.active()
             pending = {k: active[k] for k in ("job", "direction", "phase")} if active and active["device"] == device and active["phase"] not in ("done", "aborted") else None
-            return {"protocol": 1, "version": "0.2.12", "capabilities": ["paused-jobs", "job-bound-rsync", "scoped-sync-v1", "inspect-preserves-partials"], "dataset": self.format["dataset"],
+            return {"protocol": 1, "version": "0.2.13", "hybridProtocol": hybrid.PROTOCOL, "capabilities": ["hybrid-v1", "paused-jobs", "job-bound-rsync", "scoped-sync-v1", "inspect-preserves-partials"], "dataset": self.format["dataset"],
                     "current": {k: current[k] for k in ("generation", "digest")} if current else None, "pending": pending}
+        check(self.hello_checked, "UPGRADE_REQUIRED: hybrid hello required")
+        if op == "hybrid-plan":
+            return self.hybrid_plan(message, device)
+        if op == "hybrid-descriptors":
+            return self.hybrid_descriptors(message, device)
+        if op == "hybrid-prepare":
+            return self.hybrid_prepare(message, device)
+        if op == "hybrid-apply":
+            return self.hybrid_apply(message, device)
         if op == "begin":
             return self.begin(message, device)
         if op == "catalog":
@@ -606,7 +777,7 @@ class Store:
         raise ProtocolError("unsupported control operation")
 
 
-def serve_rsync(store, device, job_id=None):
+def serve_rsync(store, device, job_id=None, module="payload"):
     # Shared lock spans the *entire* rsync process, even when the separate control SSH disconnects.
     with Lock(store.private / "transfer.lock", shared=True):
         job = store.active()
@@ -616,12 +787,24 @@ def serve_rsync(store, device, job_id=None):
         payload = Path(job["payload"])
         expected = store.root / ("incoming" if job["direction"] == "push" else "generations") / job["generation"] / ("upload" if job.get("scope") and job["direction"] == "push" else "payload")
         check(payload == expected and payload.resolve() == expected and not payload.is_symlink(), "invalid module root")
+        check(job.get("protocol") == hybrid.PROTOCOL, "UPGRADE_REQUIRED: old job cannot transfer")
+        check(module in ("payload", "wire"), "invalid module")
+        record = store.hybrid_record(job)
+        if module == "wire":
+            check(record.get("descriptors") is not None, "hybrid descriptors missing")
+            payload = store.hybrid_dir(job) / "wire"
+            hybrid.no_links(payload)
+            check(payload.is_dir(), "missing wire directory")
         config = store.private / ("rsync-" + job["job"] + "-" + str(os.getpid()) + ".conf")
+        wire_filter = []
+        if module == "wire":
+            wire_filter = ["include = " + " ".join(["/" + str(i) + ".bundle" for i in range(len(record["descriptors"]))] + ["/.tavernsyn-partial/", "/.tavernsyn-partial/***"]), "exclude = *"]
         contents = "\n".join([
             "use chroot = no", "max connections = 1", "log file = /dev/null", "lock file = " + str(store.private / "rsync.lock"),
             "timeout = 120", "incoming chmod = Du+rwx,Fu+rw",
-            "[payload]", "path = " + str(payload), "list = false", "read only = " + ("false" if job["direction"] == "push" else "true"),
+            "[" + module + "]", "path = " + str(payload), "list = false", "read only = " + ("false" if job["direction"] == "push" else "true"),
             "write only = " + ("true" if job["direction"] == "push" else "false"),
+            *wire_filter,
             "refuse options = links copy-links copy-dirlinks keep-dirlinks hard-links devices specials owner group perms chmod inplace append append-verify backup backup-dir relative copy-dest link-dest",
         ]) + "\n"
         config.write_text(contents, encoding="utf-8")
@@ -650,11 +833,12 @@ def ssh_command(original):
     check(len(parts) >= 2 and ID.fullmatch(parts[1]), "unsupported SSH command")
     if parts[0] == "tavernsyn-control-v1" and len(parts) == 2:
         return "control", parts[1]
-    if parts[0] == "tavernsyn-rsync-v2":
-        check(len(parts) == 6 and ID.fullmatch(parts[2]) and parts[3:] == ["--server", "--daemon", "."], "unsupported SSH command")
+    if parts[0] == "tavernsyn-rsync-v3":
+        check(len(parts) == 7 and ID.fullmatch(parts[2]) and parts[3] in ("wire", "payload") and parts[4:] == ["--server", "--daemon", "."], "unsupported SSH command")
         return "rsync", parts[1]
-    check(parts[0] == "tavernsyn-rsync-v1" and parts[2:] == ["--server", "--daemon", "."], "unsupported SSH command")
-    return "rsync", parts[1]
+    if parts[0] in ("tavernsyn-rsync-v1", "tavernsyn-rsync-v2"):
+        raise ProtocolError("UPGRADE_REQUIRED: hybrid rsync required")
+    raise ProtocolError("unsupported SSH command")
 
 
 def tailscale_source(connection):
@@ -680,7 +864,7 @@ def main():
     store = Store(args.root)
     if mode == "rsync":
         parts = shlex.split(os.environ["SSH_ORIGINAL_COMMAND"])
-        return serve_rsync(store, device, parts[2] if parts[0] == "tavernsyn-rsync-v2" else None)
+        return serve_rsync(store, device, parts[2], parts[3])
     try:
         while True:
             line = sys.stdin.buffer.readline(MAX_LINE + 1)

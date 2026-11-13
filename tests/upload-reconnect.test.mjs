@@ -4,20 +4,24 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { Control, createUploadRecovery, finalizeUpload } from '../helper/transport.mjs';
+import { createPlan } from '../lib/hybrid.mjs';
+import { temporary } from './fixtures.mjs';
 import { digest, SyncError } from '../lib/io.mjs';
 import { progressDetail } from '../ui/progress.js';
 
 const manifest = { format: 1, files: [], bytes: 0, digest: digest([]) };
 const stats = { sentBytes: 31006460, receivedBytes: 183831, literalBytes: 37960996, matchedBytes: 87200857, transferredFiles: 215 };
-function fixture({ failAt = 'inspect', resumePhase = 'transfer', resumed = {}, alwaysFail = false, busy = 0, loseBusyConnection = false } = {}) {
+function fixture({ failAt = 'hybrid-plan', resumePhase = 'transfer', resumed = {}, alwaysFail = false, busy = 0, loseBusyConnection = false } = {}) {
     const job = randomUUID(), dataset = randomUUID(), events = [], logs = [], waits = [];
     const base = 'a'.repeat(64);
+    const plan = createPlan({ job, dataset, generation: job, base, scope: null }, manifest, []);
+    const response = op => op === 'hybrid-plan' ? { plan } : { digest: manifest.digest, generation: job };
     let failed = false, reconnects = 0, now = 0;
     const session = { hello: { dataset, current: { digest: base } }, env: { jobBound: true }, log: line => logs.push(line),
         control: { async request(op) {
             events.push(op);
             if (alwaysFail || (!failed && op === failAt)) { failed = true; throw new SyncError('SSH', 'synthetic disconnected control'); }
-            return op === 'inspect' ? { changed: [], extra: [] } : { digest: manifest.digest, generation: job };
+            return response(op);
         } },
         async reconnect() {
             reconnects++; events.push('reconnect');
@@ -30,7 +34,7 @@ function fixture({ failAt = 'inspect', resumePhase = 'transfer', resumed = {}, a
                     return { job, direction: 'push', generation: job, base, phase: resumePhase, ...resumed };
                 }
                 if (alwaysFail) throw new SyncError('SSH', 'still disconnected');
-                return op === 'inspect' ? { changed: [], extra: [] } : { digest: manifest.digest, generation: job };
+                return response(op);
             } };
         },
     };
@@ -41,7 +45,7 @@ function fixture({ failAt = 'inspect', resumePhase = 'transfer', resumed = {}, a
     return { session, job, device, events, logs, waits, recovery, reconnects: () => reconnects };
 }
 
-const finalize = f => finalizeUpload(f.session, f.device, f.job, 'unused', manifest, stats, undefined, undefined, { recovery: f.recovery });
+const finalize = async f => finalizeUpload(f.session, f.device, f.job, (await temporary('hybrid-upload-reconnect')) + '/payload', manifest, stats, undefined, undefined, { recovery: f.recovery });
 const disconnected = () => Object.assign(new SyncError('PROCESS_FAILED', 'synthetic interrupted rsync'), { exitCode: 12, signal: null });
 
 test('a dead upload control reconnects only to the retained task and keeps the original transfer statistics', async () => {
@@ -49,20 +53,20 @@ test('a dead upload control reconnects only to the retained task and keeps the o
     const result = await finalize(f);
     assert.equal(result.digest, manifest.digest);
     assert.deepEqual(result.stats, { ...stats, reconnects: 1, interruptedTransfers: 0 });
-    assert.deepEqual(f.events, ['inspect', 'reconnect', 'begin', 'inspect', 'commit']);
+    assert.deepEqual(f.events, ['hybrid-plan', 'reconnect', 'begin', 'hybrid-plan', 'hybrid-descriptors', 'hybrid-apply', 'commit']);
     assert.equal(f.reconnects(), 1);
 });
 
 test('lost commit acknowledgement recovers a completed publication without another inspect or transfer', async () => {
     const f = fixture({ failAt: 'commit', resumePhase: 'done' });
     assert.equal((await finalize(f)).digest, manifest.digest);
-    assert.deepEqual(f.events, ['inspect', 'commit', 'reconnect', 'begin', 'commit']);
+    assert.deepEqual(f.events, ['hybrid-plan', 'hybrid-descriptors', 'hybrid-apply', 'commit', 'reconnect', 'begin', 'commit']);
 });
 
 test('finalizing publication recovery retries commit and a brief old-session lock is bounded', async () => {
     const f = fixture({ failAt: 'commit', resumePhase: 'finalizing', busy: 1 });
     assert.equal((await finalize(f)).digest, manifest.digest);
-    assert.deepEqual(f.events, ['inspect', 'commit', 'reconnect', 'begin', 'begin', 'commit']);
+    assert.deepEqual(f.events, ['hybrid-plan', 'hybrid-descriptors', 'hybrid-apply', 'commit', 'reconnect', 'begin', 'begin', 'commit']);
 });
 
 test('a different task, generation, base or phase cannot be claimed after reconnect', async () => {
