@@ -57,7 +57,7 @@ try {
     await verify(moduleRoot, expected); results.push({ test: 'read-only published module refuses uploads and remains intact' });
     const report = { status: 'passed', date: new Date().toISOString(), platform: process.platform, version, root, results,
         untested: ['SSH host-key authentication', 'Tailscale transfer', 'Real Linux dispatcher/flock', 'Android'] };
-    await atomicJson(path.join(PROJECT, 'docs/test-results/rsync-windows.json'), { ...report, root: '<isolated-test-directory>',
+    await atomicJson(process.env.TAVERNSYN_TEST_REPORT ?? path.join(PROJECT, 'docs/test-results/rsync-windows.json'), { ...report, root: '<isolated-test-directory>',
         publicationPrivacy: 'Temporary test path anonymized; no real user data or credentials are recorded.' });
     console.log(JSON.stringify(report, null, 2));
 } catch (error) { console.error(error.stack); await atomicJson(path.join(root, 'failure.json'), { error: error.message, results }); process.exitCode = 1; }

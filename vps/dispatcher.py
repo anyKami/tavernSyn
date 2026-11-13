@@ -97,13 +97,20 @@ def manifest_valid(value):
     return value
 
 
-def scan(root):
+def scan(root, ignore_partials=False):
     root = Path(root)
+    root_info = root.lstat()
+    check(stat.S_ISDIR(root_info.st_mode) and not stat.S_ISLNK(root_info.st_mode), "invalid scan root")
     files, seen = [], set()
 
     def visit(directory, prefix=""):
         for entry in sorted(directory.iterdir(), key=lambda p: p.name):
             relative = prefix + entry.name
+            info = entry.lstat()
+            check(not stat.S_ISLNK(info.st_mode) and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)), "symlink or special file rejected")
+            if ignore_partials and entry.name == ".tavernsyn-partial":
+                check(stat.S_ISDIR(info.st_mode), "invalid partial directory")
+                continue
             safe_relative(relative)
             folded = unicodedata.normalize("NFC", relative).lower()
             check(folded not in seen, "case/unicode collision")
@@ -441,8 +448,7 @@ class Store:
         job = self.own_job(message, device)
         check(job["phase"] == "transfer" and job["direction"] == "push", "not an upload")
         with Lock(self.private / "transfer.lock"):
-            self.clean_partials(Path(job["payload"]))
-            return difference(message["manifest"], scan(job["payload"]))
+            return difference(message["manifest"], scan(job["payload"], ignore_partials=True))
 
     @staticmethod
     def clean_partials(root):
@@ -474,7 +480,7 @@ class Store:
             stage = self.root / "incoming" / job["generation"]
             generation = self.root / "generations" / job["generation"]
             active_root = stage if stage.exists() else generation
-            self.clean_partials(active_root / "payload")
+            self.clean_partials(active_root / ("upload" if scope else "payload"))
             if not difference(manifest, scan(active_root / ("upload" if scope else "payload")))["equal"]:
                 if stage.exists():
                     job["phase"] = "transfer"
@@ -581,7 +587,7 @@ class Store:
             current = self.current()
             active = self.active()
             pending = {k: active[k] for k in ("job", "direction", "phase")} if active and active["device"] == device and active["phase"] not in ("done", "aborted") else None
-            return {"protocol": 1, "version": "0.2.9", "capabilities": ["paused-jobs", "job-bound-rsync", "scoped-sync-v1"], "dataset": self.format["dataset"],
+            return {"protocol": 1, "version": "0.2.12", "capabilities": ["paused-jobs", "job-bound-rsync", "scoped-sync-v1", "inspect-preserves-partials"], "dataset": self.format["dataset"],
                     "current": {k: current[k] for k in ("generation", "digest")} if current else None, "pending": pending}
         if op == "begin":
             return self.begin(message, device)

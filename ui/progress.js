@@ -25,5 +25,6 @@ export function progressDetail(status) {
     if (status.stats && Number.isFinite(status.stats.sentBytes)) {
         lines.push(`rsync 已发送 ${mib(status.stats.sentBytes)}，接收 ${mib(status.stats.receivedBytes)}；不含 SSH/Tailscale 封装。`);
     }
+    if (status.stats?.incompleteNetworkStats === true) lines.push('未包含部分中断尝试流量。');
     return lines.join('\n');
 }

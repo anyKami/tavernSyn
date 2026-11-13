@@ -57,7 +57,7 @@ const root = document.createElement('div'); root.id = 'tavernsyn-panel'; root.cl
 root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>TavernSyn 跨设备同步</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
 <div class="inline-drawer-content"><p class="ts-device"></p><p class="ts-phase" role="status">正在连接同步助手……</p>
 <div class="ts-actions"><button class="menu_button ts-push">推送到 VPS</button><button class="menu_button ts-pull">从 VPS 拉取</button>
-<button type="button" class="menu_button ts-resume-upload" hidden>继续上次上传</button><button type="button" class="menu_button ts-resume-apply" hidden>继续应用已下载文件</button></div>
+<button type="button" class="menu_button ts-resume-download" hidden>继续上次下载</button><button type="button" class="menu_button ts-resume-upload" hidden>继续上次上传</button><button type="button" class="menu_button ts-resume-apply" hidden>继续应用已下载文件</button></div>
 <button type="button" class="menu_button ts-reconcile" hidden>核对同步结果</button>
 <fieldset class="ts-scope"><legend>仅同步所选内容（增量传输，包含删除）</legend>
 <div class="ts-scope-options"><label><input type="checkbox" name="scope" value="chats" checked>聊天记录（含群聊）</label><label><input type="checkbox" name="scope" value="characters" checked>角色卡</label><label><input type="checkbox" name="scope" value="worlds" checked>世界书</label></div>
@@ -137,6 +137,7 @@ function render() {
     const terminal = ['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
     for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy;
     for (const checkbox of root.querySelectorAll('.ts-scope input')) checkbox.disabled = !terminal || starting || setupBusy;
+    root.querySelector('.ts-resume-download').hidden = !status.canResumeDownload;
     root.querySelector('.ts-resume-upload').hidden = !(status.phase === 'FAILED' && !status.commit && status.direction === 'push' && status.snapshotReady === true);
     root.querySelector('.ts-resume-upload').disabled ||= !status.managed;
     root.querySelector('.ts-reconcile').hidden = !(status.maintenancePending || (status.phase === 'FAILED' && status.direction === 'push' && status.snapshotReady));
@@ -184,6 +185,13 @@ root.querySelector('.ts-resume-upload').onclick = async () => {
         const started = await api('resume-upload', { id: status.id, tab });
         status = { ...status, ...started, error: null, progress: null }; starting = false; render();
     } catch (error) { showError(error); }
+};
+root.querySelector('.ts-resume-download').onclick = async () => {
+    if (starting || setupBusy) return;
+    starting = true; localError = ''; render();
+    try { const started = await api('resume-download', { id: status.id, tab }); status = { ...status, ...started, error: null, progress: null }; }
+    catch (error) { showError(error); }
+    finally { starting = false; render(); }
 };
 async function resumePending() {
     if (starting || setupBusy || status.phase !== 'PENDING_APPLY' || !status.managed) return;

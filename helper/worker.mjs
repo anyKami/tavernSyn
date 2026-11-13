@@ -8,12 +8,13 @@ try {
     syncLog = createSyncLog(device.state);
     const manager = new Manager(device, null, undefined, syncLog);
     process.on('message', async message => {
-        if (!message?.actionId || !['confirm', 'cancel'].includes(message.action)) return;
+        if (!message?.actionId || !['confirm', 'cancel', 'status'].includes(message.action)) return;
         try { process.send?.({ actionId: message.actionId, result: await manager.action(message.action, message.payload) }); }
         catch (error) { process.send?.({ actionId: message.actionId, error: { code: error.code ?? 'WORKER', message: error.code ? error.message : '下载操作未完成。' } }); }
     });
     const task = JSON.parse(process.env.TAVERNSYN_TASK);
-    const result = await manager.start(task);
+    const result = process.env.TAVERNSYN_ACTION === 'resume-download'
+        ? await manager.action('resume-download', task) : await manager.start(task);
     process.send?.({ result });
     await manager.done;
 } catch (error) {

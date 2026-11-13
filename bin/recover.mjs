@@ -35,7 +35,7 @@ export async function recoverStopped(device) {
         }
         if (!['SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'IDLE'].includes(status.phase)) {
             const needsRollback = journal && !['committed', 'rolled-back'].includes(journal.phase);
-            await atomicJson(statusFile, { ...status, phase: needsRollback ? 'RECOVERY_REQUIRED' : 'FAILED', error: { code: 'INTERRUPTED', message: needsRollback ? '已清理死进程锁；受控启动将先恢复未完成替换。' : '上次任务中断，已确认进程退出。可恢复或中止原远端任务。' } });
+            await atomicJson(statusFile, { ...status, failurePhase: status.phase, phase: needsRollback ? 'RECOVERY_REQUIRED' : 'FAILED', error: { code: 'INTERRUPTED', message: needsRollback ? '已清理死进程锁；受控启动将先恢复未完成替换。' : '上次任务中断，已确认进程退出。可恢复或中止原远端任务。' } });
         }
     }
 }

@@ -111,7 +111,7 @@ export async function executeScoped(manager) {
             await copyTree(path.join(old.jobRoot, 'payload'), payload);
             await atomicJson(path.join(root, 'manifest.json'), manifest);
             downloaded = { generation: old.remote.generation, digest: old.remote.digest, manifest, stats: old.stats };
-        } else downloaded = await m.transport.pull(session, device, m.job.id, payload, m.progress, onBegin, { scope, onPlan: m.reportTransfer });
+        } else downloaded = await m.transport.pull(session, device, m.job.id, payload, m.progress, onBegin, { scope, onPlan: m.reportTransfer, resume: m.downloadResume });
         remoteBegun = false;
         await verify(payload, downloaded.manifest); await validateContent(payload, downloaded.manifest, { scope });
         metadata = selectedMetadata(await readJson(path.join(payload, 'environment.json')), scope, downloaded.manifest);

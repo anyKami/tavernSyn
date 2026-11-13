@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { requireThat, SyncError } from '../lib/io.mjs';
+import { requireThat, SyncError, canonical } from '../lib/io.mjs';
 import { validateManifest } from '../lib/manifest.mjs';
 import { normalizeScope, sameScope } from '../lib/scope.mjs';
 
@@ -16,18 +16,19 @@ export function retryableDownloadError(error) {
 
 // One budget covers the initial transfer and all targeted corrections. A retry
 // never rebuilds the local basis or claims a new remote publication.
-export function createDownloadRecovery(session, device, job, begun, { scope = null, wait = delay } = {}) {
+export function createDownloadRecovery(session, device, job, begun, { scope = null, wait = delay, now = Date.now, onInterrupted } = {}) {
     scope = normalizeScope(scope);
     requireThat(begun.job === job && begun.direction === 'pull' && ['transfer', 'done'].includes(begun.phase) && sameScope(begun.scope, scope),
     'REMOTE_PROTOCOL', 'VPS 下载回执与请求的任务、方向或范围不一致。');
     const pinned = {
         dataset: session.hello.dataset ?? device.remote.dataset,
-        generation: begun.generation, digest: validateManifest(begun.manifest).digest,
+        generation: begun.generation, manifest: canonical(validateManifest(begun.manifest)),
         base: begun.base ?? null, publicationDigest: begun.publicationDigest, environment: begun.environment,
     };
     const maxReconnects = 5;
-    let reconnects = 0, interruptedTransfers = 0;
+    let reconnects = 0, interruptedTransfers = 0, busyWait = 0, busyLogged = false;
     return {
+        get reconnects() { return reconnects; },
         async run(operation) {
             let reconnect = false;
             for (;;) {
@@ -43,13 +44,20 @@ export function createDownloadRecovery(session, device, job, begun, { scope = nu
                         requireThat(session.env.jobBound === true
                             && (!session.env.remote || session.env.remote.dataset === pinned.dataset),
                         'REMOTE_PROTOCOL', '重连后的 VPS 身份或任务绑定能力改变，已停止下载。');
-                        const resumed = await session.control.request('begin', {
-                            job, dataset: pinned.dataset, direction: 'pull', jobBound: true, resumeOnly: true,
-                            ...(scope ? { scope } : {}),
-                        });
+                        let resumed;
+                        for (;;) {
+                            try { resumed = await session.control.request('begin', { job, dataset: pinned.dataset, direction: 'pull', jobBound: true, resumeOnly: true, ...(scope ? { scope } : {}) }); break; }
+                            catch (error) {
+                                if (error.code !== 'BUSY') throw error;
+                                if (busyWait >= 150000) { session.log?.('VPS 持续占用，累计等待已达 150 秒；保留原任务。'); throw error; }
+                                if (!busyLogged) { session.log?.('VPS 仍有传输进程，正在同一连接等待释放（最多 150 秒）。'); busyLogged = true; }
+                                const duration = Math.min(2000, 150000 - busyWait), start = now();
+                                await wait(duration); busyWait += Math.max(duration, now() - start);
+                            }
+                        }
                         requireThat(resumed.job === job && resumed.direction === 'pull' && resumed.phase === 'transfer'
                             && resumed.generation === pinned.generation && (resumed.base ?? null) === pinned.base
-                            && sameScope(resumed.scope, scope) && validateManifest(resumed.manifest).digest === pinned.digest
+                            && sameScope(resumed.scope, scope) && canonical(validateManifest(resumed.manifest)) === pinned.manifest
                             && (!scope || (resumed.publicationDigest === pinned.publicationDigest && resumed.environment === pinned.environment)),
                         'REMOTE_PROTOCOL', 'VPS 续接回执与原下载任务、代次或清单不一致，已停止下载。');
                         reconnect = false; reclaiming = false;
@@ -60,14 +68,14 @@ export function createDownloadRecovery(session, device, job, begun, { scope = nu
                     transferring = true;
                     return await operation();
                 } catch (error) {
+                    if (transferring) { interruptedTransfers++; await onInterrupted?.(); }
                     if (!reclaiming && session.control.intentional) throw error;
-                    const recoverable = retryableDownloadError(error) || (reclaiming && error.code === 'BUSY');
+                    const recoverable = retryableDownloadError(error);
                     if (!recoverable || session.env.jobBound !== true || typeof session.reconnect !== 'function') throw error;
                     if (reconnects >= maxReconnects) {
                         session.log?.('下载自动重连已达 5 次，停止本次下载并保留暂存和断点。');
                         throw error;
                     }
-                    if (transferring) interruptedTransfers++;
                     reconnect = true;
                 }
             }

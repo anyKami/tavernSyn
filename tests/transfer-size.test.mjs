@@ -5,10 +5,14 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
-import { fixture, MemoryTransport, FakeLifecycle, phase, handoff } from './fixtures.mjs';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { PassThrough } from 'node:stream';
+import { fixture, MemoryTransport, FakeLifecycle, handoff } from './fixtures.mjs';
 import { scan, transferSummary } from '../lib/manifest.mjs';
 import { copyTree } from '../lib/manifest.mjs';
-import { readJson, SyncError } from '../lib/io.mjs';
+import { atomicJson, readJson, SyncError } from '../lib/io.mjs';
+import { snapshot } from '../lib/snapshot.mjs';
 import * as transport from '../helper/transport.mjs';
 import { Manager } from '../helper/manager.mjs';
 import { progressDetail } from '../ui/progress.js';
@@ -27,8 +31,8 @@ test('upload obtains receiver differences and waits before touching the rsync en
     const device = await fixture(), payload = path.join(device.root, 'payload'); await fs.mkdir(payload);
     await fs.writeFile(path.join(payload, 'new'), '12345'); await fs.writeFile(path.join(payload, 'unchanged'), 'already present');
     const manifest = await scan(payload), calls = [];
-    const session = { hello: { current: null }, get env() { return { get rsync() { assert.fail('must report size before starting rsync'); } }; }, control: { request: async op => {
-        calls.push(op); if (op === 'begin') return { phase: 'transfer' };
+    const session = { hello: { current: null, capabilities: ['inspect-preserves-partials'] }, get env() { return { get rsync() { assert.fail('must report size before starting rsync'); } }; }, control: { request: async (op, fields) => {
+        calls.push(op); if (op === 'begin') return { job: fields.job, direction: fields.direction, generation: fields.job, base: null, phase: 'transfer' };
         if (op === 'inspect') return { changed: ['new'], extra: ['deleted'] };
         assert.fail('Unexpected remote mutation');
     } } };
@@ -39,7 +43,7 @@ test('upload obtains receiver differences and waits before touching the rsync en
 });
 
 for (const scoped of [false, true]) test(`${scoped ? 'selected' : 'complete'} download compares pinned source to the local basis before transfer`, async () => {
-    const device = await fixture(), source = path.join(device.root, 'source'), payload = path.join(device.root, 'payload');
+    const device = await fixture(), job = randomUUID(), source = path.join(device.root, 'source'), payload = path.join(device.state, 'jobs', job, 'payload');
     await fs.mkdir(path.join(source, 'profile/worlds'), { recursive: true });
     await fs.writeFile(path.join(source, 'profile/worlds/changed.json'), 'BBBB');
     await fs.writeFile(path.join(source, 'profile/worlds/unchanged.json'), 'same');
@@ -48,16 +52,21 @@ for (const scoped of [false, true]) test(`${scoped ? 'selected' : 'complete'} do
     await copyTree(source, payload); await fs.unlink(path.join(payload, 'profile/worlds/新增.json'));
     await fs.writeFile(path.join(payload, 'profile/worlds/changed.json'), 'AAAA');
     await fs.writeFile(path.join(payload, 'profile/worlds/deleted.json'), 'local only, not downloaded');
+    const partial = path.join(payload, 'profile/worlds/.tavernsyn-partial/changed.json');
+    await fs.mkdir(path.dirname(partial)); await fs.writeFile(partial, 'BB');
     const manifest = await scan(source), generation = randomUUID(), calls = [];
     const session = { hello: { capabilities: ['scoped-sync-v1'] }, env: { jobBound: true, get rsync() { assert.fail('must report size before starting rsync'); } }, control: { request: async op => {
         calls.push(op); assert.equal(op, 'begin');
-        return { phase: 'transfer', generation, manifest, scope: scoped ? ['worlds'] : undefined, environment, publicationDigest: 'a'.repeat(64) };
+        return { job, direction: 'pull', base: null, phase: 'transfer', generation, manifest, scope: scoped ? ['worlds'] : undefined, environment, publicationDigest: 'a'.repeat(64) };
     } } };
-    await assert.rejects(transport.pull(session, device, randomUUID(), payload, null, null, { scope: scoped ? ['worlds'] : null, onPlan: async plan => {
+    await assert.rejects(transport.pull(session, device, job, payload, null, null, { scope: scoped ? ['worlds'] : null, onPlan: async plan => {
         assert.deepEqual(plan, { files: 2, bytes: 9 }); throw cancelled();
     } }), { code: 'CANCELLED' });
     assert.deepEqual(calls, ['begin']);
     assert.equal(await fs.readFile(path.join(payload, 'profile/worlds/changed.json'), 'utf8'), 'AAAA');
+    assert.equal(await fs.readFile(partial, 'utf8'), 'BB');
+    await assert.rejects(scan(payload), { code: 'FILENAME' });
+    assert.equal((await readJson(path.join(path.dirname(payload), 'download-resume.json'))).state, 'transferring');
 });
 
 class PlannedTransport extends MemoryTransport {
@@ -132,3 +141,69 @@ test('a disconnected download worker rejects the action and releases listeners',
     await assert.rejects(workerAction(child, 'cancel', { id: randomUUID() }), { code: 'WORKER' });
     assert.equal(child.listenerCount('message'), 0); assert.equal(child.listenerCount('exit'), 0);
 });
+
+for (const [direction, scope] of [['push', null], ['pull', null], ['pull', ['worlds']]]) {
+    test(`${scope ? 'scoped ' : ''}${direction} preserves only completed rsync statistics after corrective transfer fails`, async t => {
+        const device = await fixture(), source = await fixture();
+        await atomicJson(path.join(source.dataRoot, source.profile, 'worlds/book.json'), { entries: { one: { content: 'remote fixture' } } });
+        const sourcePayload = path.join(source.root, 'payload'), { manifest } = await snapshot(source, sourcePayload, { scope });
+        const environment = await fs.readFile(path.join(sourcePayload, 'environment.json'), 'utf8');
+        const jobFile = 'profile/worlds/book.json', generation = randomUUID(), publicationDigest = 'a'.repeat(64);
+        const spawn = childProcess.spawn, rsync = path.join(device.root, 'rsync-fixture');
+        t.mock.method(childProcess, 'spawn', (executable, args, options) => {
+            if (executable !== rsync) return spawn(executable, args, options);
+            const child = new EventEmitter();
+            child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+            queueMicrotask(() => {
+                const correction = args.includes('--ignore-times');
+                if (!correction) child.stdout.write('Total bytes sent: 123\nTotal bytes received: 45\nLiteral data: 12 bytes\nMatched data: 0 bytes\nNumber of regular files transferred: 1\n');
+                child.emit('close', correction ? 12 : 0, null);
+            });
+            return child;
+        });
+        syncBuiltinESMExports();
+        t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+        let reconnects = 0;
+        const remote = {
+            ...transport,
+            async catalog() { return { generation, digest: publicationDigest, scope, manifest, environment }; },
+            async connect() {
+                return {
+                    env: { jobBound: true, deviceId: device.deviceId, rsync, posix: async file => file, rsh: '' },
+                    hello: { dataset: device.remote.dataset, current: { generation, digest: publicationDigest },
+                        capabilities: ['scoped-sync-v1', 'inspect-preserves-partials', 'job-bound-rsync'] },
+                    log() {},
+                    async reconnect() { reconnects++; throw new SyncError('PERMISSION', 'cannot reauthenticate synthetic receiver'); },
+                    control: { close() {}, async request(op, fields) {
+                        if (op === 'begin') return { job: fields.job, direction, generation: direction === 'push' ? fields.job : generation,
+                            base: publicationDigest, manifest, phase: 'transfer', ...(scope ? { scope, environment, publicationDigest } : {}) };
+                        if (op === 'inspect') return { changed: [jobFile], extra: [] };
+                        assert.fail(`a failed correction cannot ${op}`);
+                    } },
+                };
+            },
+            async pull(session, currentDevice, id, payload, progress, onBegin, options) {
+                return transport.pull(session, currentDevice, id, payload, progress, async receipt => {
+                    await onBegin(receipt);
+                    await copyTree(sourcePayload, payload);
+                    const file = path.join(payload, jobFile), contents = await fs.readFile(file), original = await fs.stat(file);
+                    contents[1] ^= 1;
+                    await fs.writeFile(file, contents);
+                    await fs.utimes(file, original.atime, original.mtime);
+                }, options);
+            },
+        };
+        const manager = new Manager(device, direction === 'push' ? new FakeLifecycle() : null, remote);
+        await manager.start({ direction, tab: randomUUID(), scope });
+        if (direction === 'push') await handoff(manager);
+        await manager.done;
+        const status = await manager.status();
+        assert.equal(status.phase, 'FAILED', JSON.stringify(status));
+        assert.equal(status.error.code, 'PERMISSION');
+        assert.equal(reconnects, 1);
+        assert.equal(status.stats.sentBytes, 123);
+        assert.equal(status.stats.receivedBytes, 45);
+        assert.equal(status.stats.incompleteNetworkStats, true);
+        assert.match(progressDetail(status), /未包含部分中断尝试流量/);
+    });
+}

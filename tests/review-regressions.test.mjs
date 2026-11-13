@@ -45,6 +45,45 @@ test('unmanaged download does not build candidates or run npm, controlled contin
     assert.equal((await controlled.status()).phase, 'SUCCEEDED'); assert.equal(await fs.readFile(counter, 'utf8'), 'install\n');
 });
 
+for (const terminal of ['FAILED', 'SUCCEEDED']) {
+    test(`progress flood cannot overwrite durable ${terminal} after a slow status write`, async t => {
+        const device = await fixture(), statusFile = path.join(device.state, 'status.json');
+        const manager = new Manager(device, null);
+        manager.job = { id: randomUUID(), direction: 'pull' };
+        manager.busy = true;
+        await manager.write('DOWNLOADING');
+        const rename = fs.rename;
+        let entered, release, writes = 0;
+        const writing = new Promise(resolve => { entered = resolve; });
+        const unblock = new Promise(resolve => { release = resolve; });
+        t.mock.method(fs, 'rename', async (from, to) => {
+            if (to === statusFile && ++writes === 1) {
+                entered();
+                await unblock;
+            }
+            return rename(from, to);
+        });
+        manager.progress({ logicalBytes: 1 });
+        try {
+            await writing;
+            for (let index = 2; index <= 5000; index++) manager.progress({ logicalBytes: index });
+            assert.equal((await manager.status()).progress.logicalBytes, 5000);
+            const transferred = manager.progress({ stage: 'transferred', stats: { receivedBytes: 42 } });
+            const finished = manager.write(terminal);
+            assert.equal((await manager.status()).phase, terminal, 'status reflects the live state while disk is blocked');
+            assert.equal((await readJson(statusFile)).phase, 'DOWNLOADING');
+            release();
+            await Promise.all([transferred, finished]);
+        } finally { release(); }
+        assert.equal(writes, 3, 'one coalesced progress write plus transfer and terminal writes');
+        manager.busy = false;
+        assert.equal((await readJson(statusFile)).phase, terminal);
+        assert.equal((await manager.status()).progress.stage, 'transferred');
+        await atomicJson(statusFile, { phase: 'IDLE' });
+        assert.equal((await manager.status()).phase, 'IDLE', 'idle status can see another process updating the file');
+    });
+}
+
 test('cross-platform executable attachments are data; plugin runtime binaries still need matching platform', async () => {
     const device = await fixture();
     await fs.mkdir(path.join(device.dataRoot, device.profile, 'files'));

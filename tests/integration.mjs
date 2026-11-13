@@ -6,6 +6,7 @@ import net from 'node:net';
 import http from 'node:http';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -14,7 +15,11 @@ import { PROJECT, loadDevice } from '../lib/device.mjs';
 import { atomicJson, digest, readJson, run, exists, removeOwned } from '../lib/io.mjs';
 import { install } from '../bin/install.mjs';
 import { recoverDownload } from '../bin/recover-download.mjs';
+import { recoverStopped } from '../bin/recover.mjs';
 import { Manager } from '../helper/manager.mjs';
+import { connectionId } from '../lib/completion.mjs';
+import { snapshot } from '../lib/snapshot.mjs';
+import { verify } from '../lib/manifest.mjs';
 import { createSyncLog } from '../helper/sync-log.mjs';
 import { ST, YAML, MemoryTransport, phase } from './fixtures.mjs';
 
@@ -137,6 +142,153 @@ async function handoff() {
     await api('page', { id: job.id, tab: job.tab, ticket: waiting.ticket });
     await manager.done; assert.equal((await manager.status()).phase, 'SUCCEEDED', JSON.stringify(await manager.status()));
     epoch = lifecycle.nonce; await login();
+}
+async function unmanagedRecovery() {
+    const helper = path.join(repository, 'helper/transport.mjs');
+    await fs.rename(helper, path.join(repository, 'helper/transport-original.mjs'));
+    // Use the installed worker and CLI with a local control double. Every byte
+    // of the done-stage payload is still checked by production pull().
+    await fs.writeFile(helper, `
+        import fs from 'node:fs/promises';
+        import path from 'node:path';
+        export * from './transport-original.mjs';
+        export async function connect(device) {
+            return {
+                hello: { current: { digest: 'b'.repeat(64) }, dataset: device.remote.dataset, capabilities: ['scoped-sync-v1', 'job-bound-rsync'] },
+                env: { jobBound: true, get rsync() { throw Error('Verified done jobs must not transfer'); } },
+                control: { close() {}, async request(op, fields) {
+                    await fs.appendFile(path.join(device.state, 'fixture-control.jsonl'), JSON.stringify({ op, ...fields }) + '\\n');
+                    if (op === 'abort') return {};
+                    if (fields.direction === 'push' && op === 'begin') {
+                        const receipt = JSON.parse(await fs.readFile(path.join(device.state, 'jobs', fields.job, 'publication-fixture.json')));
+                        if (JSON.stringify(fields.scope ?? null) !== JSON.stringify(receipt.scope)) throw Error('Incorrect upload scope');
+                        return { job: fields.job, direction: 'push', generation: fields.job, phase: 'finalizing', base: fields.base, scope: receipt.scope };
+                    }
+                    if (op === 'commit') return JSON.parse(await fs.readFile(path.join(device.state, 'jobs', fields.job, 'publication-fixture.json')));
+                    if (op !== 'begin' || !fields.resumeOnly) throw Error('Only retained tasks are accepted');
+                    const record = JSON.parse(await fs.readFile(path.join(device.state, 'jobs', fields.job, 'download-resume.json')));
+                    if (JSON.stringify(fields.scope) !== JSON.stringify(record.scope)) throw Error('Incorrect scope');
+                    return { ...record, phase: 'done' };
+                } },
+            };
+        }
+    `);
+    const statusFile = path.join(state, 'status.json'), trace = path.join(state, 'fixture-control.jsonl');
+    const scope = ['worlds'];
+    const seed = async () => {
+        const job = randomUUID(), generation = randomUUID(), connection = connectionId(device);
+        const jobRoot = path.join(state, 'jobs', job), payload = path.join(jobRoot, 'payload');
+        const { manifest } = await snapshot(device, payload, { scope });
+        const environment = await fs.readFile(path.join(payload, 'environment.json'), 'utf8');
+        const binding = { format: 1, job, generation, connection, direction: 'pull', dataset: device.remote.dataset,
+            scope, base: 'a'.repeat(64), publicationDigest: 'a'.repeat(64), environment, manifest, state: 'verified' };
+        const status = { id: job, phase: 'FAILED', failurePhase: 'DOWNLOADING', direction: 'pull', scope, connection,
+            preview: false, remoteJob: job, error: { code: 'SSH' } };
+        await atomicJson(statusFile, status);
+        await atomicJson(path.join(jobRoot, 'download-resume.json'), binding);
+        return { status, binding, jobRoot };
+    };
+    const fixtureJob = await seed();
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: fixture, windowsHide: true, stdio: 'ignore',
+        env: { ...process.env, TAVERNSYN_STATE: state, NODE_ENV: 'production' },
+    });
+    const closed = once(child, 'close');
+    const until = async callback => {
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline) {
+            const value = await callback().catch(() => undefined);
+            if (value) return value;
+            assert.equal(child.exitCode, null, 'unmanaged fixture exited');
+            await delay(100);
+        }
+        assert.fail('unmanaged fixture did not reach the expected state');
+    };
+    try {
+        epoch = undefined;
+        jar.clear();
+        const response = await until(async () => {
+            const probe = await request('/csrf-token', { token: null });
+            return probe.ok && probe;
+        });
+        csrf = (await response.json()).token;
+        assert.equal((await request('/api/users/login', { method: 'POST', body: { handle: 'default-user', password: '' } })).status, 200);
+        const failed = await api('status');
+        assert.equal(failed.managed, false);
+        assert.equal(failed.canResumeDownload, true);
+        epoch = failed.epoch;
+        assert.equal((await api('resume-download', { id: fixtureJob.status.id, tab: randomUUID() })).id, fixtureJob.status.id);
+        const pending = await until(async () => {
+            const current = await api('status');
+            return current.phase === 'PENDING_APPLY' && !await exists(path.join(state, 'operation.lock')) && current;
+        });
+        assert.equal(pending.id, fixtureJob.status.id);
+        assert.equal(pending.remote.generation, fixtureJob.binding.generation);
+        assert.equal(await exists(path.join(fixtureJob.jobRoot, 'candidate')), false);
+        assert.equal(await exists(path.join(state, 'operation.lock')), false);
+    } finally {
+        if (child.exitCode === null) child.kill();
+        await closed;
+        await recoverStopped(device);
+    }
+    checks.push('Native unmanaged ST resumes the authenticated original download in a real worker and stages it for controlled application');
+    const cli = (job, action, onOutput) => run(process.execPath,
+        [path.join(repository, 'bin/remote-job.mjs'), '--state', state, '--job', job, '--action', action], { onOutput });
+    const cliResume = await seed();
+    await cli(cliResume.status.id, 'resume');
+    const pending = await readJson(statusFile);
+    assert.equal(pending.phase, 'PENDING_APPLY');
+    assert.deepEqual(pending.scope, scope);
+    assert.equal(pending.remote.digest, cliResume.binding.publicationDigest);
+    assert.equal(pending.remote.snapshotDigest, cliResume.binding.manifest.digest);
+    const cliAbort = await seed();
+    await cli(cliAbort.status.id, 'abort');
+    assert.equal((await readJson(statusFile)).remoteJob, null);
+    const unbound = await seed();
+    await fs.unlink(path.join(unbound.jobRoot, 'download-resume.json'));
+    let diagnostic = '';
+    await assert.rejects(cli(unbound.status.id, 'resume', output => { diagnostic += output; }), { code: 'PROCESS_FAILED', exitCode: 1 });
+    assert.match(diagnostic, /重新拉取/);
+    const requests = (await fs.readFile(trace, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(requests.map(({ op, job, resumeOnly, scope }) => ({ op, job, resumeOnly, scope })), [
+        ...[fixtureJob, cliResume, cliAbort].map(item => ({ op: 'begin', job: item.status.id, resumeOnly: true, scope })),
+        { op: 'abort', job: cliAbort.status.id, resumeOnly: undefined, scope: undefined },
+    ]);
+    checks.push('Scoped CLI resume and abort claim the original task and reject old incomplete downloads before sending a begin request');
+    const baseline = path.join(state, 'baseline.json'), cache = path.join(state, 'cache/payload');
+    const baselineBytes = await fs.readFile(baseline);
+    await fs.mkdir(cache, { recursive: true });
+    const previousCache = path.join(cache, 'fixture-cache-marker');
+    await fs.writeFile(previousCache, 'previous full cache');
+    for (const uploadScope of [scope, null]) {
+        const id = randomUUID(), jobRoot = path.join(state, 'jobs', id), payload = path.join(jobRoot, 'payload');
+        const { manifest } = await snapshot(device, payload, { scope: uploadScope });
+        await atomicJson(path.join(jobRoot, 'manifest.json'), manifest);
+        const receipt = { generation: id, scope: uploadScope, digest: uploadScope ? 'd'.repeat(64) : manifest.digest,
+            ...(uploadScope ? { snapshotDigest: manifest.digest, maintenance: ['category-staging'] } : {}) };
+        await atomicJson(path.join(jobRoot, 'publication-fixture.json'), receipt);
+        await atomicJson(statusFile, { id, direction: 'push', phase: 'FAILED', connection: connectionId(device),
+            remoteBase: { digest: 'b'.repeat(64) }, ...(uploadScope ? { scope: uploadScope } : {}) });
+        await cli(id, 'resume');
+        const published = await readJson(statusFile);
+        const outcome = await readJson(path.join(jobRoot, 'outcome.json'));
+        assert.equal(published.phase, 'SUCCEEDED');
+        assert.equal(published.maintenancePending, false, JSON.stringify(published));
+        assert.equal(published.remote.digest, receipt.digest);
+        assert.equal(outcome.cache, !uploadScope);
+        if (uploadScope) {
+            assert.equal(published.remote.snapshotDigest, manifest.digest);
+            assert.deepEqual(published.remote.maintenance, ['category-staging']);
+            assert.deepEqual(published.maintenance, { pending: [], remote: ['category-staging'] });
+            assert.deepEqual(await fs.readFile(baseline), baselineBytes);
+            assert.equal(await fs.readFile(previousCache, 'utf8'), 'previous full cache');
+        } else {
+            assert.equal(await exists(previousCache), false);
+            await verify(cache, manifest);
+            assert.equal((await readJson(baseline)).remote.digest, manifest.digest);
+        }
+    }
+    checks.push('CLI scoped upload finishes without local maintenance and preserves the full cache and baseline, while a full upload replaces both');
 }
 try {
     await lifecycle.start(); await login();
@@ -272,6 +424,17 @@ try {
     checks.push('A real saved push remains successful after cache ENOSPC and unreadable history; its status API stays accessible and authenticated reconciliation repairs records without another restart or publication');
     await fs.writeFile(path.join(fixture, 'data/default-user/worlds/local-only.json'), '{"entries":{}}');
     const normalPull = remote.pull.bind(remote), prePullEpoch = lifecycle.nonce;
+    const unavailableResume = await request('/api/plugins/tavernsyn/resume-download', {
+        method: 'POST', body: { id: randomUUID(), tab },
+    });
+    assert.equal(unavailableResume.status, 409);
+    assert.equal((await unavailableResume.json()).error, 'DOWNLOAD_BINDING');
+    const injectedResume = await request('/api/plugins/tavernsyn/start', {
+        method: 'POST', body: { direction: 'pull', tab, resume: { id: randomUUID() } },
+    });
+    assert.equal(injectedResume.status, 400);
+    assert.equal((await injectedResume.json()).error, 'INPUT');
+    checks.push('Authenticated ST routes download resume to the Manager and rejects internal state in a start request');
     remote.pull = async (...args) => {
         await normalPull(...args);
         throw Object.assign(new Error('synthetic legacy control disconnect after verified download'), { code: 'SSH' });
@@ -410,11 +573,12 @@ try {
     assert.equal((await hanging.exit).code, 1); assert.ok(Date.now() - hangAt < 10000);
     assert.equal(await exists(path.join(state, 'instance.lock')), false);
     checks.push('A synthetic hanging plugin cleanup cannot keep the server alive after terminal close; the bounded exit retains recovery data');
+    await unmanagedRecovery();
     checks.push('All actual fixture children exited; no real user data accessed or changed');
     const result = { status: 'passed', date: new Date().toISOString(), platform: process.platform, node: process.version, root, port, checks,
         transport: 'MemoryTransport simulation; NOT real rsync/SSH/VPS', untested: ['Android Termux', 'Linux SSH dispatcher under real rsync load', 'Browser interaction unless separately recorded', 'Third-party plugin coexistence'] };
     await atomicJson(path.join(root, 'results.json'), result);
-    await atomicJson(path.join(PROJECT, 'docs/test-results/implementation-windows.json'), { ...result, root: '<isolated-test-directory>',
+    await atomicJson(process.env.TAVERNSYN_TEST_REPORT ?? path.join(PROJECT, 'docs/test-results/implementation-windows.json'), { ...result, root: '<isolated-test-directory>',
         publicationPrivacy: 'Temporary test path anonymized; raw results stay with the isolated fixture.' });
     console.log(JSON.stringify(result, null, 2));
 } catch (error) {

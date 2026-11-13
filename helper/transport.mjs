@@ -5,14 +5,16 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { checkRemoteConfig, uuidPattern } from '../lib/device.mjs';
 import { readPassword } from '../lib/connection.mjs';
-import { atomicJson, exists, noLinks, readJson, requireThat, run, SyncError, removeOwned } from '../lib/io.mjs';
+import { atomicJson, exists, noLinks, readJson, requireThat, run, SyncError, removeOwned, canonical, renamePath } from '../lib/io.mjs';
 import { copyTree, difference, scan, transferSummary, validateManifest, verify } from '../lib/manifest.mjs';
 import { enoughSpace } from '../lib/content.mjs';
 import { rsyncOutputLog } from './sync-log.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { seedDownloadBasis } from '../lib/download-basis.mjs';
 import { normalizeScope, sameScope, inScope } from '../lib/scope.mjs';
-import { createDownloadRecovery, permanentTransportFailure } from './download-reconnect.mjs';
+import { createDownloadRecovery, permanentTransportFailure, retryableDownloadError } from './download-reconnect.mjs';
+import { connectionId } from '../lib/completion.mjs';
+import { validateDownloadBinding, bindingMatches, loadDownloadBinding } from './download-binding.mjs';
 
 export const RSYNC_ARGS = ['-rt', '--compress', '--omit-dir-times', '--no-whole-file', '--delete-delay', '--partial-dir=.tavernsyn-partial', '--fsync', '--info=progress2,stats2', '--stats', '--itemize-changes', '--8-bit-output', '--outbuf=L', '--timeout=120', '--modify-window=0'];
 const ALIAS = 'tavernsyn-vps';
@@ -153,6 +155,30 @@ export async function connect(device, makeEnvironment = environment, log = () =>
         return session;
     } catch (error) { control.close(); throw error; }
 }
+async function writeScopedEnvironment(payload, content) {
+    const root = path.dirname(payload), target = path.join(payload, 'environment.json');
+    await noLinks(target);
+    if (await exists(target)) requireThat((await fs.lstat(target)).isFile(), 'DOWNLOAD_BINDING', '分类元数据路径不是普通文件。');
+    const temp = path.join(root, `environment-${randomUUID()}.tmp`);
+    let created = false, renamed = false;
+    try {
+        const handle = await fs.open(temp, 'wx', 0o600); created = true;
+        try { await handle.writeFile(content, 'utf8'); await handle.sync(); }
+        finally { await handle.close(); }
+        await noLinks(target);
+        await renamePath(temp, target); renamed = true;
+        if (process.platform !== 'win32') {
+            for (const directory of [payload, root]) {
+                const handle = await fs.open(directory, 'r');
+                try { await handle.sync(); } finally { await handle.close(); }
+            }
+        }
+    } catch (error) {
+        if (created && !renamed) await fs.unlink(temp).catch(() => {});
+        if (renamed) error.atomicCommitted = true;
+        throw error;
+    }
+}
 async function partialCleanup(root) {
     for (const entry of await fs.readdir(root, { withFileTypes: true })) {
         const full = path.join(root, entry.name);
@@ -209,116 +235,138 @@ function addStats(first, second) {
     if (!second) return first;
     return { ...first, ...Object.fromEntries(['sentBytes', 'receivedBytes', 'literalBytes', 'matchedBytes', 'transferredFiles'].map(k => [k, first[k] + second[k]])), corrected: true };
 }
+export function createUploadRecovery(session, device, job, begun, { scope = null, wait = delay, now = Date.now, onInterrupted } = {}) {
+    const dataset = session.hello.dataset ?? device.remote.dataset, base = begun.base ?? null;
+    let retries = 0, interrupted = 0, busyWait = 0, phase = begun.phase, busyLogged = false, interruptionLogged = false;
+    return {
+        get phase() { return phase; },
+        async run(operation, transferring = false) {
+            let reclaim = false;
+            for (;;) {
+                try {
+                    if (reclaim) {
+                        retries++;
+                        const backoff = Math.min(1000 * 2 ** (retries - 1), 10000);
+                        session.log?.(`上传连接中断，${backoff / 1000} 秒后自动重连（${retries}/5）；保留上传断点。`);
+                        await wait(backoff);
+                        await session.reconnect();
+                        requireThat(session.env.jobBound === true && (!session.env.remote || session.env.remote.dataset === dataset), 'REMOTE_PROTOCOL', '重连后的 VPS 身份或任务绑定能力改变。');
+                        let resumed;
+                        for (;;) {
+                            try { resumed = await session.control.request('begin', { job, dataset, direction: 'push', base, jobBound: true, resumeOnly: true, ...(scope ? { scope } : {}) }); break; }
+                            catch (error) {
+                                if (error.code !== 'BUSY') throw error;
+                                if (busyWait >= 150000) { session.log?.('VPS 持续占用，累计等待已达 150 秒；保留原任务。'); throw error; }
+                                if (!busyLogged) { session.log?.('VPS 仍有传输进程，正在同一连接等待释放（最多 150 秒）。'); busyLogged = true; }
+                                const duration = Math.min(2000, 150000 - busyWait), start = now();
+                                await wait(duration); busyWait += Math.max(duration, now() - start);
+                            }
+                        }
+                        requireThat(resumed.job === job && resumed.direction === 'push' && resumed.generation === job && ['transfer', 'finalizing', 'done'].includes(resumed.phase)
+                            && (resumed.base ?? null) === base && sameScope(resumed.scope, scope), 'REMOTE_PROTOCOL', 'VPS 上传续接回执不一致。');
+                        phase = resumed.phase; reclaim = false;
+                        session.log?.(`SSH 已恢复同一上传任务：${job}（${phase}）。`);
+                    }
+                    return await operation();
+                } catch (error) {
+                    if (transferring && !reclaim) { interrupted++; await onInterrupted?.(); }
+                    if (session.control.intentional && !reclaim || !retryableDownloadError(error) || retries >= 5 || session.env.jobBound !== true || typeof session.reconnect !== 'function') throw error;
+                    reclaim = true;
+                }
+            }
+        },
+        stats(value) {
+            if (interrupted && !interruptionLogged) { session.log?.('上传统计未包含部分中断尝试流量。'); interruptionLogged = true; }
+            return retries ? { ...value, reconnects: retries, interruptedTransfers: interrupted, ...(interrupted ? { incompleteNetworkStats: true, note: '中断尝试的网络流量可能未包含在统计中。' } : {}) } : value;
+        },
+    };
+}
 export async function push(session, device, job, payload, manifest, onProgress, onBegin, { scope = null, onPlan } = {}) {
-    scope = normalizeScope(scope);
-    validateManifest(manifest); const { control, env } = session;
+    scope = normalizeScope(scope); validateManifest(manifest);
     if (scope) requireScoped(session);
-    const begun = await control.request('begin', { job, dataset: device.remote.dataset, direction: 'push', base: session.hello.current?.digest ?? null, jobBound: env.jobBound === true, ...(scope ? { scope } : {}) });
-    requireThat(sameScope(begun.scope, scope), 'REMOTE_PROTOCOL', 'VPS 返回了不同的同步范围。');
+    const begun = await session.control.request('begin', { job, dataset: device.remote.dataset, direction: 'push', base: session.hello.current?.digest ?? null, jobBound: session.env.jobBound === true, ...(scope ? { scope } : {}) });
+    requireThat(begun.job === job && begun.direction === 'push' && begun.generation === job && sameScope(begun.scope, scope), 'REMOTE_PROTOCOL', 'VPS 上传任务回执不一致。');
     await onBegin?.(begun);
+    const recovery = createUploadRecovery(session, device, job, begun, { scope, onInterrupted: () => onProgress?.({ stage: 'interrupted', incompleteNetworkStats: true }) });
     let stats;
     if (!['done', 'finalizing'].includes(begun.phase)) {
-        if (onPlan) await onPlan(transferSummary(manifest, await control.request('inspect', { job, manifest })));
-        stats = await transfer(env, 'push', job, payload, onProgress, undefined, session.log);
-        await onProgress?.({ stage: 'transferred', stats });
+        if (onPlan && session.hello.capabilities?.includes('inspect-preserves-partials')) await onPlan(transferSummary(manifest, await recovery.run(() => session.control.request('inspect', { job, manifest }))));
+        else if (onPlan) session.log?.('VPS 尚不支持保留断点的上传预检查，跳过精确传输计划。');
+        stats = await recovery.run(() => ['done', 'finalizing'].includes(recovery.phase) ? undefined : transfer(session.env, 'push', job, payload, onProgress, undefined, session.log), true);
+        await onProgress?.({ stage: 'transferred', stats: recovery.stats(stats) });
     }
-    return finalizeUpload(session, device, job, payload, manifest, stats, onProgress, begun.phase, { scope, base: begun.base });
+    return finalizeUpload(session, device, job, payload, manifest, stats, onProgress, begun.phase, { scope, base: begun.base, recovery });
 }
-
-// Upload bytes remain useful when the independent control SSH exits. Reclaim
-// only this retained job; begin/resume and commit enforce ownership and base.
 export async function finalizeUpload(session, device, job, payload, manifest, stats, onProgress, phase = 'transfer', options = {}) {
     const scope = normalizeScope(options.scope);
-    const maxReconnects = 5;
-    let recoveries = 0, reconnect = false;
-    const dataset = session.hello.dataset ?? device.remote.dataset;
-    const base = options.base === undefined ? session.hello.current?.digest ?? null : options.base;
-    for (;;) {
-        try {
-            if (reconnect) {
-                recoveries++;
-                session.log?.(`上传后的 SSH 控制连接中断，正在重连并核验同一任务（${recoveries}/${maxReconnects}）；保留已上传文件。`);
-                await session.reconnect();
-                let resumed;
-                for (let attempt = 0; ; attempt++) {
-                    try {
-                        resumed = await session.control.request('begin', { job, dataset, direction: 'push', base, jobBound: true, resumeOnly: true, ...(scope ? { scope } : {}) });
-                        break;
-                    } catch (retryError) {
-                        if (retryError.code !== 'BUSY' || attempt >= 4) throw retryError;
-                        await delay(Math.min(2000, 500 * 2 ** attempt));
-                    }
-                }
-                requireThat(resumed.job === job && resumed.generation === job
-                    && ['transfer', 'finalizing', 'done'].includes(resumed.phase) && (resumed.base ?? null) === base && sameScope(resumed.scope, scope),
-                'REMOTE_PROTOCOL', 'VPS 续接回执与原上传任务不一致，已停止发布。');
-                phase = resumed.phase; reconnect = false;
-                session.log?.(`SSH 已恢复同一上传任务：${phase}；继续校验与发布。`);
+    const recovery = options.recovery ?? createUploadRecovery(session, device, job, { phase, base: options.base ?? session.hello.current?.digest ?? null }, { scope, onInterrupted: () => onProgress?.({ stage: 'interrupted', incompleteNetworkStats: true }) });
+    return recovery.run(async () => {
+        if (!['done', 'finalizing'].includes(recovery.phase)) {
+            const diff = await session.control.request('inspect', { job, manifest });
+            requireThat(!diff.extra.length, 'INTEGRITY', '上传目录仍含额外文件，拒绝发布。');
+            if (diff.changed.length) {
+                stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, payload, onProgress, diff.changed, session.log), true));
+                await onProgress?.({ stage: 'transferred', stats: recovery.stats(stats) });
             }
-            if (!['done', 'finalizing'].includes(phase)) {
-                const diff = await session.control.request('inspect', { job, manifest });
-                session.log?.(`VPS 内容校验：待补传 ${diff.changed.length} 个文件，额外 ${diff.extra.length} 个文件`);
-                requireThat(!diff.extra.length, 'INTEGRITY', '上传目录仍含额外文件，拒绝发布。');
-                if (diff.changed.length) {
-                    stats = addStats(stats, await transfer(session.env, 'push', job, payload, onProgress, diff.changed, session.log));
-                    await onProgress?.({ stage: 'transferred', stats });
-                }
-            }
-            session.log?.('逐文件 SHA-256 校验后发布 VPS 快照');
-            const published = await session.control.request('commit', { job, manifest });
-            requireThat((scope ? published.snapshotDigest : published.digest) === manifest.digest
-                && /^[a-f0-9]{64}$/.test(published.digest), 'REMOTE_PROTOCOL', 'VPS 发布回执与源快照不匹配。');
-            return { ...published, stats };
-        } catch (error) {
-            if (!['SSH', 'SSH_TIMEOUT'].includes(error.code) || recoveries >= maxReconnects || typeof session.reconnect !== 'function') throw error;
-            reconnect = true;
         }
-    }
+        const published = await session.control.request('commit', { job, manifest });
+        requireThat((scope ? published.snapshotDigest : published.digest) === manifest.digest && /^[a-f0-9]{64}$/.test(published.digest), 'REMOTE_PROTOCOL', 'VPS 发布回执与源快照不匹配。');
+        return { ...published, stats: recovery.stats(stats) };
+    });
 }
-export async function pull(session, device, job, payload, onProgress, onBegin, { scope = null, onPlan } = {}) {
+export async function pull(session, device, job, payload, onProgress, onBegin, { scope = null, onPlan, resume = null } = {}) {
     scope = normalizeScope(scope);
-    if (scope) return pullScoped(session, device, job, payload, onProgress, onBegin, scope, onPlan);
-    const begun = await session.control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: session.env.jobBound === true });
+    if (scope) return pullScoped(session, device, job, payload, onProgress, onBegin, scope, onPlan, resume);
+    const begun = await beginDownload(session, device, job, scope, resume, payload);
     await onBegin?.(begun);
     const manifest = validateManifest(begun.manifest);
-    requireThat(uuidPattern.test(begun.generation), 'REMOTE_PROTOCOL', 'VPS 下载代次无效。');
     session.log?.(`VPS 下载清单：${manifest.files.length} 个文件，${manifest.bytes} 字节；固定代次 ${begun.generation}`);
+    await noLinks(payload);
+    if (await exists(payload)) requireThat((await fs.lstat(payload)).isDirectory(), 'DOWNLOAD_BINDING', '原下载暂存不是有效目录。');
     if (begun.phase === 'done') {
-        await verify(payload, manifest);
+        requireThat(await exists(payload), 'DOWNLOAD_BINDING', '已完成任务的本机暂存不存在，请重新拉取。');
+        await partialCleanup(payload); await verify(payload, manifest);
         await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
         await atomicJson(path.join(path.dirname(payload), 'download.json'), {
             format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest,
         });
+        if (session.env.jobBound) await saveDownloadState(device, job, payload, begun, scope, 'verified');
         session.control.close();
         return { ...begun, manifest, stats: { note: '先前完成的下载已重新校验，本次没有传输文件。' } };
     }
     await enoughSpace(device.state, manifest.bytes);
     const cache = path.join(device.state, 'cache/payload');
     if (!await exists(payload)) {
-        if (await exists(cache)) await copyTree(cache, payload);
+        if (resume) await fs.mkdir(payload, { recursive: false, mode: 0o700 });
+        else if (await exists(cache)) await copyTree(cache, payload);
         else {
             await fs.mkdir(payload, { recursive: true, mode: 0o700 });
             const basis = await seedDownloadBasis(device, payload, manifest);
             session.log?.(`下载缓存缺失，已从本机共享目录建立 ${basis.files} 个文件的差分基础；下载后仍执行完整校验。`);
         }
     }
-    if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload))));
-    const recovery = createDownloadRecovery(session, device, job, begun);
+    if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload, { ignorePartials: true }))));
+    const recovery = createDownloadRecovery(session, device, job, begun, { onInterrupted: () => onProgress?.({ stage: 'interrupted', incompleteNetworkStats: true }) });
     let stats = await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log));
+    await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
     await partialCleanup(payload);
     const diff = difference(manifest, await scan(payload));
     requireThat(!diff.extra.length, 'INTEGRITY', '下载暂存区仍含额外文件。');
     const correction = [...diff.missing, ...diff.changed];
     session.log?.(`本机内容校验：缺失 ${diff.missing.length}，不一致 ${diff.changed.length}，额外 ${diff.extra.length} 个文件`);
-    if (correction.length) stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log)));
+    if (correction.length) {
+        stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log)));
+        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
+    }
     stats = recovery.stats(stats);
     await onProgress?.({ stage: 'transferred', stats });
-    await partialCleanup(payload); await verify(payload, manifest);
+    if (correction.length || resume || recovery.reconnects || begun.phase === 'done') { await partialCleanup(payload); await verify(payload, manifest); }
     session.log?.('下载文件 SHA-256 全量校验通过');
     await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
     await atomicJson(path.join(path.dirname(payload), 'download.json'), {
         format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest,
     });
+    if (session.env.jobBound) await saveDownloadState(device, job, payload, begun, scope, 'verified');
     // finish releases the read job and cleans obsolete data. A lost ACK cannot invalidate bytes
     // already checked against the manifest pinned by this authenticated session.
     try { begun.maintenance = (await session.control.request('finish', { job }, 15_000)).maintenance; }
@@ -339,22 +387,32 @@ export async function catalog(session, _device, scope) {
         throw error;
     }
 }
-async function pullScoped(session, device, job, payload, onProgress, onBegin, scope, onPlan) {
+async function pullScoped(session, device, job, payload, onProgress, onBegin, scope, onPlan, resume) {
     requireScoped(session);
-    const begun = await session.control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: session.env.jobBound === true, scope });
+    const begun = await beginDownload(session, device, job, scope, resume, payload);
     await onBegin?.(begun);
     const manifest = validateManifest(begun.manifest);
     requireThat(sameScope(begun.scope, scope) && uuidPattern.test(begun.generation) && /^[a-f0-9]{64}$/.test(begun.publicationDigest ?? '')
         && typeof begun.environment === 'string' && manifest.files.every(file => file.path === 'environment.json' || inScope(file.path, scope)),
     'REMOTE_PROTOCOL', 'VPS 分类清单与本次选择不一致。');
     await enoughSpace(device.state, manifest.bytes);
-    if (!await exists(payload)) { await fs.mkdir(payload, { recursive: true, mode: 0o700 }); await seedDownloadBasis(device, payload, manifest); }
-    await fs.writeFile(path.join(payload, 'environment.json'), begun.environment, { mode: 0o600 });
-    if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload))));
+    await noLinks(payload);
+    const payloadExists = await exists(payload);
+    if (payloadExists) requireThat((await fs.lstat(payload)).isDirectory(), 'DOWNLOAD_BINDING', '原下载暂存不是有效目录。');
+    else {
+        requireThat(begun.phase !== 'done', 'DOWNLOAD_BINDING', '已完成任务的本机暂存不存在，请重新拉取。');
+        await fs.mkdir(payload, { recursive: false, mode: 0o700 });
+        if (!resume) await seedDownloadBasis(device, payload, manifest);
+    }
+    if (begun.phase !== 'done') await writeScopedEnvironment(payload, begun.environment);
+    if (onPlan) await onPlan(transferSummary(manifest, difference(manifest, await scan(payload, { ignorePartials: true }))));
     const selection = manifest.files.filter(file => file.path !== 'environment.json').map(file => file.path);
-    const recovery = createDownloadRecovery(session, device, job, begun, { scope });
+    const recovery = createDownloadRecovery(session, device, job, begun, { scope, onInterrupted: () => onProgress?.({ stage: 'interrupted', incompleteNetworkStats: true }) });
     let stats = { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 };
-    if (begun.phase !== 'done' && selection.length) stats = await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log, selection));
+    if (begun.phase !== 'done' && selection.length) {
+        stats = await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log, selection));
+        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
+    }
     await partialCleanup(payload);
     const diff = difference(manifest, await scan(payload));
     requireThat(!diff.extra.length, 'INTEGRITY', '分类下载暂存含额外文件。');
@@ -363,14 +421,43 @@ async function pullScoped(session, device, job, payload, onProgress, onBegin, sc
     if (correction.length) {
         requireThat(begun.phase !== 'done', 'INTEGRITY', '先前完成的分类下载文件不完整，请重新拉取。');
         stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log)));
+        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
     }
     stats = recovery.stats(stats);
-    await partialCleanup(payload); await verify(payload, manifest);
+    if (correction.length || resume || recovery.reconnects || begun.phase === 'done') { await partialCleanup(payload); await verify(payload, manifest); }
     await onProgress?.({ stage: 'transferred', stats });
     await atomicJson(path.join(path.dirname(payload), 'manifest.json'), manifest);
     await atomicJson(path.join(path.dirname(payload), 'download.json'), { format: 1, job, dataset: device.remote.dataset, generation: begun.generation, digest: manifest.digest, scope, publicationDigest: begun.publicationDigest });
+    if (session.env.jobBound) await saveDownloadState(device, job, payload, begun, scope, 'verified');
     try { if (begun.phase !== 'done') begun.maintenance = (await session.control.request('finish', { job }, 15_000)).maintenance; }
     catch (error) { if (!['SSH', 'SSH_TIMEOUT'].includes(error.code)) throw error; }
     finally { session.control.close(); }
     return { ...begun, digest: begun.publicationDigest, manifest, stats };
+}
+
+async function saveDownloadState(device, job, payload, begun, scope, state) {
+    const record = { format: 1, job, direction: 'pull', connection: connectionId(device), dataset: device.remote.dataset,
+        generation: begun.generation, base: begun.base ?? null, scope, manifest: begun.manifest, state,
+        ...(scope ? { publicationDigest: begun.publicationDigest, environment: begun.environment } : {}) };
+    validateDownloadBinding(device, job, record);
+    const file = path.join(path.dirname(payload), 'download-resume.json');
+    await noLinks(file);
+    await atomicJson(file, record);
+    return record;
+}
+async function beginDownload(session, device, job, scope, resume, payload) {
+    requireThat(path.resolve(payload) === path.resolve(device.state, 'jobs', job, 'payload'), 'DOWNLOAD_BINDING', '下载暂存路径与任务不一致。');
+    if (resume) requireThat(session.env.jobBound === true, 'UPGRADE_REQUIRED', '下载恢复需要更新 VPS。');
+    else if (!session.env.jobBound) session.log?.('VPS 不支持任务绑定；本次下载可以完成校验，但中断后不能继续原下载。');
+    if (scope) requireScoped(session);
+    if (resume) { const saved = await loadDownloadBinding(device, job); requireThat(canonical(saved) === canonical(resume) && sameScope(saved.scope, scope), 'DOWNLOAD_BINDING', '恢复记录或范围不一致。'); resume = saved; }
+    const begun = await session.control.request('begin', { job, dataset: device.remote.dataset, direction: 'pull', jobBound: session.env.jobBound === true,
+        ...(scope ? { scope } : {}), ...(resume ? { resumeOnly: true } : {}) });
+    const candidate = { format: 1, job, direction: 'pull', connection: connectionId(device), dataset: device.remote.dataset,
+        generation: begun.generation, base: begun.base ?? null, scope, manifest: begun.manifest, state: 'transferring',
+        ...(scope ? { publicationDigest: begun.publicationDigest, environment: begun.environment } : {}) };
+    validateDownloadBinding(device, job, candidate);
+    requireThat(bindingMatches(resume ?? candidate, begun), 'DOWNLOAD_BINDING', 'VPS 下载回执与固定任务不一致。');
+    if (session.env.jobBound) await saveDownloadState(device, job, payload, begun, scope, 'transferring');
+    return begun;
 }

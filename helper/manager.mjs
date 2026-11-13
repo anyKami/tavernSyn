@@ -12,6 +12,7 @@ import { validateContent } from '../lib/content.mjs';
 import { completionPath, readCompletion, validateCompletion, completedStatus, connectionId } from '../lib/completion.mjs';
 import { normalizeScope } from '../lib/scope.mjs';
 import { executeScoped } from './scoped.mjs';
+import { loadDownloadBinding } from './download-binding.mjs';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'PREVIEW', 'PENDING_APPLY', 'RECOVERY_REQUIRED']);
 const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '从 VPS 下载', VERIFYING: '校验文件', PREPARING: '准备插件',
@@ -31,16 +32,28 @@ export class Manager {
     constructor(device, lifecycle, transportAdapter = transport, logger = () => {}) {
         this.device = device; this.lifecycle = lifecycle; this.transport = transportAdapter; this.job = null; this.busy = false;
         this.logger = logger;
-        this.wake = {}; this.progressTime = 0; this.writeQueue = Promise.resolve();
+        this.wake = {}; this.progressTime = 0; this.writeQueue = Promise.resolve(); this.progressPending = false; this.phaseStarted = Date.now();
     }
     async status() {
         if (this.statusWriteFailed && this.job?.commit) return structuredClone(this.job);
-        const status = await exists(path.join(this.device.state, 'status.json')) ? await readJson(path.join(this.device.state, 'status.json')) : { phase: 'IDLE' };
+        const status = this.busy && this.job ? structuredClone(this.job) : await exists(path.join(this.device.state, 'status.json')) ? await readJson(path.join(this.device.state, 'status.json')) : { phase: 'IDLE' };
         if (status.id && status.phase !== 'SUCCEEDED') {
             const outcome = await readCompletion(this.device, status.id);
             if (outcome) return completedStatus(outcome, ['finalization']);
         }
+        status.canResumeDownload = await this.canResumeDownload(status);
         return status;
+    }
+    async canResumeDownload(status) {
+        if (this.busy || status.phase !== 'FAILED' || status.direction !== 'pull' || status.commit || !['DOWNLOADING', 'VERIFYING'].includes(status.failurePhase)) return false;
+        try {
+            const root = path.join(this.device.state, 'jobs', status.id);
+            if (await exists(path.join(root, 'candidate'))) return false;
+            const applyFile = path.join(this.device.state, 'apply.json');
+            if (await exists(applyFile)) { const journal = await readJson(applyFile); if (!['committed', 'rolled-back'].includes(journal.phase) || journal.jobRoot === root) return false; }
+            const binding = await loadDownloadBinding(this.device, status.id);
+            return JSON.stringify(normalizeScope(status.scope)) === JSON.stringify(normalizeScope(binding.scope));
+        } catch { return false; }
     }
     log = message => {
         try { this.logger(this.job, message); }
@@ -53,7 +66,7 @@ export class Manager {
         this.writeQueue = this.writeQueue.catch(() => {}).then(() => atomicJson(path.join(this.device.state, 'status.json'), snapshot));
         try { await this.writeQueue; this.statusWriteFailed = false; }
         catch (error) { this.statusWriteFailed = true; throw error; }
-        if (phase !== oldPhase) this.log(`阶段：${PHASES[phase] ?? phase} (${phase})`);
+        if (phase !== oldPhase) { if (oldPhase) this.log(`阶段 ${PHASES[oldPhase] ?? oldPhase} 耗时 ${Math.round((Date.now() - this.phaseStarted) / 1000)} 秒`); this.phaseStarted = Date.now(); this.log(`阶段：${PHASES[phase] ?? phase} (${phase})`); }
         if (fields.files !== undefined) this.log(`快照：${fields.files} 个文件，${fields.bytes ?? 0} 字节`);
         if (fields.summary) this.log(`文件差异：新增 ${fields.summary.added}，修改 ${fields.summary.changed}，删除 ${fields.summary.deleted}`);
         if (fields.remote?.generation) this.log(`VPS 代次：${fields.remote.generation}；SHA-256：${fields.remote.digest}`);
@@ -63,9 +76,20 @@ export class Manager {
         return this.job;
     }
     progress = value => {
-        if (value.stage !== 'transferred' && Date.now() - this.progressTime < 500) return;
-        this.progressTime = Date.now();
-        return this.write(this.job.phase, { progress: value, ...(value.stats ? { stats: value.stats } : {}) }).catch(() => {});
+        if (value.stage === 'interrupted') {
+            if (!this.job.stats) return;
+            return this.write(this.job.phase, { stats: { ...this.job.stats, incompleteNetworkStats: true, note: '中断尝试的网络流量可能未包含在统计中。' } });
+        }
+        if (value.stage === 'stats') return this.write(this.job.phase, { stats: value.stats });
+        if (value.stage === 'transferred') return this.write(this.job.phase, { progress: value, ...(value.stats ? { stats: value.stats } : {}) });
+        Object.assign(this.job, { progress: value, updated: new Date().toISOString() });
+        if (Date.now() - this.progressTime < 3000 || this.progressPending) return;
+        this.progressTime = Date.now(); this.progressPending = true;
+        this.writeQueue = this.writeQueue.catch(() => {}).then(async () => {
+            this.progressPending = false;
+            await atomicJson(path.join(this.device.state, 'status.json'), structuredClone(this.job));
+        });
+        this.writeQueue.catch(() => { this.statusWriteFailed = true; });
     };
     async action(action, payload = {}) {
         if (action === 'status') return this.status();
@@ -75,20 +99,26 @@ export class Manager {
             requireThat(!this.busy, 'BUSY', '同步正在进行，请结束任务后再修改连接。');
             return configureDevice(this.device, action, payload);
         }
-        if (action === 'start') return this.start(payload);
+        if (action === 'start') { requireThat(!('resume' in payload) && !('pending' in payload), 'INPUT', '不能从外部注入恢复状态。'); return this.start(payload); }
         if (action === 'reconcile') return this.reconcile(payload.id);
+        if (action === 'resume-download') {
+            const previous = await this.status();
+            requireThat(previous.id === payload.id && await this.canResumeDownload(previous), 'DOWNLOAD_BINDING', '当前任务不能继续下载，请重新拉取。');
+            const binding = await loadDownloadBinding(this.device, previous.id);
+            return this.start({ direction: 'pull', tab: payload.tab, preview: previous.preview, resume: previous }, { authorized: true, downloadResume: binding });
+        }
         if (action === 'resume-upload') {
             const previous = await this.status();
             requireThat(previous.id === payload.id && !previous.commit && previous.phase === 'FAILED' && previous.direction === 'push'
                 && previous.snapshotReady === true, 'JOB', '没有可继续上传的完整快照，请重新推送。');
             requireThat(previous.connection === this.connectionId(), 'CONFIG_CHANGED', '连接目标已改变，不能把旧快照发送到另一数据集。');
-            return this.start({ direction: 'push', tab: payload.tab, resume: previous });
+            return this.start({ direction: 'push', tab: payload.tab, resume: previous }, { authorized: true });
         }
         if (action === 'resume-pending') {
             const pending = await this.status();
             requireThat(this.lifecycle && pending.phase === 'PENDING_APPLY', 'PENDING_APPLY', '没有可由受控启动器继续的待应用任务。');
             requireThat(pending.jobRoot === path.join(this.device.state, 'jobs', pending.id), 'JOURNAL', '待应用记录路径无效。');
-            return this.start({ direction: 'pull', tab: payload.tab, preview: false, pending });
+            return this.start({ direction: 'pull', tab: payload.tab, preview: false, pending }, { authorized: true });
         }
         if (action === 'ready') {
             requireThat(this.job?.id === payload.id && this.job.phase === 'AWAITING_SAVE', 'JOB', '任务状态已改变。');
@@ -126,7 +156,9 @@ export class Manager {
         try { await this.write(phase, fields); await promise; }
         finally { clearTimeout(timeout); delete this.wake[name]; }
     }
-    async start({ direction, tab, preview = false, pending = null, resume = null, scope = null }) {
+    async start({ direction, tab, preview = false, pending = null, resume = null, scope = null }, internal = {}) {
+        requireThat(internal.authorized === true || (!pending && !resume), 'INPUT', '不能从外部注入恢复状态。');
+        const downloadResume = internal.downloadResume ?? null;
         scope = normalizeScope(resume?.scope ?? pending?.scope ?? scope);
         requireThat(!scope || direction !== 'restore', 'INPUT', '恢复操作使用上次实际应用的范围，不能另选类别。');
         requireThat(['push', 'pull', 'restore'].includes(direction) && typeof preview === 'boolean' && !(direction === 'restore' && preview), 'INPUT', '同步方向无效。');
@@ -139,7 +171,7 @@ export class Manager {
         requireThat(this.lifecycle || direction === 'pull', 'UNMANAGED', '严格推送需要受控启动器；请关闭酒馆后使用 TavernSyn 入口。');
         this.busy = true; this.receipt = null; this.outcome = null; this.statusWriteFailed = false;
         this.pendingSource = pending;
-        this.resumeSource = resume;
+        this.resumeSource = resume; this.downloadResume = downloadResume;
         const lock = path.join(this.device.state, 'operation.lock');
         let handle;
         try { handle = await fs.open(lock, 'wx', 0o600); } catch { this.busy = false; throw new SyncError('BUSY', '设备任务锁仍存在；请先处理上次任务，禁止并发应用。'); }
@@ -152,10 +184,10 @@ export class Manager {
             this.job = { ...(resume ?? {}), id: resume?.id ?? randomUUID(), direction, tab, preview, ticket: randomUUID(),
                 ...(scope ? { scope } : {}),
                 started: resume?.started ?? new Date().toISOString(), error: null, progress: null, transferPlan: null,
-                ...(resume ? { resumedAt: new Date().toISOString(), note: '正在继续上次的已保存快照；此后的本机改动留待下次推送。' } : {}) };
+                ...(resume ? { resumedAt: new Date().toISOString(), note: direction === 'push' ? '正在继续上次的已保存快照；此后的本机改动留待下次推送。' : '正在继续下载上次固定的 VPS 代次，并重新校验文件。' } : {}) };
             await handle.writeFile(JSON.stringify({ id: this.job.id, pid: process.pid })); await handle.sync();
             this.log(`${resume ? '续传' : '开始'}任务 ${this.job.id}；${preview ? '仅预览；' : ''}VPS：${this.device.remote?.user ?? ''}@${this.device.remote?.host ?? '未配置'}`);
-            await this.write('PREFLIGHT');
+            await this.write(downloadResume ? 'DOWNLOADING' : 'PREFLIGHT');
         } catch (error) {
             this.busy = false;
             await handle.close(); await fs.unlink(lock);
@@ -166,7 +198,7 @@ export class Manager {
         this.done = this.execute().catch(async error => {
             if (this.outcome) { await this.finishOutcome(this.outcome); return; }
             const dangerous = error.code === 'RECOVERY_REQUIRED' || (this.plan && !['committed', 'rolled-back'].includes(this.plan.phase));
-            await this.write(dangerous ? 'RECOVERY_REQUIRED' : 'FAILED', { error: { code: error.code ?? 'FAILED', message: error.code ? error.message : '同步失败，详细原因请查看本机日志。' } });
+            await this.write(dangerous ? 'RECOVERY_REQUIRED' : 'FAILED', { failurePhase: this.job.phase, error: { code: error.code ?? 'FAILED', message: error.code ? error.message : '同步失败，详细原因请查看本机日志。' } });
         }).finally(async () => {
             try {
                 await atomicJson(path.join(this.device.state, 'jobs', job.id, 'job.json'), this.job);
@@ -426,7 +458,7 @@ export class Manager {
                 await this.success(frozen.metadata.sourceState, { generation: published.generation, digest: published.digest,
                     ...(published.maintenance?.length ? { maintenance: published.maintenance } : {}) }, published.stats, { cache: true });
             } else {
-                if (!this.pendingSource && await this.skipUnchanged(session, baseline)) return;
+                if (!this.pendingSource && !this.downloadResume && await this.skipUnchanged(session, baseline)) return;
                 await this.write('DOWNLOADING');
                 let downloaded;
                 if (this.pendingSource) {
@@ -436,7 +468,7 @@ export class Manager {
                     await copyTree(path.join(old.jobRoot, 'payload'), payload);
                     downloaded = { generation: old.remote.generation, manifest, stats: old.stats };
                     await atomicJson(path.join(root, 'manifest.json'), manifest);
-                } else downloaded = await this.transport.pull(session, this.device, this.job.id, payload, this.progress, onBegin, { onPlan: this.reportTransfer });
+                } else downloaded = await this.transport.pull(session, this.device, this.job.id, payload, this.progress, onBegin, { onPlan: this.reportTransfer, resume: this.downloadResume });
                 remoteBegun = false;
                 await this.write('VERIFYING', { files: downloaded.manifest.files.length, bytes: downloaded.manifest.bytes, stats: downloaded.stats });
                 const metadata = await readJson(path.join(payload, 'environment.json'));

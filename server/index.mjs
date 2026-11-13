@@ -8,6 +8,7 @@ import { loadDevice, uuidPattern } from '../lib/device.mjs';
 import { digest, exists, readJson, requireThat, SyncError } from '../lib/io.mjs';
 import { hashFile, portablePath } from '../lib/manifest.mjs';
 import { connect } from '../helper/transport.mjs';
+import { Manager } from '../helper/manager.mjs';
 import { configuration, configureDevice, withDeviceLock } from '../lib/connection.mjs';
 import { recoveryStatus } from '../helper/apply.mjs';
 import { progressDetail } from '../ui/progress.js';
@@ -67,20 +68,21 @@ export async function init(router) {
         if (action === 'configuration') return configuration(device);
         if (action === 'recovery') return recoveryStatus(device);
         if (action === 'configure') return configureDevice(device, action, payload);
-        if (action === 'status') return await exists(path.join(device.state, 'status.json')) ? readJson(path.join(device.state, 'status.json')) : { phase: 'IDLE' };
+        if (action === 'status') return worker ? workerAction(worker, 'status', {}) : new Manager(device, null).status();
         if (action === 'check') return withDeviceLock(device, async () => { const session = await connect(device); try { return { ok: true, ...session.hello }; } finally { session.control.close(); } });
         if (worker && action === 'cancel') return workerAction(worker, action, payload);
-        requireThat(action === 'start' && payload.direction === 'pull', 'UNMANAGED', '当前实例未受控；只可下载待应用数据，请通过 TavernSyn 入口启动后同步。');
+        requireThat((action === 'start' && payload.direction === 'pull') || action === 'resume-download', 'UNMANAGED', '当前实例未受控；只可下载待应用数据，请通过 TavernSyn 入口启动后同步。');
         requireThat(!worker, 'BUSY', '下载助手仍在运行。');
         const log = fs.openSync(path.join(device.state, 'worker.log'), 'a');
         worker = fork(fileURLToPath(new URL('../helper/worker.mjs', import.meta.url)), [], {
             windowsHide: true, detached: true, stdio: ['ignore', log, log, 'ipc'],
-            env: { ...process.env, TAVERNSYN_STATE: device.state, TAVERNSYN_TASK: JSON.stringify(payload) },
+            env: { ...process.env, TAVERNSYN_STATE: device.state, TAVERNSYN_TASK: JSON.stringify(payload), TAVERNSYN_ACTION: action },
         });
         fs.closeSync(log);
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => reject(new SyncError('WORKER', '下载助手未能启动。')), 15000);
-            worker.once('message', message => { clearTimeout(timer); if (message.error) reject(new SyncError(message.error.code, message.error.message)); else resolve(message.result); });
+            const started = message => { if (message?.actionId) return; worker?.off('message', started); clearTimeout(timer); if (message.error) reject(new SyncError(message.error.code, message.error.message)); else resolve(message.result); };
+            worker.on('message', started);
             worker.once('exit', () => { worker = null; clearTimeout(timer); });
             worker.once('error', () => { worker = null; clearTimeout(timer); reject(new SyncError('WORKER', '无法创建下载助手。')); });
         });
@@ -142,7 +144,7 @@ export async function init(router) {
         }
         res.status(202).json(await helper('start', body));
     }));
-    for (const action of ['ready', 'page', 'cancel', 'resume-pending', 'resume-upload', 'reconcile']) {
+    for (const action of ['ready', 'page', 'cancel', 'resume-pending', 'resume-upload', 'resume-download', 'reconcile']) {
         router.post(`/${action}`, endpoint(async (req, res) => {
             requireThat(Object.keys(req.body).every(k => ['id', 'receipt', 'tab', 'ticket', 'token'].includes(k)), 'INPUT', '不接受未定义的任务参数。');
             if (action === 'ready' && managed) {

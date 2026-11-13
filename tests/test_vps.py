@@ -171,6 +171,58 @@ class StoreTests(unittest.TestCase):
         d.atomic(upload / "environment.json", metadata)
         return job, upload, d.scan(upload)
 
+    def test_full_and_category_inspect_keep_partial_bytes_until_commit(self):
+        for scope in (None, ["worlds"]):
+            with self.subTest(scope=scope):
+                if scope:
+                    self.complete_publication()
+                    job, payload, manifest = self.category_upload(scope)
+                else:
+                    job = self.begin()
+                    payload, manifest = self.payload(job)
+                partial = payload / "profile" / ".tavernsyn-partial" / "world.json"
+                partial.parent.mkdir()
+                partial.write_bytes(b"retained incomplete transfer")
+                request = dict(job=job, manifest=manifest)
+                self.assertTrue(self.store.inspect(request, self.device)["equal"])
+                self.assertEqual(partial.read_bytes(), b"retained incomplete transfer")
+                self.assertEqual(self.store.inspect(request, self.device)["extra"], [])
+                with self.assertRaises(d.ProtocolError):
+                    d.scan(payload)
+                extra = payload / "profile" / "business.txt"
+                extra.write_text("unexpected", encoding="utf-8")
+                self.assertEqual(self.store.inspect(request, self.device)["extra"], ["profile/business.txt"])
+                self.assertEqual(partial.read_bytes(), b"retained incomplete transfer")
+                extra.unlink()
+                receipt = self.store.commit(request, self.device)
+                generation = self.root / "generations" / job
+                self.assertEqual(receipt["generation"], job)
+                self.assertEqual(receipt.get("snapshotDigest", receipt["digest"]), manifest["digest"])
+                self.assertEqual(list(generation.rglob(".tavernsyn-partial")), [])
+                self.assertEqual(self.store.current()["generation"], job)
+
+    def test_inspect_rejects_a_partial_path_that_is_not_a_directory(self):
+        job = self.begin()
+        payload, manifest = self.payload(job)
+        partial = payload / "profile" / ".tavernsyn-partial"
+        partial.write_text("ordinary file", encoding="utf-8")
+        request = dict(job=job, manifest=manifest)
+        with self.assertRaisesRegex(d.ProtocolError, "invalid partial directory"):
+            self.store.inspect(request, self.device)
+        self.assertEqual(partial.read_text(encoding="utf-8"), "ordinary file")
+    def test_inspect_rejects_partial_directory_symlink(self):
+        job = self.begin()
+        payload, manifest = self.payload(job)
+        partial = payload / "profile" / ".tavernsyn-partial"
+        request = dict(job=job, manifest=manifest)
+        try:
+            partial.symlink_to(self.work, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"directory symlink unavailable: {error}")
+        with self.assertRaisesRegex(d.ProtocolError, "symlink"):
+            self.store.inspect(request, self.device)
+        self.assertTrue(partial.is_symlink())
+
     def test_category_push_mirrors_deletions_and_preserves_every_unselected_file(self):
         for scope in (["characters"], ["chats"], ["worlds"], ["chats", "characters", "worlds"]):
             with self.subTest(scope=scope):

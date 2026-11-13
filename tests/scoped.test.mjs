@@ -120,13 +120,29 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     const lifecycle = new FakeLifecycle(), manager = new Manager(source, lifecycle, remote);
     const baselineFile = path.join(source.state, 'baseline.json'); await atomicJson(baselineFile, { sentinel: 'full baseline' });
     const scope = ['chats', 'characters', 'worlds'];
+    const nativePush = remote.push.bind(remote);
+    let plannedWithPartial = false;
+    remote.push = async (session, device, job, payload, manifest, progress, onBegin, options) => {
+        const partial = path.join(remote.root, 'incoming', job, 'upload/profile/characters/.tavernsyn-partial/retained.png');
+        return nativePush(session, device, job, payload, manifest, progress, async receipt => {
+            await fs.mkdir(path.dirname(partial), { recursive: true });
+            await fs.writeFile(partial, large.subarray(0, 8192));
+            await onBegin(receipt);
+        }, { ...options, onPlan: async plan => {
+            assert.deepEqual(await fs.readFile(partial), large.subarray(0, 8192));
+            plannedWithPartial = true;
+            await options.onPlan(plan);
+        } });
+    };
     await manager.start({ direction: 'push', scope, tab: randomUUID() });
     const preview = await phase(manager, 'AWAITING_SAVE', 30000); assert.ok(preview.summary.deleted >= 3);
     const pushed = await runHandoff(manager);
+    assert.equal(plannedWithPartial, true);
     assert.ok(pushed.stats.sentBytes < 64 * 1024 && pushed.stats.matchedBytes > 1.9 * 1024 * 1024, JSON.stringify(pushed.stats));
     assert.equal(pushed.scope.length, 3); assert.ok(pushed.remote.snapshotDigest);
     assert.deepEqual(await readJson(baselineFile), { sentinel: 'full baseline' });
     const current = await readJson(path.join(remote.root, 'current.json')), payload = path.join(remote.root, 'generations', current.generation, 'payload');
+    assert.equal(await exists(path.join(path.dirname(payload), 'upload')), false);
     const afterManifest = await readJson(path.join(path.dirname(payload), 'manifest.json'));
     for (const file of beforeManifest.files.filter(file => file.path !== 'environment.json' && !/^profile\/(?:chats|group chats|groups|characters|worlds)\//.test(file.path))) assert.equal(await hashFile(path.join(payload, file.path)), file.sha256);
     assert.equal(await exists(path.join(payload, 'profile/characters/A.png')), false);
@@ -167,14 +183,14 @@ test('native rsync correction handles literal bracket paths under the production
     const device = await fixture(); await populate(device);
     await fs.writeFile(path.join(device.dataRoot, device.profile, 'characters/[literal].png'), 'correct fixture bytes');
     await publish(device, remote);
-    const session = await remote.connect(device), payload = path.join(device.state, 'jobs', randomUUID(), 'payload');
+    const job = randomUUID(), session = await remote.connect(device), payload = path.join(device.state, 'jobs', job, 'payload');
     let corrupted = false;
     session.log = message => {
         if (!corrupted && message === 'rsync 下载结束') {
             corrupted = true; writeFileSync(path.join(payload, 'profile/characters/[literal].png'), 'corrupted fixture bytes');
         }
     };
-    const result = await remote.pull(session, device, randomUUID(), payload, undefined, undefined, { scope: ['characters'] });
+    const result = await remote.pull(session, device, job, payload, undefined, undefined, { scope: ['characters'] });
     assert.equal(corrupted, true); assert.equal(result.stats.corrected, true);
     await verify(payload, result.manifest);
     assert.equal(await fs.readFile(path.join(payload, 'profile/characters/[literal].png'), 'utf8'), 'correct fixture bytes');

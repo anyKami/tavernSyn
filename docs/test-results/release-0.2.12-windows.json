@@ -1,0 +1,70 @@
+{
+  "version": "0.2.12",
+  "date": "2026-11-13",
+  "platform": "win32",
+  "node": "v24.18.0",
+  "python": "3.14.0",
+  "status": "passed",
+  "source": {
+    "baseRevision": "788558d421b41fad277173c8c2ff9736a6d9d753",
+    "codeFingerprint": "f708d12dc1c8c4e480b1d35f4f462b6be96df1c9db6afebe53c7a6f477f115b9",
+    "fingerprintScope": "Production files in the tested Windows working tree, including their working-tree line endings."
+  },
+  "checks": [
+    {
+      "command": "node --test --test-concurrency=2 --test-timeout=180000 tests/*.test.mjs",
+      "tests": 216,
+      "passed": 215,
+      "failed": 0,
+      "skipped": 1,
+      "exitCode": 0,
+      "skipReason": "POSIX owner executable mode requires a POSIX filesystem.",
+      "transport": "Real OpenSSH password authentication and native rsync on loopback with a fixture SSH server. Separate scoped transfers use the production Python store over a process fixture with a Windows lock substitute."
+    },
+    {
+      "command": "python -B -m unittest discover -s tests -p test_vps*.py -v",
+      "tests": 38,
+      "passed": 32,
+      "failed": 0,
+      "skipped": 6,
+      "exitCode": 0,
+      "skipReasons": [
+        "Four tests require Linux flock.",
+        "One test requires Linux fsync on a read-only descriptor.",
+        "One test requires permission to create a directory symlink through Python on Windows."
+      ]
+    },
+    {
+      "command": "node tests/integration.mjs",
+      "passed": 32,
+      "failed": 0,
+      "exitCode": 0,
+      "transport": "Actual isolated SillyTavern 1.19.0, authenticated HTTP and worker processes. VPS replies use an in-memory adapter or an isolated control double for CLI and unmanaged recovery."
+    },
+    {
+      "command": "node tests/rsync.mjs <prepared-rsync-binary>",
+      "passed": 8,
+      "failed": 0,
+      "exitCode": 0,
+      "binary": "rsync  version 3.5.1  protocol version 33",
+      "transport": "Native rsync and a process-only daemon shell fixture."
+    }
+  ],
+  "coverage": [
+    "Full and scoped upload planning retains existing partial bytes and detects extra files. Successful commit cleans staging. A receiver without the safe inspect capability retains its partials through the start of rsync.",
+    "Loopback OpenSSH sockets are interrupted during initial and corrective upload. Both retries claim the same UUID. Lost commit acknowledgement is recovered idempotently.",
+    "Virtual-time tests cover one five-attempt network budget across initial, corrective and control operations, independent BUSY waits of 60, 120 and at most 150 seconds, and network interruption during BUSY.",
+    "Full and scoped downloads resume the original UUID and fixed generation after manager restart. Tests cover missing jobs, changed identities and bindings, interrupted reconnect, and a crash after binding persistence before stage creation.",
+    "Resume recreates an empty transfer stage when required and rejects missing completed stages, ordinary files and Windows junctions. During an active scoped transfer, missing or truncated metadata is atomically replaced with the pinned bytes using a temporary file outside the payload. Completed stages with missing or truncated metadata and linked metadata paths are rejected.",
+    "Tests verify same-size corruption detection, corrective SHA-256, partial retention during planning and download receipts after lost finish acknowledgement.",
+    "Authenticated HTTP and the unmanaged worker stage the retained download for controlled application. The CLI retains scope for resume and abort and rejects an old incomplete download without a binding. Scoped upload resume records both digests and VPS maintenance while preserving the full baseline and cache. Full upload resume still updates the baseline and cache.",
+    "Progress coalescing preserves FAILED and SUCCEEDED during slow disk writes. Transfer statistics retain known bytes and mark omitted traffic from interrupted attempts."
+  ],
+  "untested": [
+    "Real Linux flock and read-only descriptor behavior",
+    "Physical Android Termux",
+    "Production VPS or Tailscale transfers",
+    "Manual browser interaction with the new control",
+    "Post-push CI"
+  ]
+}

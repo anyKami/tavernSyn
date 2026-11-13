@@ -80,7 +80,10 @@ test('transport confirms begin before notifying caller and preserves finalizing 
     const session = { env: { jobBound: true }, hello: { current: null }, control: {
         async request(op, fields) {
             events.push(op);
-            if (op === 'begin') { assert.equal(fields.jobBound, true); return { phase: 'finalizing' }; }
+            if (op === 'begin') {
+                assert.equal(fields.jobBound, true);
+                return { job: fields.job, generation: fields.job, direction: fields.direction, phase: 'finalizing' };
+            }
             return { digest: manifest.digest };
         },
     } };

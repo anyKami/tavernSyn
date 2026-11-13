@@ -12,12 +12,12 @@ import { run, SyncError } from '../lib/io.mjs';
 import { seal } from '../lib/manifest.mjs';
 
 const disconnected = () => Object.assign(new SyncError('PROCESS_FAILED', 'synthetic interrupted rsync'), { exitCode: 12, signal: null });
-function fixture({ scope = null, resumed = {}, handshakeFailures = 0, busy = 0 } = {}) {
+function fixture({ scope = null, resumed = {}, handshakeFailures = 0, busy = 0, loseBusyConnection = false } = {}) {
     const job = randomUUID(), dataset = randomUUID(), generation = randomUUID();
     const manifest = seal([]), events = [], logs = [], waits = [];
     const begun = { job, direction: 'pull', generation, phase: 'transfer', base: manifest.digest, manifest,
         ...(scope ? { scope, environment: '{}', publicationDigest: 'a'.repeat(64) } : {}) };
-    let reconnects = 0;
+    let reconnects = 0, now = 0;
     const session = { hello: { dataset }, env: { jobBound: true, remote: { dataset }, connection: 0 },
         control: { closed: false }, log: line => logs.push(line), async reconnect() {
             reconnects++; events.push('reconnect');
@@ -27,11 +27,13 @@ function fixture({ scope = null, resumed = {}, handshakeFailures = 0, busy = 0 }
                 events.push(op);
                 assert.equal(op, 'begin');
                 assert.deepEqual(fields, { job, dataset, direction: 'pull', jobBound: true, resumeOnly: true, ...(scope ? { scope } : {}) });
+                if (loseBusyConnection && reconnects === 1 && waits.includes(2000)) throw new SyncError('SSH', 'connection lost while BUSY');
                 if (busy-- > 0) throw new SyncError('BUSY', 'previous transfer is releasing');
                 return { ...structuredClone(begun), ...resumed };
             } };
         } };
-    const recovery = createDownloadRecovery(session, { remote: { dataset } }, job, begun, { scope, wait: async ms => { waits.push(ms); } });
+    const recovery = createDownloadRecovery(session, { remote: { dataset } }, job, begun,
+        { scope, now: () => now, wait: async ms => { waits.push(ms); now += ms; } });
     return { session, recovery, begun, events, logs, waits, reconnects: () => reconnects };
 }
 
@@ -106,16 +108,27 @@ test('the fifth reconnect may succeed after four handshake failures', async () =
     assert.equal(result, 'downloaded'); assert.equal(f.reconnects(), 5);
 });
 
-test('BUSY resume replies consume the same bounded reconnect budget', async () => {
+test('download waits at most 150 seconds on one connection while the old rsync holds its lock', async () => {
     const f = fixture({ busy: 99 }); let transfers = 0;
     await assert.rejects(f.recovery.run(async () => { transfers++; throw disconnected(); }), { code: 'BUSY' });
-    assert.equal(f.reconnects(), 5); assert.equal(transfers, 1);
+    assert.equal(f.reconnects(), 1); assert.equal(transfers, 1);
+    assert.deepEqual(f.waits, [1000, ...Array(75).fill(2000)]);
 });
 
-test('a previous rsync releasing its lock can be resumed without claiming another job', async () => {
-    const f = fixture({ busy: 1 }); let first = true;
-    assert.equal(await f.recovery.run(async () => { if (first) { first = false; throw disconnected(); } return true; }), true);
-    assert.equal(f.reconnects(), 2); assert.deepEqual(f.events, ['reconnect', 'begin', 'reconnect', 'begin']);
+for (const seconds of [60, 120]) {
+    test(`download resumes after ${seconds} seconds of BUSY without using more network retries`, async () => {
+        const f = fixture({ busy: seconds / 2 }); let first = true;
+        assert.equal(await f.recovery.run(async () => { if (first) { first = false; throw disconnected(); } return true; }), true);
+        assert.equal(f.reconnects(), 1);
+        assert.deepEqual(f.waits, [1000, ...Array(seconds / 2).fill(2000)]);
+    });
+}
+
+test('network failure while waiting for a download lock retains the elapsed BUSY budget', async () => {
+    const f = fixture({ busy: 99, loseBusyConnection: true });
+    await assert.rejects(f.recovery.run(async () => { throw disconnected(); }), { code: 'BUSY' });
+    assert.equal(f.reconnects(), 2);
+    assert.deepEqual(f.waits, [1000, 2000, 2000, ...Array(74).fill(2000)]);
 });
 
 test('changed task, direction, generation, base, scope and phase stop before retransmission', async () => {
@@ -140,6 +153,27 @@ test('malformed manifests are fatal rather than retried', async () => {
     const f = fixture({ resumed: { manifest: { format: 1, files: [], bytes: 0, digest: 'b'.repeat(64) } } });
     await assert.rejects(f.recovery.run(async () => { throw disconnected(); }), { code: 'MANIFEST' });
     assert.equal(f.reconnects(), 1);
+});
+
+test('reconnect accepts manifest keys in another order but rejects a changed file mtime', async () => {
+    const manifest = seal([{ path: 'profile/chats/a.jsonl', size: 1, mtime: 1, sha256: 'a'.repeat(64) }]);
+    for (const changed of [false, true]) {
+        const f = fixture();
+        f.begun.manifest = manifest;
+        const reordered = { digest: manifest.digest, bytes: manifest.bytes, files: [
+            { mtime: changed ? 2 : 1, sha256: 'a'.repeat(64), size: 1, path: 'profile/chats/a.jsonl' },
+        ], format: 1 };
+        f.session.reconnect = async () => { f.session.control.request = async () => ({ ...f.begun, manifest: reordered }); };
+        const recovery = createDownloadRecovery(f.session, { remote: { dataset: f.session.hello.dataset } }, f.begun.job, f.begun, { wait: async () => {} });
+        let calls = 0;
+        const run = recovery.run(async () => {
+            if (++calls === 1) throw disconnected();
+            return 'transferred';
+        });
+        if (changed) await assert.rejects(run, { code: 'REMOTE_PROTOCOL' });
+        else assert.equal(await run, 'transferred');
+        assert.equal(calls, changed ? 1 : 2);
+    }
 });
 
 test('the initial download receipt must already name the requested task, direction and scope', () => {

@@ -64,10 +64,14 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     await configureDevice(device, 'configure', { host: '100.100.100.100', user: 'tavernsyn', password });
     const serverPayload = path.join(device.root, 'server-payload'); await fs.mkdir(serverPayload);
     let dataset = randomUUID(), current = null, active = null, rsyncConfig, toolEnv, server, serverOpen = false, authAttempts = 0, finishMode = 'normal';
-    let inspectMode = 'normal', commitMode = 'normal', nextDataset, rsyncMode = 'normal', session;
+    let inspectMode = 'normal', commitMode = 'normal', nextDataset, rsyncMode = 'normal', session, safeInspect = true;
     const transferLog = [], downloadLogs = [];
     const connections = new Set(), children = new Set(), commands = [];
     const operations = [];
+    const beginRequests = [];
+    const downloadTarget = job => path.join(device.state, 'jobs', job, 'payload');
+    const senderFile = path.join(serverPayload, 'profile/settings.json');
+    const serverPartialDirectory = path.join(serverPayload, 'profile/.tavernsyn-partial');
     async function startServer(port = 0) {
         server = new ssh2.Server({ hostKeys: [hostKey()] }, client => {
             connections.add(client); client.on('close', () => connections.delete(client)); client.on('error', () => {});
@@ -111,8 +115,9 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
                             const line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
                             queue = queue.then(async () => {
                                 const message = JSON.parse(line); operations.push(message.op); let result;
-                                if (message.op === 'hello') result = { protocol: 1, capabilities: ['paused-jobs', 'job-bound-rsync'], dataset, current };
+                                if (message.op === 'hello') result = { protocol: 1, capabilities: ['paused-jobs', 'job-bound-rsync', ...(safeInspect ? ['inspect-preserves-partials'] : [])], dataset, current };
                                 else if (message.op === 'begin') {
+                                    beginRequests.push(message);
                                     assert.equal(message.jobBound, true);
                                     if (message.resumeOnly) {
                                         assert.equal(active?.job, message.job); assert.equal(message.dataset, dataset);
@@ -127,13 +132,22 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
                                     ].join('\n'));
                                     result = { job: message.job, direction: active.direction, phase: active.phase, generation: active.generation, base: active.base, ...(message.direction === 'pull' ? { manifest: current.manifest } : {}) };
                                 } else if (message.op === 'inspect') {
+                                    if (!safeInspect) await fs.rm(serverPartialDirectory, { force: true, recursive: true });
                                     if (inspectMode === 'disconnect') {
                                         inspectMode = 'normal'; if (nextDataset) { dataset = nextDataset; nextDataset = undefined; }
                                         disconnect(client); return;
                                     }
-                                    result = difference(message.manifest, await scan(serverPayload));
+                                    if (inspectMode === 'interrupt-correction') {
+                                        inspectMode = 'normal';
+                                        const bytes = await fs.readFile(senderFile);
+                                        bytes[0] ^= 1;
+                                        await fs.writeFile(senderFile, bytes);
+                                        rsyncMode = 'disconnect';
+                                    }
+                                    result = difference(message.manifest, await scan(serverPayload, { ignorePartials: true }));
                                 }
                                 else if (message.op === 'commit') {
+                                    await fs.rm(serverPartialDirectory, { force: true, recursive: true });
                                     await verify(serverPayload, message.manifest);
                                     current = { generation: active.job, digest: message.manifest.digest, manifest: message.manifest };
                                     active.phase = 'done';
@@ -197,8 +211,8 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     assert.equal(pushed.digest, manifest.digest); session.control.close();
     session = await connect(device, localEnvironment);
     session.log = message => transferLog.push(message);
-    const target = path.join(device.root, 'download');
-    const pulled = await pull(session, device, randomUUID(), target);
+    const pullJob = randomUUID(), target = downloadTarget(pullJob);
+    const pulled = await pull(session, device, pullJob, target);
     assert.equal(pulled.manifest.digest, manifest.digest); await verify(target, manifest); session.control.close();
     assert.ok(commands.some(command => command.startsWith('tavernsyn-rsync-v2 ')));
     assert.ok(transferLog.some(line => line.includes('rsync 上传开始')));
@@ -225,21 +239,67 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     }
     // Later pull cases use the publication that now includes both fixture files.
     const recoveredManifest = await scan(payload);
+    // Initial and SHA-256 corrective rsync both lose their SSH sockets. The
+    // already uploaded bytes and the job UUID survive both retries.
+    session = await connect(device, localEnvironment);
+    const interruptedJob = randomUUID();
+    const serverPartial = path.join(serverPayload, 'profile/.tavernsyn-partial/retained');
+    await fs.mkdir(path.dirname(serverPartial), { recursive: true });
+    await fs.writeFile(serverPartial, 'synthetic partial bytes');
+    const retainedPartials = [], uploadBegins = beginRequests.length;
+    session.log = line => {
+        if (line.includes('上传连接中断')) retainedPartials.push(existsSync(serverPartial));
+    };
+    rsyncMode = 'disconnect';
+    let uploadPlans = 0;
+    const recoveredUpload = await push(session, device, interruptedJob, payload, recoveredManifest, undefined, undefined, {
+        onPlan: async plan => {
+            uploadPlans++;
+            assert.deepEqual(plan, { files: 0, bytes: 0 });
+            assert.equal(await fs.readFile(serverPartial, 'utf8'), 'synthetic partial bytes');
+            inspectMode = 'interrupt-correction';
+        },
+    });
+    assert.equal(uploadPlans, 1);
+    assert.deepEqual(retainedPartials, [true, true]);
+    assert.deepEqual(beginRequests.slice(uploadBegins).map(({ job, resumeOnly }) => [job, resumeOnly === true]),
+        [[interruptedJob, false], [interruptedJob, true], [interruptedJob, true]]);
+    assert.equal(recoveredUpload.stats.reconnects, 2);
+    assert.equal(recoveredUpload.stats.interruptedTransfers, 2);
+    assert.equal(recoveredUpload.stats.incompleteNetworkStats, true);
+    await verify(serverPayload, recoveredManifest);
+    session.control.close();
+    safeInspect = false;
+    session = await connect(device, localEnvironment);
+    await fs.mkdir(path.dirname(serverPartial), { recursive: true });
+    await fs.writeFile(serverPartial, 'synthetic partial bytes on an old receiver');
+    let partialAtRsyncStart = false;
+    session.log = line => {
+        if (line.startsWith('rsync 上传开始')) partialAtRsyncStart = existsSync(serverPartial);
+    };
+    await push(session, device, randomUUID(), payload, recoveredManifest, undefined, undefined, {
+        onPlan: () => assert.fail('older VPS inspect mutates partials and must be skipped before transfer'),
+    });
+    assert.equal(partialAtRsyncStart, true);
+    await verify(serverPayload, recoveredManifest);
+    session.control.close();
+    safeInspect = true;
     // Interrupt the real rsync SSH channel, then reclaim the same download.
     // Existing partials survive the failure and only disappear after validation.
     session = await connect(device, localEnvironment);
-    const resumedTarget = path.join(device.root, 'resumed-control/download'), partial = path.join(resumedTarget, '.tavernsyn-partial/retained');
+    const resumedJob = randomUUID(), resumedTarget = downloadTarget(resumedJob), partial = path.join(resumedTarget, '.tavernsyn-partial/retained');
     await fs.mkdir(path.dirname(partial), { recursive: true }); await fs.writeFile(partial, 'synthetic partial bytes');
     let partialRetained = false, beginCallbacks = 0;
     session.log = line => { downloadLogs.push(line); if (line.includes('下载连接中断')) partialRetained = existsSync(partial); };
     rsyncMode = 'disconnect';
-    const resumedJob = randomUUID();
-    const resumedPull = await pull(session, device, resumedJob, resumedTarget, undefined, () => { beginCallbacks++; });
+    const resumedPull = await pull(session, device, resumedJob, resumedTarget, undefined, () => { beginCallbacks++; }, {
+        onPlan: async () => assert.equal(await fs.readFile(partial, 'utf8'), 'synthetic partial bytes'),
+    });
     await verify(resumedTarget, recoveredManifest);
     assert.equal(beginCallbacks, 1); assert.equal(partialRetained, true); assert.equal(await exists(partial), false);
     assert.equal(resumedPull.stats.reconnects, 1); assert.equal(resumedPull.stats.incompleteNetworkStats, true);
     assert.ok(downloadLogs.some(line => line.includes('SSH 已恢复同一下载任务')));
-    assert.equal((await readJson(path.join(device.root, 'resumed-control/download.json'))).job, resumedJob);
+    assert.equal((await readJson(path.join(path.dirname(resumedTarget), 'download.json'))).job, resumedJob);
     assert.equal(session.control.intentional, true, 'finish closes the replacement control, not the original dead one');
     if (!session.control.closed) await once(session.control.child, 'close');
     assert.equal(session.control.closed, true);
@@ -247,27 +307,31 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     session = await connect(device, localEnvironment);
     const closedSession = session, closedLog = [];
     session.log = line => { closedLog.push(line); if (line === 'rsync 下载结束') closedSession.control.child.kill(); };
-    const closedTarget = path.join(device.root, 'closed-control/download');
-    const closedPull = await pull(session, device, randomUUID(), closedTarget);
+    const closedJob = randomUUID(), closedTarget = downloadTarget(closedJob);
+    const closedPull = await pull(session, device, closedJob, closedTarget);
     await verify(closedTarget, recoveredManifest);
     assert.equal(closedPull.manifest.digest, recoveredManifest.digest); assert.equal(session.control.closed, true);
     assert.ok(closedLog.some(line => line.includes('继续准备应用')));
-    assert.equal((await readJson(path.join(device.root, 'closed-control/manifest.json'))).digest, recoveredManifest.digest);
-    assert.equal((await readJson(path.join(device.root, 'closed-control/download.json'))).generation, current.generation);
+    assert.equal((await readJson(path.join(path.dirname(closedTarget), 'manifest.json'))).digest, recoveredManifest.digest);
+    assert.equal((await readJson(path.join(path.dirname(closedTarget), 'download.json'))).generation, current.generation);
     session.control.close();
     // Also cover a lost ACK after the server receives finish, and keep real
     // permission errors and corrupt downloads fatal.
     finishMode = 'disconnect';
     session = await connect(device, localEnvironment);
-    const lostTarget = path.join(device.root, 'lost-ack/download');
-    await pull(session, device, randomUUID(), lostTarget); await verify(lostTarget, recoveredManifest); session.control.close();
+    const lostJob = randomUUID(), lostTarget = downloadTarget(lostJob);
+    await pull(session, device, lostJob, lostTarget); await verify(lostTarget, recoveredManifest); session.control.close();
+    assert.equal((await readJson(path.join(path.dirname(lostTarget), 'download-resume.json'))).state, 'verified');
+    assert.equal((await readJson(path.join(path.dirname(lostTarget), 'download.json'))).generation, current.generation);
     finishMode = 'reject'; session = await connect(device, localEnvironment);
-    await assert.rejects(pull(session, device, randomUUID(), path.join(device.root, 'rejected/download')), { code: 'PERMISSION' });
+    const rejectedJob = randomUUID();
+    await assert.rejects(pull(session, device, rejectedJob, downloadTarget(rejectedJob)), { code: 'PERMISSION' });
     session.control.close(); finishMode = 'normal';
     await fs.writeFile(path.join(serverPayload, 'profile/settings.json'), '{"corrupt":true}');
     session = await connect(device, localEnvironment);
     const finishes = operations.filter(op => op === 'finish').length;
-    await assert.rejects(pull(session, device, randomUUID(), path.join(device.root, 'corrupt/download')), { code: 'INTEGRITY' });
+    const corruptJob = randomUUID();
+    await assert.rejects(pull(session, device, corruptJob, downloadTarget(corruptJob)), { code: 'INTEGRITY' });
     assert.equal(operations.filter(op => op === 'finish').length, finishes, 'corrupt content must not reach finish');
     session.control.close();
     await fs.copyFile(path.join(payload, 'profile/settings.json'), path.join(serverPayload, 'profile/settings.json'));
@@ -281,8 +345,8 @@ test('real SSH password login, automatic dataset, rsync push/pull and changed-ho
     assert.equal((await push(session, device, randomUUID(), payload, pathManifest)).digest, pathManifest.digest);
     session.control.close();
     session = await connect(device, localEnvironment);
-    const pathTarget = path.join(device.root, 'PATH-download');
-    await pull(session, device, randomUUID(), pathTarget); await verify(pathTarget, pathManifest);
+    const pathJob = randomUUID(), pathTarget = downloadTarget(pathJob);
+    await pull(session, device, pathJob, pathTarget); await verify(pathTarget, pathManifest);
     session.control.close(); pathSsh = false;
     // Authentication to another dataset during recovery must not publish bytes.
     session = await connect(device, localEnvironment);
