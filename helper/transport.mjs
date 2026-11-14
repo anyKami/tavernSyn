@@ -320,20 +320,35 @@ async function hybridDownload(session, device, job, payload, manifest, begun, sc
     else await atomicJson(saved, { plan, descriptors });
     const wire = path.join(path.dirname(payload), 'wire'); await noLinks(wire); await fs.mkdir(wire, { recursive: true });
     let stats;
-    if (descriptors.length) stats = await recovery.run(() => transfer(session.env, 'pull', job, wire, onProgress, undefined, session.log, descriptors.map((_, i) => `${i}.bundle`), 'wire'));
+    // Preserve completed rsync statistics even if a later transfer or verification fails.
+    if (descriptors.length) {
+        stats = await recovery.run(() => transfer(session.env, 'pull', job, wire, onProgress, undefined, session.log, descriptors.map((_, i) => `${i}.bundle`), 'wire'));
+        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
+    }
     for (let i = 0; i < descriptors.length; i++) {
         const file = path.join(wire, `${i}.bundle`);
         try { requireThat((await fs.lstat(file)).size === descriptors[i].size, 'INTEGRITY', '包大小不匹配。'); await verifyBundle(file, plan, manifest, i, descriptors[i].sha256); }
-        catch { stats = { ...addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, wire, onProgress, [`${i}.bundle`], session.log, undefined, 'wire'))), corrected: true }; await verifyBundle(file, plan, manifest, i, descriptors[i].sha256); }
+        catch {
+            stats = { ...addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, wire, onProgress, [`${i}.bundle`], session.log, undefined, 'wire'))), corrected: true };
+            await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
+            await verifyBundle(file, plan, manifest, i, descriptors[i].sha256);
+        }
     }
     await cleanHybridStage(payload, manifest);
-    if (plan.large.length) stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log, plan.large)));
+    if (plan.large.length) {
+        stats = addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, undefined, session.log, plan.large)));
+        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
+    }
     for (let i = 0; i < descriptors.length; i++) await applyBundle(path.join(wire, `${i}.bundle`), payload, plan, manifest, i, descriptors[i].sha256);
     await partialCleanup(payload);
     let diff = difference(manifest, await scan(payload));
     const correction = [...diff.missing, ...diff.changed];
     requireThat(!diff.extra.length && correction.every(name => plan.large.includes(name)), 'INTEGRITY', '下载暂存与固定计划不一致。');
-    if (correction.length) { stats = { ...addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log))), corrected: true }; await partialCleanup(payload); await verify(payload, manifest); }
+    if (correction.length) {
+        stats = { ...addStats(stats, await recovery.run(() => transfer(session.env, 'pull', job, payload, onProgress, correction, session.log))), corrected: true };
+        await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
+        await partialCleanup(payload); await verify(payload, manifest);
+    }
     else await verify(payload, manifest);
     return stats ?? { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 };
 }
@@ -359,12 +374,19 @@ export async function finalizeUpload(session, device, job, payload, manifest, st
             const descriptors = [];
             for (let i = 0; i < plan.groups.length; i++) descriptors.push(await createBundle(payload, path.join(wire, `${i}.bundle`), plan, manifest, i));
             await session.control.request('hybrid-descriptors', { job, descriptors });
-            if (descriptors.length) stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, wire, onProgress, descriptors.map((_, i) => `${i}.bundle`), session.log, undefined, 'wire'), true));
+            if (descriptors.length) {
+                stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, wire, onProgress, descriptors.map((_, i) => `${i}.bundle`), session.log, undefined, 'wire'), true));
+                await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
+            }
             if (plan.large.length) {
                 stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, payload, onProgress, undefined, session.log, plan.large), true));
+                await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
                 const diff = await session.control.request('inspect', { job, manifest });
                 const correction = diff.changed.filter(name => plan.large.includes(name));
-                if (correction.length) stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, payload, onProgress, correction, session.log), true));
+                if (correction.length) {
+                    stats = addStats(stats, await recovery.run(() => transfer(session.env, 'push', job, payload, onProgress, correction, session.log), true));
+                    await onProgress?.({ stage: 'stats', stats: recovery.stats(stats) });
+                }
             }
             await session.control.request('hybrid-apply', { job });
             await onProgress?.({ stage: 'transferred', stats: recovery.stats(stats) });

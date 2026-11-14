@@ -55,7 +55,7 @@ export async function init(router){
  router.post('/pending',(_req,res)=>{res.type('text/plain');res.write('waiting');});
  router.post('/hang-exit',(_req,res)=>{globalThis.tavernsynRuntime.state.fixtureHangExit=true;res.json({ok:true});});
 }
-export async function exit(){if(globalThis.tavernsynRuntime.state.fixtureHangExit)await new Promise(()=>{});}
+export async function exit(){if(globalThis.tavernsynRuntime?.state.fixtureHangExit)await new Promise(()=>{});}
 `);
 const fixtureDevice = await readJson(path.join(state, 'device.json'));
 // A synthetic native plugin reproduces browser resource loads without copying user plugins/data.
