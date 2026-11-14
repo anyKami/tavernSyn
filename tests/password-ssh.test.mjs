@@ -80,7 +80,8 @@ test('real SSH password login negotiates hybrid, pins the dataset and rejects ol
                             const message = JSON.parse(buffer.slice(0, index)); buffer = buffer.slice(index + 1);
                             messages.push(message);
                             const result = { protocol: 1, capabilities: ['job-bound-rsync'], dataset, current: null };
-                            if (!legacy) { result.hybridProtocol = 'hybrid-v1'; result.capabilities.push('hybrid-v1'); }
+                            result.hybridProtocol = legacy ? 'hybrid-v1' : 'hybrid-v2';
+                            result.capabilities.push(result.hybridProtocol);
                             channel.write(JSON.stringify({ id: message.id, ok: true, result }) + '\n');
                         }
                     });
@@ -104,7 +105,7 @@ test('real SSH password login negotiates hybrid, pins the dataset and rejects ol
     };
     await assert.rejects(connect(device, localEnvironment), { code: 'UPGRADE_REQUIRED' });
     assert.equal(device.remote.dataset, '');
-    assert.deepEqual(messages.map(({ op, requiredProtocol }) => [op, requiredProtocol]), [['hello', 'hybrid-v1']]);
+    assert.deepEqual(messages.map(({ op, requiredProtocol }) => [op, requiredProtocol]), [['hello', 'hybrid-v2']]);
     assert.ok(commands.every(command => command.startsWith('tavernsyn-control-v1 ')));
     legacy = false;
     const session = await connect(device, localEnvironment);

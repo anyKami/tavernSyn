@@ -41,7 +41,7 @@ async function storeTransport(context) {
         async connect(device) {
             const child = spawn(process.env.PYTHON ?? 'python', ['-B', path.join(PROJECT, 'tests/scoped-store-fixture.py'), root, device.deviceId, device.remote.dataset], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
             const control = new transport.Control(child); controls.push(control);
-            const hello = await control.request('hello', { requiredProtocol: 'hybrid-v1' });
+            const hello = await control.request('hello', { requiredProtocol: 'hybrid-v2' });
             const env = { rsync: binary, posix, rsh: shell, jobBound: true, deviceId: device.deviceId,
                 authEnv: { TAVERNSYN_FIXTURE_STORE: root, TAVERNSYN_FIXTURE_RSYNC: binary, LC_ALL: 'C', RSYNC_PROTECT_ARGS: '0', RSYNC_OLD_ARGS: '0' } };
             const session = { hello, control, env, log: message => logs.push(message), async reconnect() {
@@ -127,7 +127,7 @@ test('classification apply and interrupted rollback leave settings, cards and pl
 test('real protocol and rsync mirror selected categories both ways with deletions and no-change fast exit', { timeout: 120000 }, async context => {
     const remote = await storeTransport(context); if (!remote) return;
     const source = await fixture(); await populate(source);
-    const large = randomBytes(2 * 1024 * 1024), largeFile = path.join(source.dataRoot, source.profile, 'characters/large.png');
+    const large = randomBytes(4 * 1024 * 1024), largeFile = path.join(source.dataRoot, source.profile, 'characters/large.png');
     await fs.writeFile(largeFile, large); await publish(source, remote);
     const fullBefore = await readJson(path.join(remote.root, 'current.json'));
     const beforeManifest = await readJson(path.join(remote.root, 'generations', fullBefore.generation, 'manifest.json'));
@@ -161,7 +161,7 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     const preview = await phase(manager, 'AWAITING_SAVE', 30000); assert.ok(preview.summary.deleted >= 3);
     const pushed = await runHandoff(manager);
     assert.equal(plannedWithPartial, true);
-    assert.ok(pushed.stats.sentBytes < 64 * 1024 && pushed.stats.matchedBytes > 1.9 * 1024 * 1024, JSON.stringify(pushed.stats));
+    assert.ok(pushed.stats.sentBytes < 64 * 1024 && pushed.stats.matchedBytes > large.length - 64 * 1024, JSON.stringify(pushed.stats));
     assert.equal(pushed.scope.length, 3); assert.ok(pushed.remote.snapshotDigest);
     assert.deepEqual(await readJson(baselineFile), { sentinel: 'full baseline' });
     const current = await readJson(path.join(remote.root, 'current.json')), payload = path.join(remote.root, 'generations', current.generation, 'payload');
@@ -187,7 +187,7 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     assert.equal(await exists(path.join(target.dataRoot, target.profile, 'characters/[B].png')), true);
     assert.equal(await exists(path.join(target.dataRoot, target.profile, 'worlds/book.json')), false);
     assert.deepEqual(await Promise.all(localFiles.map(hashFile)), localHashes);
-    assert.ok(pulled.stats.receivedBytes < 64 * 1024 && pulled.stats.matchedBytes > 1.9 * 1024 * 1024, JSON.stringify(pulled.stats));
+    assert.ok(pulled.stats.receivedBytes < 64 * 1024 && pulled.stats.matchedBytes > large.length - 64 * 1024, JSON.stringify(pulled.stats));
     assert.equal((await recoveryStatus(target)).available, false);
     assert.equal(await exists(path.join(target.state, 'recovery')), false);
     const pulls = remote.pulls, targetStarts = targetLifecycle.starts;
@@ -204,7 +204,7 @@ test('real protocol and rsync mirror selected categories both ways with deletion
 test('native rsync correction handles literal bracket paths under the production daemon option restrictions', { timeout: 60000 }, async context => {
     const remote = await storeTransport(context); if (!remote) return;
     const source = await fixture(); await populate(source);
-    const expected = randomBytes(512 * 1024);
+    const expected = randomBytes(3 * 1024 * 1024 + 1);
     const original = path.join(source.dataRoot, source.profile, 'characters/[literal].png');
     await fs.writeFile(original, expected);
     await fs.utimes(original, 1700000000, 1700000000);
@@ -236,7 +236,7 @@ test('full hybrid push and pull use one generation and handle file-directory con
     await fs.writeFile(path.join(profile, 'worlds/to-file'), '{"new":true}');
     await fs.unlink(path.join(profile, 'worlds/to-directory'));
     await fs.mkdir(path.join(profile, 'worlds/to-directory'));
-    await fs.writeFile(path.join(profile, 'worlds/to-directory/large.bin'), randomBytes(300 * 1024));
+    await fs.writeFile(path.join(profile, 'worlds/to-directory/large.bin'), randomBytes(3 * 1024 * 1024 + 1));
     const upload = randomUUID(), staged = path.join(source.root, upload, 'payload');
     const { manifest } = await snapshot(source, staged);
     const sender = await remote.connect(source);

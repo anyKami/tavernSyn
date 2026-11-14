@@ -4,7 +4,7 @@ SillyTavern 跨设备手动同步插件，面向 Windows 和 Android Termux。�
 
 ## 当前版本
 
-**0.2.13，适配 SillyTavern 1.19.0。** 设备和 VPS 需同时支持混合传输；小文件打包传输，大文件继续使用 rsync 块差分，最终核对完整 SHA-256 清单。后端自动更新不会更新前端。详见[混合传输说明](docs/hybrid-transfer.md)、[验证记录](docs/test-results/hybrid-transfer-windows.json)、[故障与恢复](docs/recovery.md)和[更新记录](CHANGELOG.md)。
+**0.2.14，适配 SillyTavern 1.19.0。** 设备和 VPS 需同时更新以支持新混合传输协议；小文件打包传输，大文件继续使用 rsync 块差分，最终核对完整 SHA-256 清单。后端自动更新不会更新前端。详见[混合传输说明](docs/hybrid-transfer.md)、[验证记录](docs/test-results/hybrid-transfer-windows.json)、[故障与恢复](docs/recovery.md)和[更新记录](CHANGELOG.md)。
 
 本版本已清理旧 Git 历史，已有旧克隆请重新克隆后更新，见[历史清理说明](docs/security-audit-0.2.0.md#历史清理)。
 

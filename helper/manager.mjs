@@ -13,6 +13,7 @@ import { completionPath, readCompletion, validateCompletion, completedStatus, co
 import { normalizeScope } from '../lib/scope.mjs';
 import { executeScoped } from './scoped.mjs';
 import { loadDownloadBinding } from './download-binding.mjs';
+import { HYBRID_PROTOCOL } from '../lib/hybrid.mjs';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'PREVIEW', 'PENDING_APPLY', 'RECOVERY_REQUIRED']);
 const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '从 VPS 下载', VERIFYING: '校验文件', PREPARING: '准备插件',
@@ -376,7 +377,7 @@ export class Manager {
         if (local.digest !== baseline.local.digest) return false;
         // Recheck the publication after local inventory/save; a stale hello must
         // never let us skip another device's newly published update.
-        const latest = await session.control.request('hello', { requiredProtocol: 'hybrid-v1' });
+        const latest = await session.control.request('hello', { requiredProtocol: HYBRID_PROTOCOL });
         requireThat(latest.dataset === this.device.remote.dataset, 'REMOTE_DATASET', 'VPS 数据集已经改变，停止跳过同步。');
         if (latest.current?.digest !== baseline.remote.digest) return false;
         if ((await portableState(this.device)).digest !== local.digest) return false;

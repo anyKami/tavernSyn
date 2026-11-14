@@ -180,7 +180,7 @@ if j and j["direction"]=="push" and j["phase"] not in ("done","aborted"):
     mode=stat.S_IMODE(info.st_mode)|stat.S_IRUSR|stat.S_IWUSR|(stat.S_IXUSR if stat.S_ISDIR(info.st_mode) else 0)
     if stat.S_IMODE(info.st_mode)!=mode:os.chmod(file,mode);changed+=1
 if j:s.park(j)
-h=s.command({"op":"hello","requiredProtocol":"hybrid-v1"},j["device"] if j else "00000000-0000-4000-8000-000000000000")
+h=s.command({"op":"hello","requiredProtocol":d.hybrid.PROTOCOL},j["device"] if j else "00000000-0000-4000-8000-000000000000")
 print(json.dumps({"hello":h,"repairedStageModes":changed}))'''
             probe = json.loads(run(["runuser", "-u", args.account, "--", "/usr/bin/python3", "-B", "-c", code, str(target), str(root)]))
             check(pointers(root) == before, "Published pointers changed unexpectedly")

@@ -553,20 +553,23 @@ class StoreTests(unittest.TestCase):
     def test_hybrid_hello_and_old_job_fail_before_changing_storage(self):
         job = str(uuid.uuid4())
         request = dict(op="begin", job=job, direction="push", dataset=self.dataset, jobBound=True)
-        for message in (request, dict(op="hello"), dict(op="hello", requiredProtocol="old")):
+        for message in (request, dict(op="hello"), dict(op="hello", requiredProtocol="hybrid-v1")):
             with self.assertRaisesRegex(d.ProtocolError, "UPGRADE_REQUIRED"):
                 self.store.command(message, self.device)
         self.assertFalse((self.root / "incoming" / job).exists())
         self.assertIsNone(self.store.current())
-        hello = self.store.command(dict(op="hello", requiredProtocol="hybrid-v1"), self.device)
-        self.assertEqual(hello["hybridProtocol"], "hybrid-v1")
+        hello = self.store.command(dict(op="hello", requiredProtocol="hybrid-v2"), self.device)
+        self.assertEqual(hello["hybridProtocol"], "hybrid-v2")
+        self.assertIn("hybrid-v2", hello["capabilities"])
         self.store.command(request, self.device)
         active = self.store.active()
-        active.pop("protocol")
+        active["protocol"] = "hybrid-v1"
         d.atomic(self.store.private / "active.json", active)
         self.store.close()
+        paused = self.store.active()
         with self.assertRaisesRegex(d.ProtocolError, "UPGRADE_REQUIRED"):
             self.store.begin({**request, "resumeOnly": True}, self.device)
+        self.assertEqual(self.store.active(), paused)
 
     def test_frozen_upload_replays_after_missing_bundle_and_interrupted_apply(self):
         job = self.begin()
@@ -657,7 +660,7 @@ class LinuxLockTests(unittest.TestCase):
             store, device, message = self.store(Path(temp) / "store")
             env = {**os.environ, "SSH_ORIGINAL_COMMAND": f"tavernsyn-control-v1 {device}",
                    "SSH_CONNECTION": "100.64.0.1 12345 100.64.0.2 22"}
-            hello = json.dumps(dict(op="hello", requiredProtocol="hybrid-v1", id=1))
+            hello = json.dumps(dict(op="hello", requiredProtocol="hybrid-v2", id=1))
             begin = json.dumps({**message, "id": 2, "op": "begin"})
             result = subprocess.run([os.sys.executable, str(PROJECT / "vps/dispatcher.py"), "--root", str(store.root)],
                                     input=hello + "\n" + begin + "\n", text=True,

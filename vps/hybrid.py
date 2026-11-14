@@ -9,12 +9,12 @@ import struct
 import unicodedata
 import uuid
 
-SMALL_LIMIT = 256 * 1024
+SMALL_LIMIT = 3 * 1024 * 1024
 BUNDLE_LIMIT = 16 * 1024 * 1024
 FILE_LIMIT = 2000
 HEADER_LIMIT = 1024 * 1024
 MAGIC = b'TSHYB001'
-PROTOCOL = 'hybrid-v1'
+PROTOCOL = 'hybrid-v2'
 
 
 def canonical(value):

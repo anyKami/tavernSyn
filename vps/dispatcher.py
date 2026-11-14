@@ -749,7 +749,7 @@ class Store:
             current = self.current()
             active = self.active()
             pending = {k: active[k] for k in ("job", "direction", "phase")} if active and active["device"] == device and active["phase"] not in ("done", "aborted") else None
-            return {"protocol": 1, "version": "0.2.13", "hybridProtocol": hybrid.PROTOCOL, "capabilities": ["hybrid-v1", "paused-jobs", "job-bound-rsync", "scoped-sync-v1", "inspect-preserves-partials"], "dataset": self.format["dataset"],
+            return {"protocol": 1, "version": "0.2.14", "hybridProtocol": hybrid.PROTOCOL, "capabilities": [hybrid.PROTOCOL, "paused-jobs", "job-bound-rsync", "scoped-sync-v1", "inspect-preserves-partials"], "dataset": self.format["dataset"],
                     "current": {k: current[k] for k in ("generation", "digest")} if current else None, "pending": pending}
         check(self.hello_checked, "UPGRADE_REQUIRED: hybrid hello required")
         if op == "hybrid-plan":

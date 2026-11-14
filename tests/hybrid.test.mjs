@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createPlan, createBundle, verifyBundle, applyBundle, SMALL_LIMIT } from '../lib/hybrid.mjs';
+import { createPlan, createBundle, verifyBundle, applyBundle } from '../lib/hybrid.mjs';
 import { digest, run } from '../lib/io.mjs';
 import { scan, verify } from '../lib/manifest.mjs';
 import { temporary } from './fixtures.mjs';
@@ -58,20 +58,32 @@ function manifestOf(files) {
         digest: digest(records), files: records.map(file => ({ ...file, mtime: 1700000000 })) };
 }
 
-test('selection follows exact size and count limits and rejects unsafe or repeated paths', () => {
+test('Node and Python follow exact size and count limits and Node rejects unsafe or repeated paths', async () => {
+    const smallLimit = 3 * 1024 * 1024;
     const files = [
-        ...Array.from({ length: 65 }, (_, i) => ({ path: `profile/a${String(i).padStart(2, '0')}`, size: SMALL_LIMIT })),
+        ...Array.from({ length: 5 }, (_, i) => ({ path: `profile/a${i}`, size: smallLimit })),
+        { path: 'profile/a5', size: 1024 * 1024 },
+        { path: 'profile/a6', size: 1 },
         ...Array.from({ length: 2001 }, (_, i) => ({ path: `profile/b${String(i).padStart(4, '0')}`, size: 0 })),
-        { path: 'profile/large', size: SMALL_LIMIT + 1 },
+        { path: 'profile/large', size: smallLimit + 1 },
         { path: 'profile/unchanged', size: 1 },
     ];
     const manifest = manifestOf(files), changed = files.slice(0, -1).map(file => file.path);
-    const plan = createPlan(binding(), manifest, changed);
-    assert.deepEqual(plan.groups.map(group => group.length), [64, 2000, 2]);
+    const identity = binding(), plan = createPlan(identity, manifest, changed);
+    assert.deepEqual(plan.groups.map(group => group.length), [6, 2000, 2]);
+    assert.deepEqual(plan.groups[0].map(file => file.path), files.slice(0, 6).map(file => file.path));
     assert.deepEqual(plan.large, ['profile/large']);
     assert.ok(!plan.groups.flat().some(file => file.path === 'profile/unchanged'));
     assert.throws(() => createPlan(binding(), manifest, [...changed, changed[0]]));
     for (const unsafe of ['../escape', 'profile/../escape', 'profile/.tavernsyn-partial/x', '/absolute', 'profile/CON.txt']) {
         assert.throws(() => createPlan(binding(), manifestOf([{ path: unsafe, size: 0 }]), [unsafe]), unsafe);
     }
+    const code = [
+        'import json, sys', 'sys.path.insert(0, "vps")', 'import hybrid',
+        'print(json.dumps(hybrid.create_plan(*json.load(sys.stdin))))',
+    ].join('\n');
+    const { stdout } = await run(process.env.PYTHON ?? 'python', ['-B', '-c', code], {
+        input: JSON.stringify([identity, manifest, changed]),
+    });
+    assert.deepEqual(JSON.parse(stdout), plan);
 });
