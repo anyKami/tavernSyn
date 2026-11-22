@@ -48,11 +48,16 @@ export class UsbSession {
         const server = this.reservation;
         if (server) { this.reservation = null; await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
     }
-    async open() {
+    async open({ managedLauncher = false } = {}) {
         requireThat(!this.opened && !this.locks.length, 'USB_SESSION', 'USB 会话已打开。');
+        if (managedLauncher) {
+            requireThat(this.lifecycle?.stopped && this.lifecycle?.onRequest, 'USB_RUNNING', '受控 USB 模式必须先确认酒馆已经停止。');
+            const lease = await readJson(path.join(this.device.state, 'launcher.lock'));
+            requireThat(lease.pid === process.pid && uuidPattern.test(lease.nonce), 'USB_RUNNING', 'USB 操作未由本机受控启动器持有，不能接管运行中的酒馆。');
+        }
         await noLinks(this.device.state);
         try {
-            for (const name of ['launcher.lock', 'operation.lock']) {
+            for (const name of (managedLauncher ? ['operation.lock'] : ['launcher.lock', 'operation.lock'])) {
                 const file = path.join(this.device.state, name), nonce = randomUUID();
                 const handle = await fs.open(file, 'wx', 0o600).catch(() => {
                     throw new SyncError('USB_RUNNING', '酒馆、启动器或同步任务锁仍存在。请先正常关闭；异常退出请按恢复说明处理，不会自动清除锁。');

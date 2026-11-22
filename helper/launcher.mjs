@@ -12,6 +12,7 @@ import { Manager } from './manager.mjs';
 import { recoverStopped } from '../bin/recover.mjs';
 import { openBrowser } from './browser.mjs';
 import { createSyncLog } from './sync-log.mjs';
+import { UsbController } from './usb-controller.mjs';
 
 async function main() {
     const options = cliOptions(), device = await loadDevice(options.state);
@@ -42,12 +43,14 @@ async function main() {
     process.once('exit', () => syncLog.close());
     const lifecycle = new Lifecycle(device, (action, payload) => manager.action(action, payload), { stdout: process.stdout, stderr: process.stderr });
     manager = new Manager(device, lifecycle, undefined, syncLog);
+    const usbController = new UsbController(device, lifecycle, manager, { log: message => syncLog(null, message) });
+    manager.usb = usbController;
     let stopping = false;
     const shutdown = async () => {
         if (stopping) return;
         stopping = true;
         console.log('正在停止酒馆…');
-        try { await lifecycle.close(); release(); process.exit(0); }
+        try { await usbController.cancelForExit(); await lifecycle.close(); release(); process.exit(0); }
         catch (error) { console.error(error.message); process.exit(1); }
     };
     process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown); process.on('SIGHUP', shutdown);

@@ -51,6 +51,8 @@ bash install.sh "$HOME/SillyTavern"
 
 **USB 同步：**两端更新到同一版本（至少 0.5.0），保存编辑后正常关闭两端酒馆及启动器。手机用数据线连接电脑，首次连接时按 Android 提示授权 USB 调试。手机运行酒馆目录中的 `bash usb-tavernsyn.sh`，电脑运行 `USB-TavernSyn.cmd`；自动连接后，在任意一端选择 `1 电脑 → 手机` 或 `2 手机 → 电脑` 即开始。已有 USB 入口可以复用，缺少入口时再运行安装器。电脑需先安装官方 [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) 并加入 PATH。完整步骤、同步范围与故障处理见 [USB 使用指南](docs/usb-sync.md)。
 
+新版还支持在两端酒馆插件的「USB 数据线完整同步」中直接连接和选择方向，由受控启动器自动停机、传输和重启；离线启动脚本保留作为备用。
+
 **Google 云盘同步：**在自己的 Google Cloud 项目启用 Drive API，创建桌面应用 OAuth 客户端。使用正常 TavernSyn 入口启动，在「设置与检查 · 同步仓库」选择 Google 云盘，保存客户端配置并授权。第一台设备创建仓库、保存配对码并完成首次推送；第二台设备使用同一个 Google 账号和客户端授权，用配对码加入后拉取。完整步骤与限制见 [Google 云盘指南](docs/google-drive.md)。
 
 云端上传期间新旧快照会暂时并存；清理失败或其他设备仍在上传时也可能有额外占用。程序只删除能核实属于本仓库且已可清理的文件，不会清空整个云盘回收站。保留一份完整快照的规则、空间要求及旧版本遗留文件处理见 [清理说明](docs/google-drive.md#发布并发与清理)。

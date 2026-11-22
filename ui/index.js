@@ -6,6 +6,7 @@ const labels = { IDLE: '就绪', PREFLIGHT: '正在检查环境', DOWNLOADING: '
 let status = { phase: 'IDLE' }, handlingSave = false, starting = false, resumed = false, localError = '';
 let setupBusy = false, configLoaded = false, configLoading = false, savedTarget = '', passwordSaved = false;
 let driveConfig = {}, authorizationPending = false, authorizationDeadline = 0;
+let usbState = { stage: 'idle', supported: false }, usbBusy = false;
 const context = () => SillyTavern.getContext();
 async function api(route, body) {
     const response = await fetch(BASE + route, { method: body === undefined ? 'GET' : 'POST', cache: 'no-store',
@@ -67,9 +68,11 @@ root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle in
 <small>所选类别以来源为准，接收端多出的文件会删除；其他类别、配置和插件保持不变。首次使用需先在 VPS 建立一次完整副本。</small></fieldset>
 <button type="button" class="menu_button ts-restore" disabled>恢复上一版</button><small class="ts-recovery"></small>
 <details class="ts-usb"><summary>USB 数据线完整同步</summary>
-<p>两端更新后重新运行安装器。先保存并正常关闭两端酒馆及启动器，手机通过 USB 连接电脑并允许 USB 调试；手机运行酒馆目录中的 usb-tavernsyn.sh，电脑运行 USB-TavernSyn.cmd。</p>
-<p>电脑输入 ADB 路径、手机本次配对码和覆盖方向，核对双方设备名称后输入 YES。目标完整镜像来源，包含删除；不需要 VPS。目标保留一份最新的覆盖前备份，完成后使用平时入口启动酒馆。</p>
-<p>电脑需安装 Android SDK Platform-Tools。USB 传输完整快照；插件依赖恢复可能仍需 npm 缓存或网络。</p>
+<p>在电脑与手机上分别打开受控酒馆，点击下方“连接 USB”。连接完成后，在任意一端选择一次方向，另一端自动跟随。同步期间自动停止两端酒馆，结束后自动重启，无需启动脚本、配对码或二次确认。</p>
+<p>电脑需要安装 ADB 并通过数据线连接已允许 USB 调试的手机；所有 USB 传输只走数据线，不使用 VPS 或 Google Drive。覆盖包含删除，接收端保留最近一次恢复备份。</p>
+<div class="ts-actions"><button type="button" class="menu_button ts-usb-connect">连接 USB</button><button type="button" class="menu_button ts-usb-cancel" hidden>取消连接</button></div>
+<div class="ts-actions ts-usb-directions" hidden><button type="button" class="menu_button ts-usb-push">电脑 → 手机</button><button type="button" class="menu_button ts-usb-pull">手机 → 电脑</button></div>
+<p class="ts-usb-status" role="status">正在检测本机 USB 能力……</p>
 <a href="https://github.com/anyKami/tavernSyn/blob/main/docs/usb-sync.md" target="_blank" rel="noopener noreferrer">查看 USB 使用指南</a></details>
 <p class="ts-detail"></p><small class="ts-history"></small><details class="ts-settings"><summary>设置与检查 · 同步仓库</summary>
 <form class="ts-config"><fieldset disabled><legend>同步仓库</legend>
@@ -184,7 +187,21 @@ function render() {
         : status.recovery?.reason || '暂无可用恢复备份；本机应用后保留最新一份覆盖前备份。');
     dialog.querySelector('.ts-cancel').hidden = !['AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);
     const terminal = ['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
-    for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy;
+    const usbActive = ['connecting', 'waiting', 'connected', 'selected', 'stopping', 'transferring', 'restarting'].includes(usbState.stage);
+    for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy || usbActive;
+    const usbConnect = root.querySelector('.ts-usb-connect'), usbCancel = root.querySelector('.ts-usb-cancel');
+    const usbDirections = root.querySelector('.ts-usb-directions');
+    usbConnect.hidden = usbActive;
+    usbConnect.disabled = !status.managed || !usbState.supported || usbBusy || !terminal;
+    usbCancel.hidden = !['connecting', 'waiting', 'connected'].includes(usbState.stage);
+    usbCancel.disabled = usbBusy;
+    usbDirections.hidden = usbState.stage !== 'connected';
+    for (const button of usbDirections.querySelectorAll('button')) button.disabled = usbBusy;
+    const usbNames = { idle: '未连接', connecting: '正在建立 USB 连接…', waiting: '等待另一端打开酒馆并点击“连接 USB”…', connected: 'USB 已连接：请选择方向；也可以在另一端选择。', selected: '已确定方向，准备关闭酒馆。', stopping: '正在保存并关闭酒馆…', transferring: '正在同步数据、校验并应用…', restarting: '同步结束，正在重新启动酒馆…', completed: 'USB 同步完成。', failed: 'USB 同步失败。', cancelled: '已取消 USB 连接。' };
+    root.querySelector('.ts-usb-status').textContent = !status.managed ? '请使用 TavernSyn 受控启动器启动酒馆。'
+        : !usbState.supported ? '当前操作系统不是 Windows 或 Android Termux，不能使用 USB 直连。'
+            : (usbNames[usbState.stage] || 'USB 状态未知') + (usbState.peer?.deviceName ? ' 对端：' + usbState.peer.deviceName : '')
+                + (usbState.error?.message ? ' ' + usbState.error.message : '') + (usbState.note ? ' ' + usbState.note : '');
     for (const checkbox of root.querySelectorAll('.ts-scope input')) checkbox.disabled = !terminal || starting || setupBusy;
     root.querySelector('.ts-resume-download').hidden = !status.canResumeDownload;
     root.querySelector('.ts-resume-upload').hidden = !(status.phase === 'FAILED' && !status.commit && status.direction === 'push' && status.snapshotReady === true);
@@ -223,6 +240,35 @@ async function begin(direction, preview = false, scoped = false) {
         status = { ...status, ...started, scope, reason: '', note: '', error: null, stats: null, summary: null, progress: null }; starting = false; render();
     } catch (error) { showError(error); }
 }
+async function usbConnect() {
+    if (usbBusy || starting || setupBusy) return;
+    usbBusy = true; localError = ''; render();
+    try {
+        // The normal browser's save and disk receipt are required before the
+        // managed launcher may terminate SillyTavern and apply a mirror.
+        const receipt = await flush();
+        usbState = await api('usb/connect', { tab, receipt });
+        root.querySelector('.ts-usb').open = true;
+    } catch (error) { localError = error.message; }
+    finally { usbBusy = false; render(); }
+}
+root.querySelector('.ts-usb-connect').onclick = usbConnect;
+for (const [selector, direction] of [['.ts-usb-push', 'push'], ['.ts-usb-pull', 'pull']]) {
+    root.querySelector(selector).onclick = async () => {
+        if (usbBusy) return;
+        usbBusy = true; render();
+        try { usbState = await api('usb/select', { direction }); }
+        catch (error) { localError = error.message; }
+        finally { usbBusy = false; render(); }
+    };
+}
+root.querySelector('.ts-usb-cancel').onclick = async () => {
+    if (usbBusy) return;
+    usbBusy = true; render();
+    try { usbState = await api('usb/cancel', {}); }
+    catch (error) { localError = error.message; }
+    finally { usbBusy = false; render(); }
+};
 root.querySelector('.ts-push').onclick = () => begin('push');
 root.querySelector('.ts-pull').onclick = () => begin('pull');
 root.querySelector('.ts-scoped-push').onclick = () => begin('push', false, true);
@@ -407,7 +453,9 @@ dialog.querySelector('.ts-cancel').onclick = async () => {
 };
 async function poll() {
     try {
-        status = await api('status'); if (!starting) render();
+        status = await api('status');
+        if (status.managed) usbState = await api('usb/status').catch(() => usbState);
+        if (!starting) render();
         if (!status.configured && !configLoaded) { root.querySelector('.ts-settings').open = true; loadConfiguration(); }
         if (status.phase === 'PENDING_APPLY' && status.managed && !resumed) {
             await resumePending();

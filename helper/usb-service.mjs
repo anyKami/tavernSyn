@@ -63,7 +63,8 @@ function endpointOrigin(origin) {
 }
 
 /** A single local ADB session. The CLI retains ownership of session.close(). */
-export async function startUsbServer(session, { port = 17653, token = randomBytes(16).toString('hex'), idleMs = 15 * 60 * 1000 } = {}) {
+export async function startUsbServer(session, { port = 17653, token = randomBytes(16).toString('hex'), idleMs = 15 * 60 * 1000,
+    beforeTransfer = async () => {}, onFailure = () => {} } = {}) {
     tokenValue(token);
     requireThat(Number.isInteger(port) && port >= 0 && port <= 65535 && Number.isFinite(idleMs) && idleMs > 0, 'USB_CONFIG', 'USB 监听端口或空闲时限无效。');
     const auth = Buffer.from(`Bearer ${token}`), pending = new Set();
@@ -71,7 +72,10 @@ export async function startUsbServer(session, { port = 17653, token = randomByte
     const closed = new Promise(resolve => { closedResolve = resolve; });
     const connected = new Promise(resolve => { connectedResolve = resolve; });
     const selection = new Promise(resolve => { selectionResolve = resolve; });
-    const failure = async error => { try { await session.fail(error); } catch { /* Preserve the original operation error. */ } };
+    const failure = async error => {
+        try { await session.fail(error); } catch { /* Preserve the original operation error. */ }
+        try { onFailure(error); } catch { /* Never hide transfer failure. */ }
+    };
     const run = work => {
         requireThat(!closing, 'USB_CLOSING', 'USB 会话正在关闭。');
         requireThat(!active, 'USB_BUSY', 'USB 任务正在执行，不能并发开始另一项操作。');
@@ -177,7 +181,7 @@ export async function startUsbServer(session, { port = 17653, token = randomByte
                 catch { throw new SyncError('USB_PEER', 'USB 来源设备身份无效。'); }
                 const id = jobId(request.headers['x-tavernsyn-job']);
                 const source = matchSelection('push', id, peer);
-                const staged = await run(() => session.receive(request, source, id));
+                const staged = await run(async () => { await beforeTransfer(); return session.receive(request, source, id); });
                 reply(response, 200, staged); return;
             }
             requireThat(['POST /select', 'POST /export', 'POST /apply', 'POST /ack', 'POST /finish'].includes(route), 'USB_ROUTE', '不支持的 USB 操作。');
@@ -192,7 +196,7 @@ export async function startUsbServer(session, { port = 17653, token = randomByte
             if (route === 'POST /export') {
                 expectStage('idle'); onlyKeys(body, ['peer', 'id']);
                 const id = jobId(body.id), target = matchSelection('pull', id, body.peer);
-                void run(() => session.export(target, id)).catch(() => {});
+                void run(async () => { await beforeTransfer(); return session.export(target, id); }).catch(() => {});
                 reply(response, 202, { accepted: true, id }); return;
             }
             if (route === 'POST /apply') {

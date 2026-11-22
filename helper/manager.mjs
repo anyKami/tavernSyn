@@ -97,6 +97,10 @@ export class Manager {
         this.writeQueue.catch(() => { this.statusWriteFailed = true; });
     };
     async action(action, payload = {}) {
+        if (action === 'usb-status') return this.usb?.status() ?? { supported: false, stage: 'unavailable' };
+        if (action === 'usb-connect') return this.usb?.connect(payload) ?? Promise.reject(new SyncError('UNMANAGED', '需要使用 TavernSyn 受控启动器。'));
+        if (action === 'usb-select') return this.usb?.select(payload.direction) ?? Promise.reject(new SyncError('UNMANAGED', '需要使用 TavernSyn 受控启动器。'));
+        if (action === 'usb-cancel') return this.usb?.cancel() ?? Promise.reject(new SyncError('UNMANAGED', '需要使用 TavernSyn 受控启动器。'));
         if (action === 'status') return this.status();
         if (action === 'recovery') return recoveryStatus(this.device);
         if (action === 'configuration') return configuration(this.device);

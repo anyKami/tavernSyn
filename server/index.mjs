@@ -118,7 +118,24 @@ export async function init(router) {
                 maintenance: { ...status.maintenance, pending: [...new Set([...(status.maintenance?.pending ?? []), 'history'])] } } : {}) } : {}),
             ...(managed?.drain ? { drain: managed.drain.summary() } : {}) });
     }));
-    router.post('/check', endpoint(async (_req, res) => res.json(await helper('check'))));
+    router.get('/usb/status', endpoint(async (_req, res) => res.json(managed ? await helper('usb-status') : { supported: false, stage: 'unavailable' })));
+    router.post('/usb/connect', endpoint(async (req, res) => {
+        requireThat(managed, 'UNMANAGED', '请使用 TavernSyn 受控启动器启动酒馆。');
+        requireThat(req.body && Object.keys(req.body).every(k => ['tab', 'receipt'].includes(k))
+            && uuidPattern.test(req.body.tab) && uuidPattern.test(req.body.receipt), 'INPUT', 'USB 连接参数无效。');
+        const others = [...managed.tabs].filter(([tab, time]) => tab !== req.body.tab && Date.now() - time < 15000);
+        requireThat(!others.length, 'OTHER_TABS', '请关闭其他酒馆标签页，再执行 USB 完整同步。');
+        res.status(202).json(await helper('usb-connect', req.body));
+    }));
+    router.post('/usb/select', endpoint(async (req, res) => {
+        requireThat(managed && req.body && Object.keys(req.body).length === 1
+            && ['push', 'pull'].includes(req.body.direction), 'INPUT', 'USB 同步方向无效。');
+        res.json(await helper('usb-select', req.body));
+    }));
+    router.post('/usb/cancel', endpoint(async (req, res) => {
+        requireThat(managed && req.body && Object.keys(req.body).length === 0, 'INPUT', 'USB 取消参数无效。');
+        res.json(await helper('usb-cancel', {}));
+    }));
     router.get('/configuration', endpoint(async (_req, res) => res.json(await helper('configuration'))));
     for (const action of ['configure', 'drive-authorize', 'drive-create', 'drive-join', 'drive-pairing', 'drive-disconnect']) router.post(`/${action}`, endpoint(async (req, res) => {
         const result = await helper(action, req.body);
