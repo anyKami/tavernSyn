@@ -53,6 +53,12 @@ async function pair(computer, phone, direction) {
     const result = await syncUsb(host, { origin: `http://127.0.0.1:${server.port}`, token: server.token, direction,
         confirmPeer: async identity => { assert.equal(identity.deviceId, phone.deviceId); } });
     assert.equal(result.result.applied, true); assert.equal(result.result.maintenancePending, false);
+    // Both sides must expose real file-content progress, not a synthetic timer.
+    for (const session of [host, peer]) {
+        const job = session.manager.job;
+        assert.ok(job.bytes > 0 && job.progress && Number.isSafeInteger(job.progress.bytes));
+        assert.equal(job.progress.bytes, job.bytes, 'final transfer byte counter must match the frozen manifest');
+    }
     await server.closed; await host.close(); await peer.close();
     return { host, peer, result };
 }
