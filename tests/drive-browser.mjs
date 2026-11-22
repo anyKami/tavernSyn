@@ -33,17 +33,30 @@ try {
     let config = { provider: 'vps', host: '100.64.0.1', user: 'tavernsyn', passwordSaved: true, configured: true,
         dataset: 'vps-fixture', runtimeReady: true, drive: { clientConfigured: false, authorized: false, configured: false } };
     let status = { phase: 'IDLE', provider: 'vps', host: config.host, configured: true, deviceName: 'Browser fixture', managed: false, recovery: { available: false } };
-    let usbStatus = { stage: 'idle', supported: true };
+    let usbStatus = { stage: 'idle', supported: true }, usbOffline = false;
+    let holdUsbSelect = false, failUsbSelect = false, finishUsbSelect = null;
     const pair = 'TSDRIVE1.' + 'secret-pairing-fixture_'.repeat(20);
     await context.route('**/api/plugins/tavernsyn/**', async route => {
         const action = new URL(route.request().url()).pathname.slice('/api/plugins/tavernsyn/'.length);
         const body = route.request().postDataJSON(); calls.push({ action, body });
         let result = { ok: true };
-        if (action === 'status') result = status;
-        if (action === 'usb/status') result = usbStatus;
+        if (action === 'status') {
+            if (usbOffline) { await route.fulfill({ status: 503, json: { error: 'ST_EXITED' } }); return; }
+            result = status;
+        }
+        if (action === 'usb/status') {
+            if (usbOffline && route.request().headers()['x-tavernsyn-usb-watch'] !== 'browser-monitor-token') {
+                await route.fulfill({ status: 403, json: { error: 'USB_AUTH' } }); return;
+            }
+            result = usbStatus;
+        }
         if (action === 'flush') result = { receipt: 'browser-fixture-receipt' };
-        if (action === 'usb/connect') result = usbStatus = { stage: 'connected', supported: true, peer: { deviceName: 'My phone' } };
-        if (action === 'usb/select') result = usbStatus = { ...usbStatus, stage: 'selected', selection: { direction: body.direction } };
+        if (action === 'usb/connect') result = usbStatus = { stage: 'connected', supported: true, peer: { deviceName: 'My phone' }, watchToken: 'browser-monitor-token' };
+        if (action === 'usb/select') {
+            if (holdUsbSelect) await new Promise(resolve => { finishUsbSelect = resolve; });
+            if (failUsbSelect) { await route.abort('failed'); return; }
+            result = usbStatus = { ...usbStatus, stage: 'selected', selection: { direction: body.direction } };
+        }
         if (action === 'start') result = status = { ...status, phase: 'SUCCEEDED', id: 'browser-fixture-job', direction: body.direction };
         if (action === 'configuration') result = config;
         if (action === 'configure') {
@@ -192,6 +205,48 @@ try {
         assert.equal(await page.locator('dialog[open]').count(), 0);
     }
     checks.push('touch connection and both USB direction buttons send one selection each without another dialog');
+
+    // The direction API reply is deliberately held while the ST endpoint
+    // disappears. The button must change synchronously, then the launcher
+    // status bridge must feed actual received bytes during the outage.
+    usbStatus = { stage: 'idle', supported: true };
+    usbOffline = false; holdUsbSelect = true; failUsbSelect = true; finishUsbSelect = null;
+    await page.reload();
+    await page.setViewportSize({ width: 320, height: 820 });
+    await page.waitForFunction(() => !document.querySelector('.ts-usb-connect').disabled);
+    await page.locator('.ts-usb-connect').tap();
+    await page.locator('.ts-usb-directions').waitFor({ state: 'visible' });
+    await page.locator('.ts-usb-push').tap();
+    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay:not([hidden])')?.textContent.includes('已点击 电脑 → 手机'));
+    assert.equal(await page.locator('.ts-usb-directions').isVisible(), false, 'directions disappear immediately after touching');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    checks.push('USB direction tap immediately replaces buttons with visible phone-safe progress even before HTTP acknowledgement');
+
+    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay')?.textContent.includes('正在通知另一端'));
+    usbStatus = { stage: 'transferring', supported: true, watchToken: 'browser-monitor-token',
+        peer: { deviceName: 'My phone' }, selection: { direction: 'push' },
+        job: { phase: 'DOWNLOADING', bytes: 2097152, files: 7, progress: { stage: 'usb', bytes: 1048576, files: 3 } } };
+    usbOffline = true;
+    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay .ts-usb-progress')?.value === 50);
+    assert.match(await page.locator('.ts-usb-overlay .ts-usb-live-bytes').textContent(), /1.00 MiB \/ 2.00 MiB.*50.0%/);
+    assert.match(await page.locator('.ts-usb-live .ts-usb-live-bytes').textContent(), /1.00 MiB \/ 2.00 MiB/);
+    assert.equal(await page.locator('.ts-usb-overlay').isVisible(), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    assert.equal(typeof finishUsbSelect, 'function');
+    finishUsbSelect();
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator('.ts-usb-overlay').isVisible(), true, 'lost direction acknowledgement must not dismiss progress');
+    checks.push('while ST is offline the launcher watch token reports authentic 1 MiB / 2 MiB progress, not a fabricated estimate');
+
+    usbStatus = { ...usbStatus, job: { ...usbStatus.job, phase: 'VERIFYING', progress: { stage: 'usb', bytes: 2097152, files: 7 } } };
+    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay .ts-usb-progress')?.value === 100
+        && document.querySelector('.ts-usb-overlay .ts-usb-live-stage')?.textContent.includes('校验文件'));
+    assert.equal(await page.locator('.ts-usb-overlay').isVisible(), true, '100% bytes does not mean the apply is finished');
+    usbOffline = false;
+    usbStatus = { ...usbStatus, stage: 'completed', job: { ...usbStatus.job, phase: 'SUCCEEDED' } };
+    await page.waitForFunction(() => document.querySelector('.ts-usb-status')?.textContent.includes('USB 同步完成'));
+    holdUsbSelect = false; failUsbSelect = false;
+    checks.push('100% transfer stays visible through verification and final success after ST returns');
     assert.deepEqual(errors, []);
     await fs.writeFile(`${root}/drive-ui-browser.json`, JSON.stringify({ checks, errors, passed: checks.length, browser: 'headless Chromium with touch emulation, mocked API; no physical Android, USB or Google account', at: new Date().toISOString() }, null, 2));
     console.log(JSON.stringify({ passed: checks.length, checks, errors }, null, 2));

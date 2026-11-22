@@ -6,7 +6,7 @@ const labels = { IDLE: '就绪', PREFLIGHT: '正在检查环境', DOWNLOADING: '
 let status = { phase: 'IDLE' }, handlingSave = false, starting = false, resumed = false, localError = '';
 let setupBusy = false, configLoaded = false, configLoading = false, savedTarget = '', passwordSaved = false;
 let driveConfig = {}, authorizationPending = false, authorizationDeadline = 0;
-let usbState = { stage: 'idle', supported: false }, usbBusy = false;
+let usbState = { stage: 'idle', supported: false }, usbBusy = false, usbIntent = null, usbWatchToken = '';
 const context = () => SillyTavern.getContext();
 async function api(route, body, { signal } = {}) {
     const response = await fetch(BASE + route, { method: body === undefined ? 'GET' : 'POST', cache: 'no-store',
@@ -68,6 +68,7 @@ root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle in
 <div class="ts-section-content"><p class="ts-usb-status" role="status">正在检测本机 USB 能力……</p>
 <div class="ts-actions ts-usb-connection"><button type="button" class="menu_button ts-usb-connect">连接 USB</button><button type="button" class="menu_button ts-usb-cancel" hidden>取消连接</button></div>
 <div class="ts-actions ts-usb-directions" hidden><button type="button" class="menu_button ts-usb-push">电脑 → 手机</button><button type="button" class="menu_button ts-usb-pull">手机 → 电脑</button></div>
+<div class="ts-usb-live" hidden role="status" aria-live="polite"><strong class="ts-usb-live-title"></strong><div class="ts-usb-live-stage"></div><progress class="ts-usb-progress" max="100"></progress><small class="ts-usb-live-bytes"></small></div>
 <p class="ts-hint">两端连接后，任选一端点击方向，自动完成关闭、同步和重启。</p>
 <details class="ts-usb-help"><summary>连接方法与同步范围</summary><p>在电脑与手机上分别打开受控酒馆，点击“连接 USB”。电脑需要安装 ADB，并通过数据线连接已允许 USB 调试的手机。无需启动额外脚本、输入配对码或再次确认。</p>
 <p>传输只走数据线，不使用 VPS 或 Google Drive。以选定来源完整覆盖接收端，包含删除；接收端保留最近一次恢复备份。</p>
@@ -118,6 +119,11 @@ dialog.innerHTML = '<h3>同步酒馆</h3><p class="ts-phase"></p><p class="ts-de
 dialog.addEventListener('cancel', event => event.preventDefault());
 dialog.addEventListener('click', event => event.stopPropagation());
 document.body.append(dialog);
+const usbOverlay = document.createElement('div');
+usbOverlay.className = 'ts-usb-overlay'; usbOverlay.hidden = true;
+usbOverlay.setAttribute('role', 'status'); usbOverlay.setAttribute('aria-live', 'polite');
+usbOverlay.innerHTML = '<strong class="ts-usb-live-title"></strong><div class="ts-usb-live-stage"></div><progress class="ts-usb-progress" max="100"></progress><small class="ts-usb-live-bytes"></small>';
+document.body.append(usbOverlay);
 const pairingDialog = document.createElement('dialog'); pairingDialog.className = 'ts-dialog ts-pairing-dialog';
 pairingDialog.innerHTML = '<h3>Google 云盘仓库配对码</h3><p>在另一台设备授权同一个 Google 账号后，粘贴此配对码加入仓库。它包含解密密钥，请保存到你自己的密码管理器；不要发到公开位置。</p><textarea class="text_pole ts-pairing-code" readonly rows="5" aria-label="仓库配对码" spellcheck="false"></textarea><p class="ts-pairing-result" role="status"></p><div class="ts-dialog-actions"><button type="button" class="menu_button ts-pairing-copy">复制配对码</button><button type="button" class="menu_button ts-pairing-close">关闭并隐藏</button></div>';
 document.body.append(pairingDialog);
@@ -147,6 +153,32 @@ const target = document.querySelector('#extensions_settings2') ?? document.query
 if (target) target.append(root);
 const form = root.querySelector('.ts-config');
 const field = name => form.elements.namedItem(name);
+const usbLabel = direction => direction === 'push' ? '电脑 → 手机' : direction === 'pull' ? '手机 → 电脑' : '';
+const usbAccepted = stage => ['selected', 'stopping', 'transferring', 'restarting', 'completed'].includes(stage);
+function acceptUsbState(next) {
+    if (!next) return;
+    if (next.watchToken) usbWatchToken = next.watchToken;
+    usbState = next;
+    if (usbIntent && (usbAccepted(next.stage) || ['failed', 'cancelled'].includes(next.stage))) usbIntent = null;
+    if (usbIntent && next.stage === 'connected' && Date.now() - usbIntent.at > 10000) {
+        usbIntent = null; localError = '尚未确认 USB 同步方向，请检查两端状态后重新点击。';
+    }
+}
+async function watchUsbStatus() {
+    if (!usbWatchToken) throw Error('尚未取得 USB 状态通道。');
+    const response = await fetch(BASE + 'usb/status', {
+        cache: 'no-store', headers: { 'X-TavernSyn-USB-Watch': usbWatchToken },
+        signal: AbortSignal.timeout(1200),
+    });
+    if (!response.ok) throw Error('USB 进度通道尚未就绪。');
+    return await response.json();
+}
+const usbSize = bytes => {
+    if (!Number.isFinite(bytes) || bytes < 0) return '未知';
+    const units = ['B', 'KiB', 'MiB', 'GiB'];
+    const step = Math.min(3, bytes > 0 ? Math.floor(Math.log(bytes) / Math.log(1024)) : 0);
+    return (bytes / 1024 ** step).toFixed(step ? 2 : 0) + ' ' + units[step];
+};
 function text(selector, value) { for (const parent of [root, dialog]) { const element = parent.querySelector(selector); if (element) element.textContent = value; } }
 function render() {
     const google = status.provider === 'google-drive', remote = google ? 'Google 云盘' : 'VPS';
@@ -168,21 +200,53 @@ function render() {
         : status.recovery?.reason || '暂无可用恢复备份；本机应用后保留最新一份覆盖前备份。');
     dialog.querySelector('.ts-cancel').hidden = !['AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);
     const terminal = ['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
-    const usbActive = ['connecting', 'waiting', 'connected', 'selected', 'stopping', 'transferring', 'restarting'].includes(usbState.stage);
+    const usbActive = ['connecting', 'waiting', 'connected', 'selected', 'stopping', 'transferring', 'restarting'].includes(usbState.stage) || !!usbIntent;
     for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy || usbActive;
     const usbConnect = root.querySelector('.ts-usb-connect'), usbCancel = root.querySelector('.ts-usb-cancel');
     const usbDirections = root.querySelector('.ts-usb-directions');
     usbConnect.hidden = usbActive;
     usbConnect.disabled = !status.managed || !usbState.supported || usbBusy || !terminal;
-    usbCancel.hidden = !['connecting', 'waiting', 'connected'].includes(usbState.stage);
+    usbCancel.hidden = !!usbIntent || !['connecting', 'waiting', 'connected'].includes(usbState.stage);
     usbCancel.disabled = usbBusy;
-    usbDirections.hidden = usbState.stage !== 'connected';
+    usbDirections.hidden = usbState.stage !== 'connected' || !!usbIntent;
     for (const button of usbDirections.querySelectorAll('button')) button.disabled = usbBusy;
-    const usbNames = { idle: '未连接', connecting: '正在建立 USB 连接…', waiting: '等待另一端打开酒馆并点击“连接 USB”…', connected: 'USB 已连接：请选择方向；也可以在另一端选择。', selected: '已确定方向，准备关闭酒馆。', stopping: '正在快速关闭酒馆…', transferring: '正在同步数据、校验并应用…', restarting: '同步结束，正在重新启动酒馆…', completed: 'USB 同步完成。', failed: 'USB 同步失败。', cancelled: '已取消 USB 连接。' };
+    const usbNames = { idle: '未连接', connecting: '正在建立 USB 连接…', waiting: '等待另一端打开酒馆并点击“连接 USB”…', connected: 'USB 已连接：请选择方向；也可以在另一端选择。', selected: '方向已确认，准备关闭酒馆。', stopping: '正在快速关闭酒馆…', transferring: '正在通过 USB 同步…', restarting: '传输已结束，正在重新启动酒馆…', completed: 'USB 同步完成。', failed: 'USB 同步失败。', cancelled: '已取消 USB 连接。' };
+    const pending = !!usbIntent && !usbAccepted(usbState.stage);
+    const direction = usbState.selection?.direction || usbIntent?.direction || usbState.job?.direction;
+    const name = usbLabel(direction);
+    const job = usbState.job ?? {};
+    const phases = { SNAPSHOT: '正在制作来源快照', UPLOADING: '正在发送文件', DOWNLOADING: '正在接收文件',
+        VERIFYING: '正在校验文件', PREPARING: '正在准备插件', APPLYING: '正在覆盖目标数据',
+        STARTING: '正在检查目标酒馆', SUCCEEDED: '数据已应用并校验', FAILED: '同步未完成' };
+    const step = phases[job.phase] || (pending ? '方向指令已发出，正在等待后台确认…'
+        : usbNames[usbState.stage] || '正在检查 USB 任务');
+    const title = (pending ? '已点击 ' : usbAccepted(usbState.stage) ? '已确认 ' : '') + name;
+    const progressBytes = Number(job.progress?.bytes), total = Number(job.bytes);
+    const metered = Number.isSafeInteger(progressBytes) && progressBytes >= 0 && Number.isSafeInteger(total) && total >= 0;
+    const percentage = metered && total > 0 ? Math.min(100, Math.max(0, progressBytes / total * 100)) : null;
+    const description = metered ? '已传输 ' + usbSize(progressBytes) + ' / ' + usbSize(total)
+        + (percentage === null ? '' : '（' + percentage.toFixed(1) + '%）')
+        + (Number.isSafeInteger(job.files) ? ' · 共 ' + job.files + ' 个文件' : '')
+        : pending ? '操作已发起，请勿重复点击。' : '正在准备文件总大小，暂未开始传输。';
+    const visible = !!usbIntent || ['selected', 'stopping', 'transferring', 'restarting', 'completed', 'failed'].includes(usbState.stage);
+    const statusText = pending ? '已点击“' + name + '”，正在通知另一端，无需再次确认。'
+        : (usbNames[usbState.stage] || 'USB 状态未知') + (name ? ' 方向：' + name + '。' : '');
     root.querySelector('.ts-usb-status').textContent = !status.managed ? '请使用 TavernSyn 受控启动器启动酒馆。'
         : !usbState.supported ? '当前操作系统不是 Windows 或 Android Termux，不能使用 USB 直连。'
-            : (usbNames[usbState.stage] || 'USB 状态未知') + (usbState.peer?.deviceName ? ' 对端：' + usbState.peer.deviceName : '')
+            : statusText + (usbState.peer?.deviceName ? ' 对端：' + usbState.peer.deviceName : '')
                 + (usbState.error?.message ? ' ' + usbState.error.message : '') + (usbState.note ? ' ' + usbState.note : '');
+    if (visible && terminal && !starting) text('.ts-phase', (pending ? 'USB 指令已发起' : 'USB ' + (usbNames[usbState.stage] || '同步中')));
+    for (const holder of [root.querySelector('.ts-usb-live'), usbOverlay]) {
+        holder.hidden = !visible;
+        if (!visible) continue;
+        holder.dataset.stage = usbState.stage;
+        holder.querySelector('.ts-usb-live-title').textContent = title || 'USB 同步';
+        holder.querySelector('.ts-usb-live-stage').textContent = step + (usbState.error?.message ? ' · ' + usbState.error.message : '');
+        holder.querySelector('.ts-usb-live-bytes').textContent = description;
+        const bar = holder.querySelector('.ts-usb-progress');
+        if (percentage === null) bar.removeAttribute('value');
+        else bar.value = percentage;
+    }
     for (const checkbox of root.querySelectorAll('.ts-scope input')) checkbox.disabled = !terminal || starting || setupBusy;
     root.querySelector('.ts-resume-download').hidden = !status.canResumeDownload;
     root.querySelector('.ts-resume-upload').hidden = !(status.phase === 'FAILED' && !status.commit && status.direction === 'push' && status.snapshotReady === true);
@@ -227,7 +291,7 @@ async function usbConnect() {
         // Try a prompt save, then let the launcher use the current disk receipt
         // if an editor or third-party save handler would delay the transfer.
         const receipt = await flush();
-        usbState = await api('usb/connect', { tab, receipt });
+        acceptUsbState(await api('usb/connect', { tab, receipt }));
         root.querySelector('.ts-usb').open = true;
     } catch (error) { localError = error.message; }
     finally { usbBusy = false; render(); }
@@ -235,17 +299,28 @@ async function usbConnect() {
 root.querySelector('.ts-usb-connect').onclick = usbConnect;
 for (const [selector, direction] of [['.ts-usb-push', 'push'], ['.ts-usb-pull', 'pull']]) {
     root.querySelector(selector).onclick = async () => {
-        if (usbBusy) return;
-        usbBusy = true; render();
-        try { usbState = await api('usb/select', { direction }); }
-        catch (error) { localError = error.message; }
-        finally { usbBusy = false; render(); }
+        if (usbBusy || usbIntent || usbAccepted(usbState.stage)) return;
+        usbIntent = { direction, at: Date.now() };
+        usbBusy = true; localError = ''; root.querySelector('.ts-usb').open = true; render();
+        try { acceptUsbState(await api('usb/select', { direction })); }
+        catch (error) {
+            // The child HTTP connection may close after the launcher accepted
+            // this command. Do not mistake a lost HTTP acknowledgement for
+            // a rejected direction; reconcile through the launcher bridge.
+            let observed = null;
+            try { observed = await watchUsbStatus(); } catch {}
+            if (observed) acceptUsbState(observed);
+            if (!observed || usbAccepted(observed.stage)) {
+                if (!usbWatchToken) { usbIntent = null; localError = error.message; }
+                else usbState = { ...usbState, note: '指令可能已被接收，正在自动查询后台状态…' };
+            } else { usbIntent = null; localError = error.message; }
+        } finally { usbBusy = false; render(); }
     };
 }
 root.querySelector('.ts-usb-cancel').onclick = async () => {
     if (usbBusy) return;
     usbBusy = true; render();
-    try { usbState = await api('usb/cancel', {}); }
+    try { acceptUsbState(await api('usb/cancel', {})); }
     catch (error) { localError = error.message; }
     finally { usbBusy = false; render(); }
 };
@@ -445,7 +520,7 @@ async function poll() {
             return;
         }
         if (status.phase !== 'AWAITING_SAVE') handlingSave = false;
-        if (status.managed) usbState = await api('usb/status').catch(() => usbState);
+        if (status.managed) acceptUsbState(await api('usb/status').catch(() => usbState));
         if (!starting) render();
         if (!status.configured && !configLoaded) { root.querySelector('.ts-settings').open = true; loadConfiguration(); }
         if (status.phase === 'PENDING_APPLY' && status.managed && !resumed) {
@@ -464,8 +539,16 @@ async function poll() {
                 else { localError = ''; text('.ts-phase', '正在自动重试保存交接…'); text('.ts-detail', error.message); }
             }
         }
-    } catch (error) { if (!starting) text('.ts-phase', error.message); }
-    setTimeout(poll, 1200);
+    } catch (error) {
+        if (usbWatchToken && (usbIntent || ['connected', 'selected', 'stopping', 'transferring', 'restarting'].includes(usbState.stage))) {
+            try { acceptUsbState(await watchUsbStatus()); render(); }
+            catch {
+                usbState = { ...usbState, note: '酒馆暂时离线，正在重新连接后台进度…' };
+                render();
+            }
+        } else if (!starting) text('.ts-phase', error.message);
+    }
+    setTimeout(poll, usbIntent || ['selected', 'stopping', 'transferring', 'restarting'].includes(usbState.stage) ? 650 : 1200);
 }
 setInterval(() => api('tabs', { tab }).catch(() => {}), 5000);
 await api('tabs', { tab }).catch(() => {});

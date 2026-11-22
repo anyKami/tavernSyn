@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { randomBytes } from 'node:crypto';
 import { requireThat, SyncError } from '../lib/io.mjs';
 import { UsbSession } from './usb-sync.mjs';
 import { startUsbServer, connectUsbPeer, syncUsb } from './usb-service.mjs';
@@ -28,12 +29,13 @@ export class UsbController {
         this.device = device; this.lifecycle = lifecycle; this.manager = manager; this.mode = mode; this.log = log; this.port = port;
         this.adapter = { UsbSession, startUsbServer, connectUsbPeer, syncUsb, waitForUsbPeer, connectUsb, ...adapter };
         this.stage = 'idle'; this.peer = null; this.selection = null; this.error = null; this.note = '';
-        this.cancelled = new AbortController(); this.worker = null; this.offline = null;
+        this.cancelled = new AbortController(); this.worker = null; this.offline = null; this.monitorToken = null;
         this.started = false; this.stoppedByUsb = false;
     }
     status() {
         return { supported: !!this.mode, mode: this.mode, stage: this.stage, peer: this.peer, selection: this.selection,
-            error: this.error, note: this.note };
+            error: this.error, note: this.note, watchToken: this.monitorToken,
+            ...(this.session?.manager?.job ? { job: this.session.status().job } : {}) };
     }
     update(stage, { note = '', peer = this.peer, selection = this.selection } = {}) {
         this.stage = stage; this.note = note; this.peer = peer; this.selection = selection;
@@ -53,8 +55,10 @@ export class UsbController {
         this.error = null; this.peer = null; this.selection = null; this.offline = null;
         this.started = false; this.stoppedByUsb = false;
         this.manager.busy = true;
+        this.monitorToken = randomBytes(24).toString('hex');
         this.session = new this.adapter.UsbSession(this.device, {
             lifecycle: this.lifecycle, log: message => this.log('USB：' + message),
+            monitor: { token: this.monitorToken, read: () => this.status() },
         });
         this.update('connecting');
         this.worker = this.run().catch(() => {}).finally(() => { this.worker = null; this.manager.busy = false; });

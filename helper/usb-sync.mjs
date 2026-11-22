@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
+import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { atomicJson, exists, noLinks, readJson, requireThat, SyncError } from '../lib/io.mjs';
 import { uuidPattern } from '../lib/device.mjs';
@@ -26,8 +28,8 @@ export function usbPeer(device, peer) {
 // The offline entry owns the same locks as the normal launcher. Reserving ST's
 // port additionally blocks an uninstrumented server from starting during a copy.
 export class UsbSession {
-    constructor(device, { lifecycle, log = () => {} } = {}) {
-        this.device = device; this.log = log; this.stage = 'idle'; this.locks = [];
+    constructor(device, { lifecycle, log = () => {}, monitor = null } = {}) {
+        this.device = device; this.log = log; this.stage = 'idle'; this.locks = []; this.monitor = monitor;
         this.manager = new Manager(device, null, undefined, (_job, message) => log(message));
         this.lifecycle = lifecycle ?? new Lifecycle(device, (action, payload) => {
             requireThat(['status', 'recovery', 'configuration'].includes(action), 'BUSY', 'USB 同步正在进行，请等待其结束。');
@@ -37,7 +39,30 @@ export class UsbSession {
     }
     async reservePort() {
         if (this.reservation) return;
-        const server = net.createServer(socket => socket.destroy());
+        const bridge = this.monitor;
+        // Exclusively reserve the original ST port, optionally serving the
+        // already-open admin page read-only progress during managed USB sync.
+        const server = bridge ? http.createServer((request, response) => {
+            const supplied = Buffer.from(typeof request.headers['x-tavernsyn-usb-watch'] === 'string'
+                ? request.headers['x-tavernsyn-usb-watch'] : '');
+            const expected = Buffer.from(bridge.token);
+            if (request.method !== 'GET' || request.url !== '/api/plugins/tavernsyn/usb/status'
+                || request.socket.remoteAddress !== '127.0.0.1'
+                || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+                response.writeHead(403, { 'cache-control': 'no-store', 'content-length': '0', 'connection': 'close' });
+                response.end(); return;
+            }
+            try {
+                const body = Buffer.from(JSON.stringify(bridge.read()));
+                response.writeHead(200, { 'content-type': 'application/json; charset=utf-8',
+                    'cache-control': 'no-store', 'content-length': String(body.length), 'connection': 'close' });
+                response.end(body);
+            } catch {
+                response.writeHead(503, { 'cache-control': 'no-store', 'content-length': '0', 'connection': 'close' });
+                response.end();
+            }
+        }) : net.createServer(socket => socket.destroy());
+        if (bridge) server.keepAliveTimeout = 250;
         await new Promise((resolve, reject) => {
             server.once('error', () => reject(new SyncError('USB_RUNNING', '酒馆端口仍被占用，请保存内容并正常关闭两端酒馆及启动器。')));
             server.listen({ host: '127.0.0.1', port: Number(new URL(this.device.origin).port), exclusive: true }, resolve);
@@ -46,7 +71,7 @@ export class UsbSession {
     }
     async releasePort() {
         const server = this.reservation;
-        if (server) { this.reservation = null; await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+        if (server) { this.reservation = null; server.closeIdleConnections?.(); await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
     }
     async open({ managedLauncher = false } = {}) {
         requireThat(!this.opened && !this.locks.length, 'USB_SESSION', 'USB 会话已打开。');
@@ -137,7 +162,8 @@ export class UsbSession {
             await this.begin('pull', peer, id);
             await this.manager.write('DOWNLOADING', { note: '正在通过 USB 接收完整快照，尚未覆盖本机。' });
             const manifest = await receiveUsb(readable, this.payload, {
-                onManifest: async value => { validatePayloadPaths(value); await enoughSpace(this.device.state, value.bytes, 2); },
+                onManifest: async value => { validatePayloadPaths(value); await enoughSpace(this.device.state, value.bytes, 2);
+                    await this.manager.write('DOWNLOADING', { bytes: value.bytes, files: value.files.length }); },
                 onProgress: value => this.manager.progress({ stage: 'usb', ...value }),
             });
             await this.manager.write('VERIFYING', { files: manifest.files.length, bytes: manifest.bytes });

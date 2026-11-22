@@ -168,7 +168,9 @@ export async function startUsbServer(session, { port = 17653, token = randomByte
                 await run(async () => {
                     response.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store', 'connection': 'close',
                         'x-tavernsyn-job': status().job.id, 'x-tavernsyn-digest': frozen.manifest.digest });
-                    await pipeline(Readable.from(encodeUsb(frozen.payload || session.payload, frozen.manifest)), response);
+                    await pipeline(Readable.from(encodeUsb(frozen.payload || session.payload, frozen.manifest, {
+                        onProgress: progress => session.manager.progress({ stage: 'usb', ...progress }),
+                    })), response);
                 }); return;
             }
             if (route === 'POST /receive') {
@@ -388,7 +390,9 @@ export async function syncUsb(session, { origin, token, direction, confirmPeer =
             const frozen = await session.export(peer, id); digest = frozen.manifest.digest;
             await onProgress({ stage: 'sending', bytes: frozen.manifest.bytes, files: frozen.manifest.files.length });
             const response = await connection.request('POST', '/receive', {
-                stream: encodeUsb(frozen.payload || session.payload, frozen.manifest), headers: { 'content-type': 'application/octet-stream',
+                stream: encodeUsb(frozen.payload || session.payload, frozen.manifest, {
+                    onProgress: progress => session.manager.progress({ stage: 'usb', ...progress }),
+                }), headers: { 'content-type': 'application/octet-stream',
                     'x-tavernsyn-peer': Buffer.from(JSON.stringify(local)).toString('base64url'), 'x-tavernsyn-job': id },
             });
             const staged = await jsonBody(response);

@@ -65,3 +65,16 @@
 .ts-dialog button[hidden]{display:none}
 @media(max-width:480px){.ts-dialog{padding:20px}.ts-dialog-actions>.menu_button{flex:1 1 0;min-width:0}}
 @media(max-width:360px){#tavernsyn-panel .ts-section>summary{grid-template-columns:36px minmax(0,1fr) 12px;gap:8px;padding:12px 10px}#tavernsyn-panel .ts-section-icon{width:36px;height:36px}#tavernsyn-panel .ts-section-content{padding:0 10px 12px}#tavernsyn-panel .ts-usb-directions{grid-template-columns:minmax(0,1fr)}}
+
+/* In-plugin progress and the floating monitor remain visible during a real ST
+   stop, when its usual extension routes are temporarily offline. */
+#tavernsyn-panel .ts-usb-live,.ts-usb-overlay{box-sizing:border-box;border-radius:10px;padding:12px;margin-top:12px;background:#164276;color:#fff;border:1px solid #70b8ff;line-height:1.5;overflow-wrap:anywhere}
+#tavernsyn-panel .ts-usb-live[hidden],.ts-usb-overlay[hidden]{display:none!important}
+#tavernsyn-panel .ts-usb-live-title,.ts-usb-overlay .ts-usb-live-title{display:block;font-size:1em;font-weight:750}
+#tavernsyn-panel .ts-usb-live-stage,.ts-usb-overlay .ts-usb-live-stage{margin-top:4px}
+#tavernsyn-panel .ts-usb-live-bytes,.ts-usb-overlay .ts-usb-live-bytes{display:block;margin-top:5px;opacity:.95;font-variant-numeric:tabular-nums}
+#tavernsyn-panel .ts-usb-progress,.ts-usb-overlay .ts-usb-progress{display:block;width:100%;height:14px;margin:10px 0 0;accent-color:#8dd2ff}
+.ts-usb-overlay{position:fixed;z-index:10050;bottom:calc(12px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(460px,calc(100vw - 24px));margin:0;box-shadow:0 8px 28px #0008}
+.ts-usb-overlay[data-stage="completed"]{border-color:#7fe6bb;background:#144d42}
+.ts-usb-overlay[data-stage="failed"]{border-color:#ff9d96;background:#67242a}
+@media(max-width:480px){.ts-usb-overlay{bottom:calc(8px + env(safe-area-inset-bottom));width:calc(100vw - 16px);padding:10px 12px}}
