@@ -20,5 +20,18 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Isolate watch-port tests with a hard time limit
         run: timeout --signal=KILL 40s node --test tests/usb-monitor.test.mjs
-      - name: Run USB transport and controller tests with a hard time limit
-        run: timeout --signal=KILL 90s node --test tests/usb-adb.test.mjs tests/usb-connect-wait.test.mjs tests/usb-controller.test.mjs tests/usb-interaction.test.mjs tests/usb-launchers.test.mjs tests/usb-service.test.mjs tests/usb-stream.test.mjs tests/usb-sync.test.mjs
+      - name: Isolate each USB test module with separate deadlines
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in tests/usb-*.test.mjs; do
+            echo "::group::START $file"
+            if timeout --signal=KILL 30s node --test "$file" > /tmp/usb-case.log 2>&1; then
+              tail -n 12 /tmp/usb-case.log
+              echo "::endgroup::"
+            else
+              echo "::error::FAILED/HUNG $file"
+              cat /tmp/usb-case.log
+              exit 1
+            fi
+          done
