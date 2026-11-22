@@ -1,0 +1,67 @@
+name: Publish v0.5.0 stable
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v0.5.0.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    if: github.repository == 'anyKami/tavernSyn' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tested source
+        uses: actions/checkout@v4
+        with:
+          ref: d07bae8c50d5343b28daac060273dda6a2659604
+          persist-credentials: false
+      - name: Verify version and passing CI, create stable tag and Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TESTED_SHA: d07bae8c50d5343b28daac060273dda6a2659604
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          test "$(node -p "require('./package.json').version")" = "0.5.0"
+          test "$(node -p "require('./manifest.json').version")" = "0.5.0"
+          gh api repos/anyKami/tavernSyn/actions/runs/45019510608 > "$RUNNER_TEMP/ci.json"
+          jq -e --arg sha "$TESTED_SHA" '.head_sha == $sha and .status == "completed" and .conclusion == "success"' "$RUNNER_TEMP/ci.json"
+          existing="$(gh api repos/anyKami/tavernSyn/git/ref/tags/v0.5.0 2>/dev/null | jq -r '.object.sha // empty' || true)"
+          if [ -n "$existing" ]; then
+            test "$existing" = "$TESTED_SHA" || { echo "::error::v0.5.0 has a different commit"; exit 1; }
+          else
+            gh api --method POST repos/anyKami/tavernSyn/git/refs -f ref=refs/tags/v0.5.0 -f sha="$TESTED_SHA"
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          ## USB 同步直接在 TavernSyn 插件操作
+          
+          - Windows 和 Android Termux 两端通过平时的受控启动入口打开酒馆，在插件「USB 数据线完整同步」中分别点击「连接 USB」。
+          - 已连接后在任意一端选择「电脑 → 手机」或「手机 → 电脑」；另一端自动跟随；不再要求 USB 人工配对码或再次输入 YES。
+          - 受控启动器在后台接管同步任务，自动核对网页保存回执、停止两端酒馆、完整镜像、SHA-256 校验、暂存与恢复，再启动两端酒馆；网页重启后自动刷新。
+          - USB 独立命令行脚本保留为后备入口，不再是日常必需的操作。
+          - 电脑仍须配置 Android SDK Platform-Tools / ADB；手机仍须通过 Android 系统允许 USB 调试。只能绑定本机 ADB 转发，拒绝无线 ADB 和未授权设备。
+          
+          ## Google 云盘容量管理
+          
+          - 完成新加密快照的发布验证后，永久删除仓库内可证明已过期的完整备份（含回收站里的旧包），并整理确认为失败的上传残留。
+          - 正常完成清理后，只保留最新一份完整云端快照；用于并发一致性核验的小型签名提交记录会保留。
+          - 新旧快照会在上传／切换过程中短暂共存；网络错误或无法确定结果时会保留可能仍有效的数据，并通过「核对同步结果」重试清理，避免误删唯一可恢复副本。
+          
+          ## 测试和升级
+          
+          - GitHub Actions：[完整 CI](https://github.com/anyKami/tavernSyn/actions/runs/45019510608)，Windows / Node 22、Ubuntu / Node 20、Linux 全量和 Chromium UI 全部成功。
+          - 实测流程使用两个独立的真实 SillyTavern 1.19.0 进程，覆盖插件控制器发起连接、两方向选择、完整应用、健康检查、自动停机及重新启动。
+          - 未使用实体 Windows ↔ Android USB 数据线、真实 Google OAuth 账号执行端到端验收。
+          - 两端必须都升级 v0.5.0；从正常 TavernSyn 受控启动入口启动可检查新的稳定版标签并更新。
+          
+          [USB 同步指南](https://github.com/anyKami/tavernSyn/blob/v0.5.0/docs/usb-sync.md) · [Google 云盘指南](https://github.com/anyKami/tavernSyn/blob/v0.5.0/docs/google-drive.md)
+          NOTES
+          if gh release view v0.5.0 --repo anyKami/tavernSyn >/dev/null 2>&1; then
+            gh release view v0.5.0 --repo anyKami/tavernSyn --json isDraft,isPrerelease --jq '.isDraft == false and .isPrerelease == false' | grep -qx true
+          else
+            gh release create v0.5.0 --repo anyKami/tavernSyn --verify-tag --latest --title "TavernSyn v0.5.0 — 插件内 USB 同步与云盘单份备份" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
