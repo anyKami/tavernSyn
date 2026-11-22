@@ -62,3 +62,5 @@ jobs:
         run: node --test tests/usb-adb.test.mjs tests/usb-stream.test.mjs tests/usb-service.test.mjs tests/usb-launchers.test.mjs
       - name: Google Drive protocol, encryption, authorization and settings
         run: node --test tests/drive-api.test.mjs tests/drive-repository.test.mjs tests/drive-archive.test.mjs tests/drive-auth.test.mjs tests/drive-ui.test.mjs
+      - name: Git snapshot objects and corrupt-pack rejection
+        run: node --test tests/git-objects.test.mjs
