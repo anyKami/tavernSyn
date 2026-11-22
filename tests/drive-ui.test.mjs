@@ -67,13 +67,24 @@ test('configuration refresh clears credential entry fields and uses backend auth
     assert.ok([...texts.values()].every(text => !text.includes('old private input')));
 });
 
-test('closing the pairing dialog removes the secret from the DOM', () => {
-    const nodes = { '.ts-pairing-code': { value: 'private pairing code' }, '.ts-pairing-result': { textContent: 'copied' } };
-    let onClose;
-    const pairingDialog = { querySelector: name => nodes[name], addEventListener(name, fn) { assert.equal(name, 'close'); onClose = fn; } };
-    const code = source.slice(source.indexOf("pairingDialog.addEventListener('close'"), source.indexOf("pairingDialog.querySelector('.ts-pairing-close')"));
-    vm.runInContext(code, vm.createContext({ pairingDialog })); onClose();
+for (const action of ['button', 'escape', 'native-close']) test(`pairing ${action} clears its secret without waiting for a queued close event`, () => {
+    const nodes = { '.ts-pairing-code': { value: 'private pairing code' }, '.ts-pairing-result': { textContent: 'copied' }, '.ts-pairing-close': {} };
+    const listeners = new Map(); let closed = false, prevented = false;
+    const pairingDialog = { open: true, querySelector: name => nodes[name], addEventListener: (name, fn) => listeners.set(name, fn), close() {
+        assert.equal(nodes['.ts-pairing-code'].value, '', 'the secret must already be cleared when close() is called');
+        assert.equal(nodes['.ts-pairing-result'].textContent, ''); closed = true; this.open = false;
+    } };
+    const code = source.slice(source.indexOf('function clearPairingDialog('), source.indexOf("pairingDialog.querySelector('.ts-pairing-copy').onclick"));
+    vm.runInContext(code, vm.createContext({ pairingDialog }));
+    if (action === 'button') nodes['.ts-pairing-close'].onclick();
+    else if (action === 'escape') listeners.get('cancel')({ preventDefault() { prevented = true; } });
+    else { pairingDialog.open = false; listeners.get('close')(); }
     assert.equal(nodes['.ts-pairing-code'].value, ''); assert.equal(nodes['.ts-pairing-result'].textContent, '');
+    if (action !== 'native-close') assert.equal(closed, true);
+    if (action === 'escape') assert.equal(prevented, true);
+    // A late close event from the previous opening must not erase a newly revealed code.
+    pairingDialog.open = true; nodes['.ts-pairing-code'].value = 'new pairing code'; listeners.get('close')();
+    assert.equal(nodes['.ts-pairing-code'].value, 'new pairing code');
 });
 
 test('Drive progress describes complete encrypted snapshots without claiming rsync or differential transfer', () => {

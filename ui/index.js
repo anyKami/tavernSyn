@@ -114,8 +114,17 @@ const pairingDialog = document.createElement('dialog'); pairingDialog.className 
 pairingDialog.innerHTML = '<h3>Google 云盘仓库配对码</h3><p>在另一台设备授权同一个 Google 账号后，粘贴此配对码加入仓库。它包含解密密钥，请保存到你自己的密码管理器；不要发到公开位置。</p><textarea class="text_pole ts-pairing-code" readonly rows="5" aria-label="仓库配对码" spellcheck="false"></textarea><p class="ts-pairing-result" role="status"></p><div class="ts-dialog-actions"><button type="button" class="menu_button ts-pairing-copy">复制配对码</button><button type="button" class="menu_button ts-pairing-close">关闭并隐藏</button></div>';
 document.body.append(pairingDialog);
 pairingDialog.addEventListener('click', event => event.stopPropagation());
-pairingDialog.addEventListener('close', () => { pairingDialog.querySelector('.ts-pairing-code').value = ''; pairingDialog.querySelector('.ts-pairing-result').textContent = ''; });
-pairingDialog.querySelector('.ts-pairing-close').onclick = () => pairingDialog.close();
+function clearPairingDialog() {
+    pairingDialog.querySelector('.ts-pairing-code').value = '';
+    pairingDialog.querySelector('.ts-pairing-result').textContent = '';
+}
+function closePairingDialog() {
+    // The native close event is queued. Remove the secret before hiding the dialog.
+    clearPairingDialog(); pairingDialog.close();
+}
+pairingDialog.addEventListener('close', () => { if (!pairingDialog.open) clearPairingDialog(); });
+pairingDialog.addEventListener('cancel', event => { event.preventDefault(); closePairingDialog(); });
+pairingDialog.querySelector('.ts-pairing-close').onclick = closePairingDialog;
 pairingDialog.querySelector('.ts-pairing-copy').onclick = async () => {
     const input = pairingDialog.querySelector('.ts-pairing-code');
     try { await navigator.clipboard.writeText(input.value); pairingDialog.querySelector('.ts-pairing-result').textContent = '已复制。'; }
@@ -322,7 +331,7 @@ form.onsubmit = event => {
 };
 field('provider').addEventListener('change', () => {
     field('clientSecret').value = ''; field('pairingCode').value = '';
-    if (pairingDialog.open) pairingDialog.close();
+    if (pairingDialog.open) closePairingDialog();
     updateProviderFields();
     text('.ts-config-result', '选择后请保存配置。推送和拉取仍使用当前已保存的仓库。');
 });

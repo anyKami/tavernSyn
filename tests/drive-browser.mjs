@@ -26,7 +26,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404); res.end();
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-let browser;
+let browser, page;
 try {
     browser = await chromium.launch({ headless: true, ...(process.env.TAVERNSYN_CHROMIUM ? { executablePath: process.env.TAVERNSYN_CHROMIUM } : {}) });
     const context = await browser.newContext({ viewport: { width: 1000, height: 1000 } });
@@ -56,7 +56,7 @@ try {
         await route.fulfill({ json: result });
     });
     await context.route('https://accounts.google.com/**', route => route.fulfill({ contentType: 'text/html', body: '<h1>Mock Google authorization</h1>' }));
-    const page = await context.newPage();
+    page = await context.newPage();
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page.locator('.ts-settings summary').click();
@@ -86,10 +86,13 @@ try {
     await page.locator('.ts-pairing-dialog').waitFor({ state: 'visible' });
     assert.equal(await page.locator('.ts-pairing-code').inputValue(), pair);
     await page.locator('.ts-pairing-close').click();
+    await page.locator('.ts-pairing-dialog').waitFor({ state: 'hidden' });
     assert.equal(await page.locator('.ts-pairing-code').inputValue(), '');
     await page.locator('.ts-drive-pairing').click();
     await page.locator('.ts-pairing-dialog').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('.ts-pairing-code').inputValue(), pair);
     await page.keyboard.press('Escape');
+    await page.locator('.ts-pairing-dialog').waitFor({ state: 'hidden' });
     assert.equal(await page.locator('.ts-pairing-code').inputValue(), '');
     checks.push('create and reveal pairing code works, close button and Escape both clear its DOM value');
 
@@ -119,6 +122,8 @@ try {
     assert.ok(box.x >= 0 && box.x + box.width <= 390);
     checks.push('390px viewport has no horizontal overflow; pairing dialog stays within viewport');
     await page.locator('.ts-pairing-close').click();
+    await page.locator('.ts-pairing-dialog').waitFor({ state: 'hidden' });
+    assert.equal(await page.locator('.ts-pairing-code').inputValue(), '');
     await page.locator('.ts-drive-disconnect').click();
     await page.waitForFunction(() => document.querySelector('.ts-config-result').textContent.includes('已移除本机 Google 授权'));
     assert.equal(await page.locator('.ts-drive-create').isDisabled(), true);
@@ -126,4 +131,10 @@ try {
     assert.deepEqual(errors, []);
     await fs.writeFile(`${root}/drive-ui-browser.json`, JSON.stringify({ checks, errors, passed: checks.length, browser: 'headless Chromium, mocked API, no real Google account', at: new Date().toISOString() }, null, 2));
     console.log(JSON.stringify({ passed: checks.length, checks, errors }, null, 2));
+} catch (error) {
+    // All displayed account data and pairing codes in this fixture are synthetic.
+    await page?.screenshot({ path: `${root}/drive-ui-failure.png`, fullPage: true }).catch(() => {});
+    await fs.writeFile(`${root}/drive-ui-browser.json`, JSON.stringify({ failed: true, checks, errors: [...errors, error.message],
+        passed: checks.length, browser: 'headless Chromium, mocked API, no real Google account', at: new Date().toISOString() }, null, 2)).catch(() => {});
+    throw error;
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }
