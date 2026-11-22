@@ -218,7 +218,7 @@ function render() {
     const phases = { SNAPSHOT: '正在制作来源快照', UPLOADING: '正在发送文件', DOWNLOADING: '正在接收文件',
         VERIFYING: '正在校验文件', PREPARING: '正在准备插件', APPLYING: '正在覆盖目标数据',
         STARTING: '正在检查目标酒馆', SUCCEEDED: '数据已应用并校验', FAILED: '同步未完成' };
-    const step = phases[job.phase] || (pending ? '方向指令已发出，正在等待后台确认…'
+    const step = phases[job.phase] || (pending ? '正在通知另一端并等待后台确认…'
         : usbNames[usbState.stage] || '正在检查 USB 任务');
     const title = (pending ? '已点击 ' : usbAccepted(usbState.stage) ? '已确认 ' : '') + name;
     const progressBytes = Number(job.progress?.bytes), total = Number(job.bytes);
