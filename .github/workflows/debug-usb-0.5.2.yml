@@ -1,0 +1,24 @@
+name: Diagnose v0.5.2 USB status bridge
+on:
+  push:
+    branches: [codex/usb-live-progress-0.5.2]
+    paths: ['.github/workflows/debug-usb-0.5.2.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Isolate watch-port tests with a hard time limit
+        run: timeout --signal=KILL 40s node --test tests/usb-monitor.test.mjs
+      - name: Run USB transport and controller tests with a hard time limit
+        run: timeout --signal=KILL 90s node --test tests/usb-adb.test.mjs tests/usb-connect-wait.test.mjs tests/usb-controller.test.mjs tests/usb-interaction.test.mjs tests/usb-launchers.test.mjs tests/usb-service.test.mjs tests/usb-stream.test.mjs tests/usb-sync.test.mjs
