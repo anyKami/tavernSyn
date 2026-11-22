@@ -58,3 +58,19 @@ test('a refreshed page retries the automatic save handoff while an old tab heart
     assert.equal(calls.at(-1).body.tab, 'current-tab'); assert.equal(calls.at(-1).body.receipt, 'saved-receipt');
     assert.equal(redirects.length, 1); assert.match(redirects[0], /tab=current-tab/);
 });
+
+test('a browser tab from before USB stop/start reloads when the managed epoch changes', async () => {
+    const poll = source.slice(source.indexOf('async function poll()'), source.indexOf('setInterval(() =>'));
+    const calls = []; let reloads = 0;
+    const context = vm.createContext({
+        status: {}, tab: 'current-tab', starting: false, configLoaded: true, resumed: false,
+        handlingSave: false, window: { __TAVERNSYN__: { epoch: 'old-epoch' } },
+        location: { reload: () => { reloads++; } }, render() { assert.fail('must reload before rendering stale data'); },
+        setTimeout() { assert.fail('must reload before scheduling another stale poll'); },
+        api: async route => { calls.push(route); assert.equal(route, 'status'); return { epoch: 'new-epoch', managed: true, phase: 'SUCCEEDED' }; },
+    });
+    vm.runInContext(poll, context);
+    await vm.runInContext('poll()', context);
+    assert.deepEqual(calls, ['status']);
+    assert.equal(reloads, 1);
+});

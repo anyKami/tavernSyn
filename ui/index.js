@@ -454,6 +454,12 @@ dialog.querySelector('.ts-cancel').onclick = async () => {
 async function poll() {
     try {
         status = await api('status');
+        const pageEpoch = globalThis.window?.__TAVERNSYN__?.epoch;
+        if (pageEpoch && status.epoch && pageEpoch !== status.epoch) {
+            // USB controlled stop/start replaces the underlying ST process.
+            // Reload to bind a fresh save/CSRF barrier before accepting writes.
+            location.reload(); return;
+        }
         if (status.managed) usbState = await api('usb/status').catch(() => usbState);
         if (!starting) render();
         if (!status.configured && !configLoaded) { root.querySelector('.ts-settings').open = true; loadConfiguration(); }

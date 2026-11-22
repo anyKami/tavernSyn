@@ -100,7 +100,7 @@ export class UsbController {
     }
     async phone() {
         this.server = await this.adapter.startUsbServer(this.session, {
-            port: this.port,
+            port: this.port, idleMs: 5 * 60 * 1000,
             beforeTransfer: () => this.prepareOffline(),
             onFailure: () => { void this.server?.close(); },
         });
