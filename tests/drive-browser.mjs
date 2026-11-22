@@ -199,7 +199,7 @@ try {
         }
         const before = calls.filter(call => call.action === 'usb/select').length;
         await page.locator(`.ts-usb-${direction}`).tap();
-        await page.waitForFunction(() => document.querySelector('.ts-usb-status').textContent.includes('已确定方向'));
+        await page.waitForFunction(() => document.querySelector('.ts-usb-status').textContent.includes('方向已确认'));
         const selections = calls.filter(call => call.action === 'usb/select');
         assert.equal(selections.length, before + 1); assert.equal(selections.at(-1).body.direction, direction);
         assert.equal(await page.locator('dialog[open]').count(), 0);
