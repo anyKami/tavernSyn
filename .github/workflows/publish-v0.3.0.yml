@@ -1,0 +1,64 @@
+name: Publish TavernSyn v0.3.0
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v0.3.0.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'anyKami/tavernSyn' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check exact tested source
+        uses: actions/checkout@v4
+        with:
+          ref: c37e46f9fa20f8c562dfd259666ee67e46bca8cd
+          persist-credentials: false
+      - name: Confirm version and passing validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node -e 'const fs=require("node:fs");for(const p of ["package.json","manifest.json"]){if(JSON.parse(fs.readFileSync(p,"utf8")).version!=="0.3.0")process.exit(1)}'
+          test "$(git rev-parse HEAD)" = "c37e46f9fa20f8c562dfd259666ee67e46bca8cd"
+          test "$(gh api repos/${GITHUB_REPOSITORY}/actions/runs/44974123324 --jq .conclusion)" = success
+      - name: Create stable tag pinned to validated commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          target="c37e46f9fa20f8c562dfd259666ee67e46bca8cd"
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v0.3.0" --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            test "$existing" = "$target" || { echo "::error::v0.3.0 exists but points to a different commit"; exit 1; }
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref='refs/tags/v0.3.0' -f sha="$target"
+          fi
+      - name: Publish GitHub stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v0.3.0 >/dev/null 2>&1; then
+            echo "v0.3.0 release already exists"
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          ## 本版更新
+          - 新增 Windows 与 Android Termux 通过 USB 数据线、ADB 转发实现双向完整同步，无需 VPS 或 Tailscale。
+          - 完整镜像包含聊天、角色卡、世界书、图片、设置和插件数据；保留各设备自身的网络与账户配置。
+          - 每台接收设备只保留最近一次覆盖前的 TavernSyn 恢复备份；更新时轮换旧备份，失败时保护有效恢复记录。
+          - SHA-256 完整性检查、应用前暂存、健康检查和失败回滚。
+          - 保留 VPS 同步及原有受控启动功能。
+
+          ## 验证与注意事项
+          - Linux 完整集成、Windows / Node 22 USB 检查、Linux / Node 20 USB 检查通过。
+          - 尚未在实体 Windows 电脑与安卓手机之间完成 USB 数据线验收。
+          - 初次使用 USB，同步两台设备后仍须各自重新运行安装器生成 USB 启动入口。
+          - 操作说明：docs/usb-sync.md。
+          NOTES
+          gh release create v0.3.0 --verify-tag --latest --title 'TavernSyn v0.3.0 — USB 完整同步' --notes-file "$RUNNER_TEMP/release-notes.md"
