@@ -17,7 +17,7 @@ import { HYBRID_PROTOCOL } from '../lib/hybrid.mjs';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'PREVIEW', 'PENDING_APPLY', 'RECOVERY_REQUIRED']);
 const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '下载同步副本', VERIFYING: '校验文件', PREPARING: '准备插件',
-    AWAITING_SAVE: '核对保存', WAITING_PAGE: '等待页面交接', QUIESCING: '安全停止酒馆', SNAPSHOT: '创建独立快照', UPLOADING: '上传同步副本',
+    AWAITING_SAVE: '核对保存', WAITING_PAGE: '等待页面交接', QUIESCING: '快速停止酒馆', SNAPSHOT: '创建独立快照', UPLOADING: '上传同步副本',
     APPLYING: '应用更新', RESTORING: '恢复上一版', STARTING: '重新启动酒馆', ROLLING_BACK: '回滚数据', SUCCEEDED: '同步完成',
     FAILED: '同步失败', PREVIEW: '预览完成', PENDING_APPLY: '等待受控应用', RECOVERY_REQUIRED: '需要人工恢复' };
 export function stateDifference(before, after) {
@@ -32,6 +32,7 @@ export function stateDifference(before, after) {
 export class Manager {
     constructor(device, lifecycle, transportAdapter = transport, logger = () => {}) {
         this.device = device; this.lifecycle = lifecycle; this.transport = transportAdapter; this.job = null; this.busy = false;
+        this.readyTask = null; this.pageAcknowledged = null;
         this.logger = logger;
         this.wake = {}; this.progressTime = 0; this.writeQueue = Promise.resolve(); this.progressPending = false; this.phaseStarted = Date.now();
     }
@@ -131,18 +132,36 @@ export class Manager {
             return this.start({ direction: 'pull', tab: payload.tab, preview: false, pending }, { authorized: true });
         }
         if (action === 'ready') {
-            requireThat(this.job?.id === payload.id && this.job.phase === 'AWAITING_SAVE', 'JOB', '任务状态已改变。');
+            requireThat(this.job?.id === payload.id, 'JOB', '任务状态已改变。');
             requireThat(typeof payload.tab === 'string' && /^[a-f0-9-]{36}$/.test(payload.tab), 'INPUT', '浏览器标签页标识无效。');
             requireThat(this.lifecycle, 'UNMANAGED', '请使用受控入口启动。');
-            const receipt = await this.lifecycle.receipt(payload.receipt);
-            await this.lifecycle.verifyReceipt(receipt); this.receipt = receipt;
-            // The sole active page may have reloaded during preparation.
-            if (payload.tab !== this.job.tab) await this.write('AWAITING_SAVE', { tab: payload.tab });
-            this.wake.ready?.(); return { id: this.job.id, ticket: this.job.ticket };
+            if (this.readyTask?.id === payload.id) return this.readyTask.promise;
+            requireThat(this.job.phase === 'AWAITING_SAVE', 'JOB', '任务状态已改变。');
+            const job = this.job, task = { id: job.id };
+            // Multiple live pages may save at once. Claim the handoff before
+            // awaiting IPC so only one page can change the owner and phase.
+            this.readyTask = task;
+            task.promise = Promise.resolve().then(async () => {
+                const receipt = await this.lifecycle.receipt(payload.receipt);
+                requireThat(this.job === job && job.phase === 'AWAITING_SAVE', 'JOB', '任务状态已改变。');
+                this.receipt = receipt;
+                // Saving is best effort: later writes are included in the
+                // stopped snapshot rather than checked against this receipt.
+                if (payload.tab !== job.tab) await this.write('AWAITING_SAVE', { tab: payload.tab });
+                requireThat(this.job === job && job.phase === 'AWAITING_SAVE', 'JOB', '任务状态已改变。');
+                const result = { id: job.id, ticket: job.ticket, tab: job.tab };
+                this.wake.ready?.(); return result;
+            }).catch(error => {
+                if (this.readyTask === task) this.readyTask = null;
+                throw error;
+            });
+            return task.promise;
         }
         if (action === 'page') {
-            requireThat(this.job?.id === payload.id && payload.ticket === this.job.ticket && payload.tab === this.job.tab && this.job.phase === 'WAITING_PAGE', 'JOB', '等待页确认无效。');
-            this.wake.page?.(); return { ok: true };
+            requireThat(this.job?.id === payload.id && payload.ticket === this.job.ticket && payload.tab === this.job.tab
+                && (this.job.phase === 'WAITING_PAGE' || this.pageAcknowledged === payload.ticket), 'JOB', '等待页确认无效。');
+            if (this.job.phase === 'WAITING_PAGE') { this.pageAcknowledged = payload.ticket; this.wake.page?.(); }
+            return { ok: true };
         }
         if (action === 'cancel') {
             requireThat(this.job?.id === payload.id && ['AWAITING_SAVE', 'WAITING_PAGE'].includes(this.job.phase), 'JOB', '当前阶段不能取消。');
@@ -188,6 +207,7 @@ export class Manager {
         requireThat((previous.phase !== 'PENDING_APPLY' || pending) && previous.phase !== 'RECOVERY_REQUIRED', 'PENDING_APPLY', '已有待应用或待恢复任务，请先处理。');
         requireThat(this.lifecycle || direction === 'pull', 'UNMANAGED', '严格推送需要受控启动器；请关闭酒馆后使用 TavernSyn 入口。');
         this.busy = true; this.receipt = null; this.outcome = null; this.statusWriteFailed = false;
+        this.readyTask = null; this.pageAcknowledged = null;
         this.pendingSource = pending;
         this.resumeSource = resume; this.downloadResume = downloadResume;
         const lock = path.join(this.device.state, 'operation.lock');
@@ -269,13 +289,10 @@ export class Manager {
     async saveAndStop({ skipStop } = {}) {
         await this.waitFor('ready', 'AWAITING_SAVE');
         await this.waitFor('page', 'WAITING_PAGE');
-        await this.lifecycle.verifyReceipt(this.receipt);
         if (skipStop && await skipStop()) return false;
-        await this.write('QUIESCING');
-        await this.lifecycle.stop({ interruptOnDrain: true, onInterrupt: () => this.write('QUIESCING', {
-            note: '请求未排空，正在中断旧实例连接并正常关闭酒馆；等待清理完成后继续同步。',
-        }) });
-        await this.lifecycle.verifyReceipt(this.receipt);
+        await this.write('QUIESCING', { note: '正在快速关闭酒馆；未及时保存的生成内容和编辑可能不保留。' });
+        const stopped = await this.lifecycle.stop({ fast: true });
+        if (stopped?.forced) this.log('酒馆清理未及时结束，已结束所属进程；继续同步停机后的磁盘内容。');
         return true;
     }
     async cache(payload) {
@@ -427,7 +444,6 @@ export class Manager {
         requireThat(latest.dataset === remoteDataset(this.device), 'REMOTE_DATASET', '远端数据集已经改变，停止跳过同步。');
         if (latest.current?.digest !== baseline.remote.digest) return false;
         if ((await portableState(this.device)).digest !== local.digest) return false;
-        if (this.job.direction === 'push') await this.lifecycle.verifyReceipt(this.receipt);
         const remote = this.job.provider === 'google-drive'
             ? { ...latest.current, maintenance: latest.maintenance ?? [] } : latest.current;
         await this.success(local, remote, { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 }, { noChanges: true });
@@ -437,11 +453,9 @@ export class Manager {
     async restore() {
         requireThat((await recoveryStatus(this.device)).available, 'NO_RECOVERY', '没有可用的上一版恢复副本；应用更新后只保留最近一次覆盖前的备份。');
         const file = path.join(this.device.state, 'apply.json'), journal = await readJson(file), journalDigest = digest(journal);
-        const approved = (await portableState(this.device)).digest;
         await this.write('PREPARING', { note: '准备恢复到最近一次覆盖前的本机数据。' });
         try {
             await this.saveAndStop();
-            requireThat((await portableState(this.device)).digest === approved, 'LOCAL_CHANGED', '确认后本机数据发生变化，未恢复上一版。');
             requireThat(digest(await readJson(file)) === journalDigest && (await recoveryStatus(this.device)).available, 'NO_RECOVERY', '恢复副本已经改变，请重新检查。');
             await preserveSyncCode(this.device, journal);
             this.plan = journal;
@@ -452,7 +466,7 @@ export class Manager {
             if (this.plan) {
                 await this.write('ROLLING_BACK', { note: '恢复未能完成，正在回到恢复操作前的数据。' });
                 try {
-                    if (!this.lifecycle.stopped) await this.lifecycle.stop();
+                    if (!this.lifecycle.stopped) await this.lifecycle.stop({ fast: true });
                     if (journal.phase !== 'rolled-back') await rollback(this.device, journal);
                     await fs.mkdir(journal.recovery, { recursive: true, mode: 0o700 });
                     await applyPlan(this.device, journal); await this.lifecycle.start(); await commitPlan(this.device, journal);
@@ -550,11 +564,14 @@ export class Manager {
                 summary = stateDifference(local, metadata.sourceState);
                 await this.write('PREPARING', { summary, localDigest: local.digest,
                     ...(metadata.warnings?.length ? { note: `远端设置含 ${metadata.warnings.length} 个设备绝对路径字段，按现有设备字段保留策略同步。` } : {}) });
-                this.approvedLocal = local.digest;
                 try {
                     await session?.assertCurrent?.();
                     await this.saveAndStop();
-                    requireThat((await portableState(this.device)).digest === this.approvedLocal, 'LOCAL_CHANGED', '应用前共享数据发生变化，保留下载并停止覆盖；请重新发起同步。');
+                    // A final automatic save is part of this device's current
+                    // data. Back up the stopped state rather than rejecting it
+                    // because it differs from the earlier on-screen inventory.
+                    local = await portableState(this.device);
+                    await this.write('QUIESCING', { summary: stateDifference(local, metadata.sourceState), localDigest: local.digest });
                     // Dependency preparation and the browser handoff can take
                     // minutes. A changed cloud publication must not silently
                     // overwrite this device with the previously downloaded one.
@@ -571,7 +588,7 @@ export class Manager {
                 } catch (error) {
                     if (this.plan && !['committed', 'rolled-back'].includes(this.plan.phase)) {
                         await this.write('ROLLING_BACK');
-                        if (!this.lifecycle.stopped) { try { await this.lifecycle.stop(); } catch { throw new SyncError('RECOVERY_REQUIRED', '新实例尚未确认退出，禁止覆盖正在使用的数据。请查看恢复说明。'); } }
+                        if (!this.lifecycle.stopped) { try { await this.lifecycle.stop({ fast: true }); } catch { throw new SyncError('RECOVERY_REQUIRED', '新实例尚未确认退出，禁止覆盖正在使用的数据。请查看恢复说明。'); } }
                         requireThat(this.lifecycle.stopped, 'RECOVERY_REQUIRED', '进程退出状态不明。');
                         await rollback(this.device, this.plan); await this.lifecycle.start();
                     } else if (this.lifecycle.stopped) await this.lifecycle.start();

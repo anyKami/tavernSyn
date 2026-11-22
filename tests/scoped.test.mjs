@@ -159,6 +159,9 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     };
     await manager.start({ direction: 'push', scope, tab: randomUUID() });
     const preview = await phase(manager, 'AWAITING_SAVE', 30000); assert.ok(preview.summary.deleted >= 3);
+    // A last automatic save is included in the selected-direction snapshot;
+    // the earlier inventory is no longer a separate approval boundary.
+    await fs.writeFile(path.join(source.dataRoot, source.profile, 'chats/A/new.jsonl'), '{"mes":"saved during handoff"}\n');
     const pushed = await runHandoff(manager);
     assert.equal(plannedWithPartial, true);
     assert.ok(pushed.stats.sentBytes < 64 * 1024 && pushed.stats.matchedBytes > large.length - 64 * 1024, JSON.stringify(pushed.stats));
@@ -169,6 +172,7 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     const afterManifest = await readJson(path.join(path.dirname(payload), 'manifest.json'));
     for (const file of beforeManifest.files.filter(file => file.path !== 'environment.json' && !/^profile\/(?:chats|group chats|groups|characters|worlds)\//.test(file.path))) assert.equal(await hashFile(path.join(payload, file.path)), file.sha256);
     assert.equal(await exists(path.join(payload, 'profile/characters/A.png')), false);
+    assert.equal(await fs.readFile(path.join(payload, 'profile/chats/A/new.jsonl'), 'utf8'), '{"mes":"saved during handoff"}\n');
     await verify(payload, afterManifest);
     assert.equal((await readJson(path.join(payload, 'environment.json'))).sourceState.digest, (await portableState(source)).digest);
     const pushes = remote.pushes, starts = lifecycle.starts;
@@ -181,6 +185,8 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     const localHashes = await Promise.all(localFiles.map(hashFile));
     const targetLifecycle = new FakeLifecycle(), puller = new Manager(target, targetLifecycle, remote);
     await puller.start({ direction: 'pull', scope, tab: randomUUID() });
+    await phase(puller, 'AWAITING_SAVE');
+    await fs.writeFile(path.join(target.dataRoot, target.profile, 'characters/local.png'), 'last saved local card');
     const pulled = await runHandoff(puller);
     assert.equal(pulled.summary.deleted >= 2, true);
     assert.equal(await exists(path.join(target.dataRoot, target.profile, 'characters/local.png')), false);
@@ -190,6 +196,9 @@ test('real protocol and rsync mirror selected categories both ways with deletion
     assert.ok(pulled.stats.receivedBytes < 64 * 1024 && pulled.stats.matchedBytes > large.length - 64 * 1024, JSON.stringify(pulled.stats));
     assert.equal((await recoveryStatus(target)).available, true);
     assert.equal(await exists(path.join(target.state, 'recovery')), true);
+    const journal = await readJson(path.join(target.state, 'apply.json'));
+    const previousCards = journal.steps.find(step => step.live === path.join(target.dataRoot, target.profile, 'characters')).old;
+    assert.equal(await fs.readFile(path.join(previousCards, 'local.png'), 'utf8'), 'last saved local card');
     const pulls = remote.pulls, targetStarts = targetLifecycle.starts;
     await puller.start({ direction: 'pull', scope, tab: randomUUID() }); await puller.done;
     assert.equal((await puller.status()).noChanges, true); assert.equal(remote.pulls, pulls); assert.equal(targetLifecycle.starts, targetStarts);

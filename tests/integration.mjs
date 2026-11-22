@@ -133,13 +133,15 @@ async function receipt() {
     const settingsDigest = digest({ extension_settings: settings.extension_settings, power_user: settings.power_user, oai_settings: settings.oai_settings, textgenerationwebui_settings: settings.textgenerationwebui_settings });
     return (await api('flush', { nonce, settingsDigest })).receipt;
 }
-async function handoff() {
+async function handoff(handoffTab) {
     const job = await phase(manager, 'AWAITING_SAVE', 60000);
-    const saved = await receipt(); await api('ready', { id: job.id, tab: job.tab, receipt: saved });
+    const activeTab = handoffTab ?? job.tab;
+    const saved = await receipt(); await api('ready', { id: job.id, tab: activeTab, receipt: saved });
     const waiting = await phase(manager, 'WAITING_PAGE');
-    const htmlResponse = await request(`/api/plugins/tavernsyn/wait?${new URLSearchParams({ id: job.id, tab: job.tab, ticket: waiting.ticket })}`);
+    assert.equal(waiting.tab, activeTab);
+    const htmlResponse = await request(`/api/plugins/tavernsyn/wait?${new URLSearchParams({ id: job.id, tab: activeTab, ticket: waiting.ticket })}`);
     const html = await htmlResponse.text(); assert.ok(html.includes('waitingDocument')); assert.ok(!html.includes('src="/script.js"'));
-    await api('page', { id: job.id, tab: job.tab, ticket: waiting.ticket });
+    await api('page', { id: job.id, tab: activeTab, ticket: waiting.ticket });
     await manager.done; assert.equal((await manager.status()).phase, 'SUCCEEDED', JSON.stringify(await manager.status()));
     epoch = lifecycle.nonce; await login();
 }
@@ -447,17 +449,15 @@ try {
     const normalConnect = remote.connect;
     remote.connect = () => { throw Error('recovery must reuse local download'); };
     await api('resume-pending', { tab });
-    const saving = await phase(manager, 'AWAITING_SAVE', 60000);
+    await phase(manager, 'AWAITING_SAVE', 60000);
     await api('tabs', { tab });
-    const conflictingTab = await request('/api/plugins/tavernsyn/ready', { method: 'POST',
-        body: { id: saving.id, receipt: await receipt(), tab: randomUUID() } });
-    assert.equal(conflictingTab.status, 409); assert.equal((await conflictingTab.json()).error, 'OTHER_TABS');
-    assert.equal((await manager.status()).phase, 'AWAITING_SAVE');
-    await handoff();
+    const currentTab = randomUUID();
+    await api('tabs', { tab: currentTab });
+    await handoff(currentTab);
     remote.connect = normalConnect; remote.pull = normalPull;
     assert.notEqual(lifecycle.nonce, prePullEpoch);
     checks.push('Legacy SSH failure after complete download: offline SHA-256 recovery, original-generation automatic continuation, real ST same-port restart and successful application without reconnecting');
-    checks.push('Automatic save binds the handoff to its current page and refuses another still-active TavernSyn tab');
+    checks.push('Automatic save binds the handoff to its current page while other open tabs require no manual closure');
     assert.equal(await exists(path.join(fixture, 'data/default-user/worlds/local-only.json')), false);
     assert.equal((await readJson(path.join(state, 'apply.json'))).phase, 'committed');
     assert.equal(await exists(path.join(state, 'recovery')), true);
@@ -492,9 +492,9 @@ try {
     assert.equal(uncertainDrain.uncertain, true);
     assert.ok(!JSON.stringify(uncertainDrain).includes('sync-test-probe/slow'));
     checks.push('An uncertain handler still rejects a strict stop without clearing its diagnostics');
-    // Reproduce both an active POST and a historical aborted request. Only the
-    // normal save + page handoff may opt into interrupting this old instance.
-    // Model a device without a baseline; the initial user consent covers overwrite.
+    // Reproduce both an active POST and a historical aborted request. The
+    // selected synchronization automatically interrupts this owned instance.
+    // Model a device without a baseline; clicking the direction covers overwrite.
     await fs.unlink(path.join(state, 'baseline.json'));
     let pendingRequest;
     const pendingResponse = new Promise((resolve, reject) => {
@@ -513,7 +513,7 @@ try {
         await Promise.race([disconnected, delay(5000).then(() => { throw new Error('Blocked POST was not disconnected'); })]);
         assert.equal((await oldExit).code, 0); assert.notEqual(lifecycle.child.pid, oldChild.pid);
         assert.equal((await api('status')).drain.uncertain, false);
-        assert.ok((await fs.readFile(path.join(state, 'sync.log'), 'utf8')).includes('正在中断旧实例连接并正常关闭酒馆'));
+        assert.ok((await fs.readFile(path.join(state, 'sync.log'), 'utf8')).includes('快速关闭'));
     } finally { pendingRequest.destroy(); }
     checks.push('A real hanging POST plus uncertain request is disconnected after saved handoff, native exit is confirmed, and the same push publishes and restarts successfully');
     if (process.argv.includes('--browser')) {
@@ -538,7 +538,7 @@ try {
     closingRequest.on('error', () => {}); await closingStarted; closingRequest.destroy(); await closingFinished;
     await assert.rejects(lifecycle.stop(), { code: 'DRAIN' });
     const closingAt = Date.now(); await lifecycle.close();
-    assert.equal((await lifecycle.exit).code, 0); assert.ok(Date.now() - closingAt < 10000);
+    assert.equal((await lifecycle.exit).code, 0); assert.ok(Date.now() - closingAt < 5000);
     assert.equal(await exists(path.join(state, 'instance.lock')), false);
     await assert.rejects(lifecycle.start(), { code: 'CLOSING' });
     checks.push('Explicit terminal close exits through native cleanup even after an aborted HTTP request; the closing lifecycle cannot restart');
@@ -565,15 +565,26 @@ try {
             await new Promise((resolve, reject) => { const probe = net.createServer(); probe.once('error', reject); probe.listen(port, '127.0.0.1', () => probe.close(resolve)); });
         }
     } finally { if (launcher?.exitCode === null) launcher.kill(); }
-    await run(process.execPath, [path.join(PROJECT, 'bin/recover.mjs'), '--state', state, '--acknowledge-stopped', 'yes']);
+    await run(process.execPath, [path.join(PROJECT, 'bin/recover.mjs'), '--state', state]);
     checks.push('Abrupt launcher loss stops its actual ST child, frees the port and permits a second launch with automatic dead-lock recovery');
     const hanging = new Lifecycle(device, () => {});
     await hanging.start(); epoch = hanging.nonce;
     const hang = await request('/api/plugins/sync-test-probe/hang-exit', { method: 'POST', body: {} }); assert.equal(hang.status, 200); await hang.text();
-    const hangAt = Date.now(); await hanging.close();
-    assert.equal((await hanging.exit).code, 1); assert.ok(Date.now() - hangAt < 10000);
+    const hangAt = Date.now(); await hanging.stop({ fast: true });
+    const fastStopMs = Date.now() - hangAt;
+    assert.equal(hanging.stopped, true); assert.ok(fastStopMs < 5000, `Fast synchronization stop took ${fastStopMs} ms`);
+    assert.ok((await hanging.exit).signal === 'SIGKILL' || (process.platform === 'win32' && (await hanging.exit).code !== 0));
     assert.equal(await exists(path.join(state, 'instance.lock')), false);
-    checks.push('A synthetic hanging plugin cleanup cannot keep the server alive after terminal close; the bounded exit retains recovery data');
+    await hanging.start(); epoch = hanging.nonce;
+    assert.equal((await hanging.command('ping')).install, device.install);
+    checks.push(`Hanging native plugin cleanup is automatically ended by fast synchronization stop (${fastStopMs} ms); the exited child's own lock is removed and the same port restarts`);
+    const hangAgain = await request('/api/plugins/sync-test-probe/hang-exit', { method: 'POST', body: {} }); assert.equal(hangAgain.status, 200); await hangAgain.text();
+    const closeAt = Date.now(); await hanging.close();
+    const fastCloseMs = Date.now() - closeAt;
+    assert.equal(hanging.stopped, true); assert.ok(fastCloseMs < 5000, `Fast terminal close took ${fastCloseMs} ms`);
+    assert.ok((await hanging.exit).signal === 'SIGKILL' || (process.platform === 'win32' && (await hanging.exit).code !== 0));
+    assert.equal(await exists(path.join(state, 'instance.lock')), false);
+    checks.push(`Hanging native plugin cleanup also exits automatically on terminal close (${fastCloseMs} ms) and releases only its own instance lock`);
     await unmanagedRecovery();
     checks.push('All actual fixture children exited; no real user data accessed or changed');
     const result = { status: 'passed', date: new Date().toISOString(), platform: process.platform, node: process.version, root, port, checks,

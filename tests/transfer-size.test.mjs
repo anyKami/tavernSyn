@@ -122,7 +122,31 @@ for (const direction of ['push', 'pull']) test(`the waiting page shows ${directi
     vm.runInContext(html.match(/<script>([\s\S]*)<\/script>/)[1], context);
     await new Promise(resolve => setImmediate(resolve));
     assert.match(element('detail').textContent, /1\.50 KiB/);
-    assert.deepEqual(calls.filter(call => call.options?.method === 'POST').map(call => call.url), ['/api/plugins/tavernsyn/page']);
+    assert.deepEqual(calls.filter(call => call.options?.method === 'POST'), [], 'a handoff already in progress needs no repeated acknowledgement');
+});
+
+test('the waiting page retries a lost automatic handoff without asking the user to return', async () => {
+    const id = randomUUID(), tab = randomUUID(), ticket = randomUUID(), epoch = randomUUID(), elements = new Map(), timers = [];
+    let acknowledgements = 0;
+    const element = name => { if (!elements.has(name)) elements.set(name, { hidden: true, textContent: '' }); return elements.get(name); };
+    const context = vm.createContext({ document: { getElementById: element }, location: { replace() {} }, setTimeout: fn => timers.push(fn),
+        fetch: async (url, options) => {
+            if (url === '/csrf-token') return { ok: true, json: async () => ({ token: 'fixture-csrf' }) };
+            if (options?.method === 'POST') {
+                assert.equal(url, '/api/plugins/tavernsyn/page');
+                assert.deepEqual(JSON.parse(options.body), { id, tab, ticket });
+                if (++acknowledgements === 1) throw Error('synthetic lost handoff request');
+                return { ok: true };
+            }
+            return { ok: true, json: async () => ({ id, epoch, phase: acknowledgements < 2 ? 'WAITING_PAGE' : 'UPLOADING', direction: 'push', transferPlan: { files: 1, bytes: 1024 } }) };
+        },
+    });
+    vm.runInContext(waitPage({ id, tab, ticket, epoch }).match(/<script>([\s\S]*)<\/script>/)[1], context);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(acknowledgements, 1); assert.equal(element('back').hidden, true);
+    await timers.shift()(); assert.equal(acknowledgements, 2);
+    await timers.shift()(); assert.match(element('detail').textContent, /1\.00 KiB/);
+    assert.equal(element('back').hidden, true);
 });
 
 test('unmanaged download reports size and stages automatically without any confirmation', async () => {

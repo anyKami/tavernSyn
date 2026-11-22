@@ -62,6 +62,53 @@ test('a reloaded sole page can automatically save and own the handoff without an
     assert.deepEqual(await readJson(path.join(oldProfile, 'worlds/book.json')), { local: true });
 });
 
+test('simultaneous pages share one save handoff and duplicate page acknowledgements are idempotent', async () => {
+    const { device, remote } = await published(), lifecycle = new FakeLifecycle();
+    await atomicJson(path.join(device.dataRoot, device.profile, 'worlds/book.json'), { local: true });
+    let receipts = 0, releaseReceipt;
+    const pendingReceipt = new Promise(resolve => { releaseReceipt = resolve; });
+    lifecycle.receipt = async () => { receipts++; await pendingReceipt; return { created: Date.now(), files: [], mode: 'disk' }; };
+    const manager = new Manager(device, lifecycle, remote);
+    await manager.start({ direction: 'pull', tab: randomUUID() });
+    const saving = await phase(manager, 'AWAITING_SAVE'), firstTab = randomUUID(), otherTab = randomUUID();
+    const first = manager.action('ready', { id: saving.id, tab: firstTab, receipt: randomUUID() });
+    const other = manager.action('ready', { id: saving.id, tab: otherTab, receipt: randomUUID() });
+    releaseReceipt();
+    const [accepted, following] = await Promise.all([first, other]);
+    assert.equal(receipts, 1); assert.deepEqual(following, accepted); assert.equal(accepted.tab, firstTab);
+    const page = await phase(manager, 'WAITING_PAGE');
+    assert.equal(page.tab, firstTab);
+    assert.deepEqual(await manager.action('ready', { id: saving.id, tab: otherTab, receipt: randomUUID() }), accepted);
+    assert.equal(manager.job.phase, 'WAITING_PAGE');
+    const ack = { id: page.id, tab: firstTab, ticket: page.ticket };
+    await assert.rejects(manager.action('page', { ...ack, tab: otherTab }), { code: 'JOB' });
+    await assert.rejects(manager.action('page', { ...ack, ticket: randomUUID() }), { code: 'JOB' });
+    assert.deepEqual(await Promise.all([manager.action('page', ack), manager.action('page', ack)]), [{ ok: true }, { ok: true }]);
+    await manager.done;
+    assert.equal((await manager.status()).phase, 'SUCCEEDED');
+    assert.deepEqual(await manager.action('page', ack), { ok: true });
+    await assert.rejects(manager.action('page', { ...ack, id: randomUUID() }), { code: 'JOB' });
+});
+
+test('a failed save handoff releases its page claim so another page can retry automatically', async () => {
+    const { device, remote } = await published(), lifecycle = new FakeLifecycle();
+    await atomicJson(path.join(device.dataRoot, device.profile, 'worlds/book.json'), { local: true });
+    let receipts = 0;
+    lifecycle.receipt = async () => {
+        if (++receipts === 1) throw Object.assign(Error('synthetic expired receipt'), { code: 'SAVE_ACK' });
+        return { created: Date.now(), files: [], mode: 'disk' };
+    };
+    const manager = new Manager(device, lifecycle, remote);
+    await manager.start({ direction: 'pull', tab: randomUUID() });
+    const saving = await phase(manager, 'AWAITING_SAVE'), tab = randomUUID();
+    await assert.rejects(manager.action('ready', { id: saving.id, tab: randomUUID(), receipt: randomUUID() }), { code: 'SAVE_ACK' });
+    const accepted = await manager.action('ready', { id: saving.id, tab, receipt: randomUUID() });
+    assert.equal(receipts, 2); assert.equal(accepted.tab, tab);
+    await phase(manager, 'WAITING_PAGE');
+    await manager.action('page', accepted); await manager.done;
+    assert.equal((await manager.status()).phase, 'SUCCEEDED');
+});
+
 test('first overwrite and clearing the worldbook category proceed with only the initial sync consent', async () => {
     const { device, remote } = await published();
     const other = await fixture(), phases = [];

@@ -5,28 +5,25 @@ import vm from 'node:vm';
 import { progressDetail } from '../ui/progress.js';
 
 const source = await fs.readFile(new URL('../ui/index.js', import.meta.url), 'utf8');
-const direction = source.slice(source.indexOf('function confirmDirection('), source.indexOf('const target ='));
 const begin = source.slice(source.indexOf('async function begin('), source.indexOf('async function usbConnect()'));
 
-for (const action of ['push', 'pull']) test(`Drive ${action} confirmation identifies the actual saved provider`, async () => {
-    const nodes = new Map(), modal = { close() {}, showModal() {}, querySelector(selector) {
-        if (!nodes.has(selector)) nodes.set(selector, { textContent: '', focus() {} });
-        return nodes.get(selector);
-    } };
-    const context = vm.createContext({ status: { provider: 'google-drive' }, directionDialog: modal });
-    vm.runInContext(direction, context);
-    const promise = vm.runInContext(`confirmDirection('${action}')`, context);
-    assert.match(modal.querySelector('h3').textContent, /Google 云盘/);
-    assert.match(modal.querySelector('.ts-detail').textContent, /Google 云盘/);
-    assert.doesNotMatch(modal.querySelector('.ts-detail').textContent, /VPS/);
-    modal.querySelector('.ts-decline').onclick();
-    assert.equal(await promise, false);
+for (const action of ['push', 'pull']) test(`Drive ${action} starts directly and retains the saved provider`, async () => {
+    const calls = [];
+    const context = vm.createContext({ status: { provider: 'google-drive', managed: true }, starting: false, setupBusy: false, localError: '',
+        tab: 'fixture-tab', render() {}, showError: error => { throw error; },
+        flush() { assert.fail('save only at the actual handoff'); },
+        api: async (route, body) => { calls.push({ route, body }); return { phase: 'PREFLIGHT' }; },
+    });
+    vm.runInContext(begin, context);
+    await vm.runInContext(`begin('${action}')`, context);
+    assert.equal(calls.length, 1); assert.equal(calls[0].route, 'start'); assert.equal(calls[0].body.direction, action);
+    assert.equal(context.status.provider, 'google-drive');
 });
 
-test('Drive category request is rejected before confirmation, saving or a start request', async () => {
+test('Drive category request is rejected before saving or a start request', async () => {
     const errors = [], calls = [];
     const context = vm.createContext({ status: { provider: 'google-drive' }, starting: false, setupBusy: false, localError: '',
-        render: () => calls.push('render'), confirmDirection: () => calls.push('confirm'), flush: () => calls.push('flush'),
+        render: () => calls.push('render'), flush: () => calls.push('flush'),
         api: () => calls.push('api'), showError: error => errors.push(error),
     });
     vm.runInContext(begin, context);

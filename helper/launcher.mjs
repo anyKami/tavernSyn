@@ -13,9 +13,11 @@ import { recoverStopped } from '../bin/recover.mjs';
 import { openBrowser } from './browser.mjs';
 import { createSyncLog } from './sync-log.mjs';
 import { UsbController } from './usb-controller.mjs';
+import { refreshWindowsLaunchers } from '../bin/refresh-launchers.mjs';
 
 async function main() {
     const options = cliOptions(), device = await loadDevice(options.state);
+    await refreshWindowsLaunchers({ install: device.install });
     await checkCompatibility(device.install);
     for (const name of ['instance.lock', 'launcher.lock', 'operation.lock']) {
         if (await exists(path.join(device.state, name))) { await recoverStopped(device); break; }

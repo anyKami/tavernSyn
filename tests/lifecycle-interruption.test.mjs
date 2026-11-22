@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { Lifecycle } from '../helper/lifecycle.mjs';
 import { SyncError } from '../lib/io.mjs';
 import { Manager } from '../helper/manager.mjs';
@@ -72,24 +76,155 @@ test('cleanup timeout stops synchronization without killing the old process', as
     assert.deepEqual(commands, ['pause', 'interrupt-shutdown']);
 });
 
-test('a failed save receipt never permits request interruption', async () => {
+test('automatic synchronization uses a fast owned stop without requiring an unchanged earlier save receipt', async () => {
     let stopped = false;
+    const phases = [];
     const manager = new Manager({}, {
-        verifyReceipt: async () => { throw new SyncError('SAVE_CHANGED', 'synthetic changed save'); },
-        stop: async () => { stopped = true; },
+        verifyReceipt: async () => assert.fail('a later automatic save must not require another confirmation'),
+        stop: async options => { assert.equal(options.fast, true); stopped = true; },
     });
-    manager.waitFor = async () => {}; manager.write = async () => {};
-    await assert.rejects(manager.saveAndStop(), { code: 'SAVE_CHANGED' });
-    assert.equal(stopped, false);
+    manager.waitFor = async (_name, phase) => { phases.push(phase); }; manager.write = async phase => { phases.push(phase); };
+    assert.equal(await manager.saveAndStop(), true);
+    assert.equal(stopped, true);
+    assert.deepEqual(phases, ['AWAITING_SAVE', 'WAITING_PAGE', 'QUIESCING']);
 });
 
-test('the save receipt is checked again after interrupted native shutdown', async () => {
-    let verifications = 0, interrupted = false;
+test('an unchanged synchronization can skip stopping after its automatic save handoff', async () => {
     const manager = new Manager({}, {
-        verifyReceipt: async () => { if (++verifications === 2) throw new SyncError('SAVE_CHANGED', 'synthetic late write'); },
-        stop: async options => { interrupted = options.interruptOnDrain; },
+        verifyReceipt: async () => assert.fail('no repeated save approval'),
+        stop: async () => assert.fail('unchanged data should not restart the server'),
     });
     manager.waitFor = async () => {}; manager.write = async () => {};
-    await assert.rejects(manager.saveAndStop(), { code: 'SAVE_CHANGED' });
-    assert.equal(interrupted, true); assert.equal(verifications, 2);
+    assert.equal(await manager.saveAndStop({ skipStop: async () => true }), false);
+});
+
+const tick = () => new Promise(resolve => setImmediate(resolve));
+async function fastFixture(context) {
+    const parent = fileURLToPath(new URL('../.tmp/', import.meta.url));
+    await fs.mkdir(parent, { recursive: true });
+    const state = await fs.mkdtemp(path.join(parent, 'fast-stop-'));
+    context.after(() => fs.rm(state, { recursive: true, force: true }));
+    const lifecycle = new Lifecycle({ state, install: path.join(state, 'install') }, () => {});
+    const commands = [], kills = [];
+    lifecycle.stopped = false; lifecycle.nonce = randomUUID();
+    const child = lifecycle.child = { pid: 124567, connected: true, exitCode: null, signalCode: null,
+        kill(signal) { kills.push(signal); return true; } };
+    let resolveExit;
+    lifecycle.exit = new Promise(resolve => { resolveExit = resolve; });
+    lifecycle.command = async op => { commands.push(op); return { ok: true }; };
+    const lockFile = path.join(state, 'instance.lock');
+    const lock = { pid: child.pid, nonce: lifecycle.nonce, install: lifecycle.device.install };
+    await fs.writeFile(lockFile, JSON.stringify(lock));
+    function exit(code = 0, signal = null) {
+        lifecycle.stopped = true; child.connected = false; child.exitCode = code; child.signalCode = signal;
+        resolveExit({ code, signal });
+    }
+    return { lifecycle, child, commands, kills, lockFile, lock, exit };
+}
+
+test('fast stop completes a timely native exit without killing and waits for logs to finish', async context => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const { lifecycle, commands, kills, exit } = await fastFixture(context);
+    let flush, done = false;
+    lifecycle.outputDrained = new Promise(resolve => { flush = resolve; });
+    const stopping = lifecycle.stop({ fast: true }).then(() => { done = true; });
+    await tick();
+    assert.deepEqual(commands, ['fast-shutdown']);
+    exit(); await tick();
+    assert.equal(done, false); assert.deepEqual(kills, []);
+    flush(); await stopping;
+    context.mock.timers.tick(5000); await tick();
+    assert.deepEqual(kills, []); assert.equal(done, true);
+});
+
+test('fast stop kills only its owned child after two seconds and waits for exit before removing its lock', async context => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const { lifecycle, commands, kills, lockFile, lock, exit } = await fastFixture(context);
+    let done = false;
+    const stopping = lifecycle.stop({ fast: true }).then(() => { done = true; });
+    await tick();
+    context.mock.timers.tick(1999); await tick();
+    assert.deepEqual(kills, []); assert.equal(done, false);
+    context.mock.timers.tick(1); await tick();
+    assert.deepEqual(commands, ['fast-shutdown']); assert.deepEqual(kills, ['SIGKILL']);
+    assert.equal(done, false); assert.equal(lifecycle.stopped, false);
+    assert.deepEqual(JSON.parse(await fs.readFile(lockFile, 'utf8')), lock);
+    exit(null, 'SIGKILL'); await stopping;
+    await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+    assert.equal(done, true);
+});
+
+test('an unresponsive control command cannot delay the fast stop deadline', async context => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const { lifecycle, kills, exit } = await fastFixture(context);
+    lifecycle.command = () => new Promise(() => {});
+    const stopping = lifecycle.stop({ fast: true });
+    await tick(); context.mock.timers.tick(2000); await tick();
+    assert.deepEqual(kills, ['SIGKILL']);
+    exit(null, 'SIGKILL'); await stopping;
+});
+
+test('fast stop accepts an observed nonzero native exit without an extra confirmation', async context => {
+    const { lifecycle, kills, exit } = await fastFixture(context);
+    const stopping = lifecycle.stop({ fast: true });
+    await tick(); exit(1); await stopping;
+    assert.deepEqual(kills, []); assert.equal(lifecycle.stopped, true);
+});
+
+test('fast stop never removes an instance lock belonging to a different process or nonce', async context => {
+    for (const field of ['pid', 'nonce', 'install']) {
+        const { lifecycle, lockFile, lock, exit } = await fastFixture(context);
+        const replacement = { ...lock, [field]: field === 'pid' ? lock.pid + 1 : field === 'install' ? path.join(lock.install, 'another') : randomUUID() };
+        await fs.writeFile(lockFile, JSON.stringify(replacement));
+        const stopping = lifecycle.stop({ fast: true });
+        const rejected = assert.rejects(stopping, { code: 'INSTANCE_LOCK' });
+        await tick(); exit(null, 'SIGKILL'); await rejected;
+        assert.deepEqual(JSON.parse(await fs.readFile(lockFile, 'utf8')), replacement);
+    }
+});
+
+test('a failed kill never becomes a successful stop or removes a live instance lock', async context => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const { lifecycle, child, lockFile, lock } = await fastFixture(context);
+    child.kill = () => { throw Object.assign(new Error('synthetic denied kill'), { code: 'EPERM' }); };
+    const stopping = lifecycle.stop({ fast: true });
+    const rejected = assert.rejects(stopping, { code: 'STOP_FAILED' });
+    await tick(); context.mock.timers.tick(2000); await rejected;
+    assert.equal(lifecycle.stopped, false);
+    assert.deepEqual(JSON.parse(await fs.readFile(lockFile, 'utf8')), lock);
+});
+
+test('a sent kill without an exit event times out instead of permitting file replacement', async context => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const { lifecycle, child, kills, lockFile, lock } = await fastFixture(context);
+    child.kill = signal => { kills.push(signal); return false; };
+    let done = false;
+    const stopping = lifecycle.stop({ fast: true }).then(() => { done = true; });
+    const rejected = assert.rejects(stopping, { code: 'STOP_TIMEOUT' });
+    await tick(); context.mock.timers.tick(2000); await tick();
+    assert.deepEqual(kills, ['SIGKILL']); assert.equal(done, false);
+    context.mock.timers.tick(3000); await rejected;
+    assert.equal(lifecycle.stopped, false); assert.equal(done, false);
+    assert.deepEqual(JSON.parse(await fs.readFile(lockFile, 'utf8')), lock);
+});
+
+test('fast stop refuses an unknown process identity before sending commands', async context => {
+    const { lifecycle, commands, kills } = await fastFixture(context);
+    lifecycle.child = null;
+    await assert.rejects(lifecycle.stop({ fast: true }), { code: 'OWNERSHIP' });
+    assert.deepEqual(commands, []); assert.deepEqual(kills, []);
+});
+
+test('a late exit after timeout allows a repeated fast stop to clean only the exited child lock', async context => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const { lifecycle, commands, kills, lockFile, lock, exit } = await fastFixture(context);
+    const stopping = lifecycle.stop({ fast: true });
+    const rejected = assert.rejects(stopping, { code: 'STOP_TIMEOUT' });
+    await tick(); context.mock.timers.tick(2000); await tick();
+    context.mock.timers.tick(3000); await rejected;
+    assert.equal(lifecycle.stopped, false);
+    assert.deepEqual(JSON.parse(await fs.readFile(lockFile, 'utf8')), lock);
+    exit(null, 'SIGKILL'); await lifecycle.stop({ fast: true });
+    await assert.rejects(fs.stat(lockFile), { code: 'ENOENT' });
+    assert.deepEqual(commands, ['fast-shutdown']); assert.deepEqual(kills, ['SIGKILL']);
 });

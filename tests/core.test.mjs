@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fixture, temporary, MemoryTransport, FakeLifecycle, phase, handoff } from './fixtures.mjs';
-import { atomicJson, readJson, run } from '../lib/io.mjs';
+import { atomicJson, exists, readJson, run } from '../lib/io.mjs';
 import { scan, verify, difference, portablePath, copyTree } from '../lib/manifest.mjs';
 import { sharedSettings, preserveSettings } from '../lib/settings.mjs';
 import { snapshot, portableState } from '../lib/snapshot.mjs';
@@ -143,21 +143,39 @@ test('settings/chat receipts match parsed metadata and message content, not coun
     await fs.writeFile(chatFile, [{ chat_metadata: { ...metadata, note: 'not the acknowledged metadata' } }, ...messages].map(JSON.stringify).join('\n'));
     await assert.rejects(savedReceipt(device, body), { code: 'SAVE_PENDING' });
 });
+test('quick handoff records disk-mode intent without claiming a verified browser save', async () => {
+    const device = await fixture(), nonce = randomUUID();
+    // The quick path must not require browser state to have reached settings.json.
+    await fs.unlink(path.join(device.dataRoot, device.profile, 'settings.json'));
+    const before = Date.now(), receipt = await savedReceipt(device, { nonce, quick: true });
+    assert.equal(receipt.nonce, nonce); assert.equal(receipt.mode, 'disk');
+    assert.deepEqual(receipt.files, []); assert.ok(receipt.created >= before && receipt.created <= Date.now());
+    for (const body of [
+        { nonce: 'invalid', quick: true },
+        { nonce, quick: true, settingsDigest: 'a'.repeat(64) },
+        { nonce, quick: true, arbitrary: true },
+        { nonce, quick: false },
+    ]) await assert.rejects(savedReceipt(device, body), { code: 'INPUT' });
+});
 test('core JSON validation refuses a self-consistent but broken source payload', async () => {
     const device = await fixture();
     await fs.writeFile(path.join(device.dataRoot, device.profile, 'worlds/book.json'), '{broken');
     await assert.rejects(snapshot(device, path.join(device.root, 'payload')), { code: 'INVALID_JSON' });
 });
-test('post-preparation local changes cancel application and restart the original instance', async () => {
+test('pull automatically includes a final local save in the latest recovery backup', async () => {
     const device = await fixture(), remote = new MemoryTransport(path.join(device.root, 'vps')), lifecycle = new FakeLifecycle(); await fs.mkdir(remote.root);
     const manager = new Manager(device, lifecycle, remote);
     await manager.start({ direction: 'push', tab: randomUUID() }); await handoff(manager); await manager.done;
     const file = path.join(device.dataRoot, device.profile, 'worlds/local.json'); await fs.writeFile(file, '{"one":1}');
+    lifecycle.verifyReceipt = async () => assert.fail('a final save must not be rejected against an earlier receipt');
     await manager.start({ direction: 'pull', tab: randomUUID() });
     await phase(manager, 'AWAITING_SAVE'); await fs.writeFile(file, '{"two":2}');
     await handoff(manager); await manager.done;
-    assert.equal((await manager.status()).phase, 'FAILED'); assert.equal((await manager.status()).error.code, 'LOCAL_CHANGED');
-    assert.equal(await fs.readFile(file, 'utf8'), '{"two":2}'); assert.equal(lifecycle.stopped, false);
+    assert.equal((await manager.status()).phase, 'SUCCEEDED');
+    assert.equal(await exists(file), false); assert.equal(lifecycle.stopped, false);
+    const journal = await readJson(path.join(device.state, 'apply.json'));
+    const previous = journal.steps.find(step => step.live === path.join(device.dataRoot, device.profile)).old;
+    assert.equal(await fs.readFile(path.join(previous, 'worlds/local.json'), 'utf8'), '{"two":2}');
 });
 test('a remote mirror cannot replace the executing sync plugin or inject dependency directories', () => {
     for (const file of ['server-plugins/tavernsyn/package.json', 'extensions/tavernsyn/ui/extra.js', 'profile/extensions/tavernsyn/manifest.json', 'server-plugins/package.json']) assert.throws(() => validatePayloadPaths({ files: [{ path: file }] }), { code: 'SELF_PROTECTION' });

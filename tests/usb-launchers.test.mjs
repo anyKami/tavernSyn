@@ -13,6 +13,7 @@ test('Windows USB entry quotes node/state paths and preserves failure status', (
     assert.match(script, /--state "D:\\本机 state" --mode client %\*/);
     assert.match(script, /set "tavernsyn_usb_exit=%ERRORLEVEL%"/);
     assert.match(script, /exit \/b %tavernsyn_usb_exit%/);
+    assert.doesNotMatch(script, /(?:^|\r\n)pause(?:\r\n|$)/i);
     for (const bad of ['D:\\%TEMP%', 'D:\\!unsafe', 'D:\\"quoted', 'D:\\line\nbreak']) {
         assert.throws(() => windowsUsbLauncher({ node: 'node', repository: bad, state: 'state' }), { code: 'INSTALL' });
     }

@@ -54,6 +54,8 @@ test('only newer stable versions update; generated launchers use the standalone 
     assert.equal(compareVersions('0.1.3', '0.2.1'), -1); assert.throws(() => compareVersions('0.3.0-beta', '0.2.1'));
     const batch = windowsLauncher({ node: 'C:/Node/node.exe', repository: 'C:/ST/plugins/tavernsyn', state: 'C:/state' });
     assert.ok(batch.includes('TavernSyn-Startup.mjs')); assert.ok(batch.includes('%*')); assert.ok(batch.includes('--desktop-shortcut'));
+    assert.doesNotMatch(batch, /\bpause\s*$/m);
+    assert.match(batch, /echo TavernSyn 未完成，退出码：%tavernsyn_exit%/);
     assert.throws(() => windowsLauncher({ node: 'C:/bad%PATH%/node.exe', repository: 'C:/ST/plugins/tavernsyn', state: 'C:/state' }));
     assert.ok(termuxLauncher({ node: '/data/node', install: '/home/ST', state: '/home/state' }).includes('exec'));
 });
@@ -151,6 +153,32 @@ test('standalone startup imports the launcher in its own process and keeps its s
     assert.equal(await new Promise(resolve => child.once('exit', resolve)), 0, output);
     const started = await readJson(marker); assert.equal(started.pid, child.pid);
     assert.deepEqual(started.argv.slice(2), ['--state', f.state, '--open-browser', 'yes']);
+});
+
+test('the first tagged update invokes new helper code that refreshes an already-installed Windows entry', async () => {
+    const f = await fixture(), batch = path.join(f.install, 'Start-TavernSyn.cmd');
+    const legacy = windowsLauncher({ node: process.execPath, repository: f.backend, state: f.state })
+        .replaceAll('if not "%tavernsyn_exit%"=="0" echo TavernSyn 未完成，退出码：%tavernsyn_exit% 1>&2', 'if not "%tavernsyn_exit%"=="0" pause');
+    await fs.writeFile(batch, legacy);
+    // The standalone entry was installed before the new helper; it need not
+    // know about the migration, which runs after the verified code update.
+    const entry = path.join(f.install, 'TavernSyn-Startup.mjs');
+    await fs.copyFile(path.join(PROJECT, 'bin/startup.mjs'), entry);
+    await fs.writeFile(path.join(f.source, 'helper/launcher.mjs'),
+        `import { refreshWindowsLaunchers } from ${JSON.stringify(new URL('../bin/refresh-launchers.mjs', import.meta.url).href)};\nawait refreshWindowsLaunchers({ install: ${JSON.stringify(f.install)}, platform: 'win32', log() {} });\n`);
+    for (const name of ['package.json', 'manifest.json']) {
+        const file = path.join(f.source, name), metadata = await readJson(file);
+        metadata.version = '0.2.3'; await atomicJson(file, metadata);
+    }
+    await run('git', ['-C', f.source, 'add', '.']);
+    await run('git', ['-C', f.source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Synthetic launcher migration']);
+    await run('git', ['-C', f.source, 'tag', 'v0.2.3']);
+    await run(process.execPath, [entry, '--st', f.install, '--state', f.state], { env: {
+        GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: `url.${f.repositoryUrl}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/anyKami/tavernSyn.git',
+        GIT_CONFIG_KEY_1: 'protocol.file.allow', GIT_CONFIG_VALUE_1: 'always',
+    } });
+    assert.equal((await readJson(path.join(f.backend, 'package.json'))).version, '0.2.3');
+    assert.equal(await fs.readFile(batch, 'utf8'), legacy.replaceAll('if not "%tavernsyn_exit%"=="0" pause', 'if not "%tavernsyn_exit%"=="0" rem  '));
 });
 
 test('the actual Windows batch forwards skip-update and launches the standalone entry', async context => {

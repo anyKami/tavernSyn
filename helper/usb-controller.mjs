@@ -49,7 +49,6 @@ export class UsbController {
         requireThat(JOB_TERMINAL.has(previous.phase) && !previous.maintenancePending,
             'RECOVERY_REQUIRED', '上次同步尚待应用或收尾，请完成后再连接 USB。');
         this.receipt = await this.lifecycle.receipt(receipt);
-        await this.lifecycle.verifyReceipt(this.receipt);
         this.cancelled = new AbortController();
         this.error = null; this.peer = null; this.selection = null; this.offline = null;
         this.started = false; this.stoppedByUsb = false;
@@ -86,12 +85,9 @@ export class UsbController {
     async prepareOffline() {
         if (this.offline) return this.offline;
         this.offline = (async () => {
-            this.update('stopping', { note: '正在让受控酒馆正常保存交接并退出。' });
-            await this.lifecycle.verifyReceipt(this.receipt);
+            this.update('stopping', { note: '正在快速关闭两端酒馆；清理超过 2 秒将自动结束进程。' });
             this.stoppedByUsb = true;
-            await this.lifecycle.stop({ interruptOnDrain: true,
-                onInterrupt: async () => { await this.lifecycle.verifyReceipt(this.receipt); },
-            });
+            await this.lifecycle.stop({ fast: true });
             this.cancelled.signal.throwIfAborted();
             await this.session.open({ managedLauncher: true });
             this.update('transferring');

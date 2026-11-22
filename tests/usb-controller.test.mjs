@@ -17,7 +17,7 @@ function fakeLifecycle() {
         child: {}, stopped: false, closing: false, onRequest() {}, stops: 0, starts: 0, verified: 0,
         async receipt(nonce) { return {nonce,created:Date.now(),files:[]}; },
         async verifyReceipt(r) { assert.ok(r); this.verified++; },
-        async stop() { assert.equal(this.stopped,false); this.stopped = true; this.stops++; },
+        async stop(options) { assert.equal(options.fast,true); assert.equal(this.stopped,false); this.stopped = true; this.stops++; },
         async start() { assert.equal(this.stopped,true); this.stopped = false; this.starts++; },
     };
 }
@@ -73,7 +73,7 @@ test('phone starts server while ST remains alive; phone UI chooses once; ST stop
     await wait(()=>c.status().stage==='completed'&&!manager.busy);
     assert.equal(lifecycle.starts,1);
     assert.equal(lifecycle.stopped,false);
-    assert.equal(lifecycle.verified>=2,true);
+    assert.equal(lifecycle.verified,0,'a late automatic save must not require another confirmation');
 });
 test('computer can choose direction in frontend; USB client mirrors and normal ST restarts',async()=>{
     const selection=deferred();

@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import net from 'node:net';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fixture, MemoryTransport, FakeLifecycle, phase, handoff } from './fixtures.mjs';
 import { Manager } from '../helper/manager.mjs';
 import { recoveryStatus } from '../helper/apply.mjs';
+import { recoverStopped } from '../bin/recover.mjs';
 import { atomicJson, exists, readJson } from '../lib/io.mjs';
 
 async function withRecovery() {
@@ -113,7 +115,10 @@ test('manual restore returns pre-pull data, keeps current sync code and leaves t
     const later = path.join(device.dataRoot, device.profile, 'worlds/after-pull.json'); await fs.writeFile(later, '{"later":true}');
     const syncCode = path.join(device.install, 'public/scripts/extensions/third-party/tavernsyn/local.txt'); await fs.writeFile(syncCode, 'current synchronization version');
     manager.transport = { connect() { throw Error('restore must be fully local'); } };
-    await manager.start({ direction: 'restore', tab: randomUUID() }); await handoff(manager); await manager.done;
+    await manager.start({ direction: 'restore', tab: randomUUID() });
+    await phase(manager, 'AWAITING_SAVE');
+    await fs.writeFile(later, '{"lastSave":true}');
+    await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED'); assert.ok((await manager.status()).history.restore);
     assert.equal(await exists(local), true); assert.equal(await exists(later), false);
     assert.equal(await fs.readFile(syncCode, 'utf8'), 'current synchronization version');
@@ -126,9 +131,12 @@ test('failed restored startup returns to the data from before restore and preser
     const { device, manager, lifecycle, local } = await withRecovery();
     const later = path.join(device.dataRoot, device.profile, 'worlds/after-pull.json'); await fs.writeFile(later, '{"keep":true}');
     lifecycle.failNext = true;
-    await manager.start({ direction: 'restore', tab: randomUUID() }); await handoff(manager); await manager.done;
+    await manager.start({ direction: 'restore', tab: randomUUID() });
+    await phase(manager, 'AWAITING_SAVE');
+    await fs.writeFile(later, '{"lastSave":true}');
+    await handoff(manager); await manager.done;
     assert.equal((await manager.status()).phase, 'FAILED'); assert.equal((await manager.status()).error.code, 'HEALTH');
-    assert.equal(lifecycle.stopped, false); assert.equal(await exists(local), false); assert.equal(await fs.readFile(later, 'utf8'), '{"keep":true}');
+    assert.equal(lifecycle.stopped, false); assert.equal(await exists(local), false); assert.equal(await fs.readFile(later, 'utf8'), '{"lastSave":true}');
     assert.equal((await recoveryStatus(device)).available, true); assert.equal((await readJson(path.join(device.state, 'apply.json'))).phase, 'committed');
 });
 
@@ -146,4 +154,18 @@ test('tampered recovery paths cannot become restore targets', async () => {
     assert.equal((await recoveryStatus(device)).available, false); const starts = lifecycle.starts;
     await manager.start({ direction: 'restore', tab: randomUUID() }); await manager.done;
     assert.equal((await manager.status()).error.code, 'NO_RECOVERY'); assert.equal(lifecycle.starts, starts);
+});
+
+test('automatic recovery keeps locks for a live process or occupied port', async t => {
+    const device = await fixture(), server = net.createServer();
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    device.origin = `http://127.0.0.1:${server.address().port}`;
+    t.after(() => new Promise(resolve => server.listening ? server.close(resolve) : resolve()));
+    const file = path.join(device.state, 'instance.lock'), lock = { nonce: randomUUID(), pid: process.pid };
+    await atomicJson(file, lock);
+    await assert.rejects(recoverStopped(device), /端口仍被占用/);
+    assert.deepEqual(await readJson(file), lock);
+    await new Promise(resolve => server.close(resolve));
+    await assert.rejects(recoverStopped(device), { code: 'LIVE_PROCESS' });
+    assert.deepEqual(await readJson(file), lock);
 });

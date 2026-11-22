@@ -167,9 +167,9 @@ export class UsbSession {
             this.plan = await buildPlan(this.device, prepared, this.root);
             await this.manager.write('APPLYING'); await applyPlan(this.device, this.plan);
             const applied = await portableState(this.device);
-            await this.manager.write('STARTING', { note: '临时启动接收端进行实例和插件健康检查，检查后正常停止。' });
+            await this.manager.write('STARTING', { note: '临时启动接收端检查实例和插件，检查后自动快速关闭。' });
             await this.releasePort();
-            await this.lifecycle.start(); await this.lifecycle.stop();
+            await this.lifecycle.start(); await this.lifecycle.stop({ fast: true });
             await this.reservePort();
             const remote = { generation: this.manager.job.id, digest: manifest.digest };
             this.plan.completion = this.manager.makeOutcome(applied, remote, this.stats());
@@ -182,7 +182,7 @@ export class UsbSession {
             // Never overwrite files held by an unconfirmed live health process.
             if (this.plan && !['committed', 'rolled-back'].includes(this.plan.phase)) {
                 try {
-                    if (!this.lifecycle.stopped) await this.lifecycle.stop();
+                    if (!this.lifecycle.stopped) await this.lifecycle.stop({ fast: true });
                     // An unrelated server may have taken the port between the
                     // reservation and health startup. Prove exclusive ownership
                     // again before moving any live directory back into place.

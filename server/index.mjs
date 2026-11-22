@@ -34,6 +34,12 @@ export function workerAction(child, action, payload) {
 }
 function plainName(value) { portablePath(value); requireThat(!value.includes('/'), 'INPUT', '文件标识无效。'); return value; }
 export async function savedReceipt(device, body) {
+    if (body.quick === true) {
+        requireThat(uuidPattern.test(body.nonce) && Object.keys(body).every(key => ['nonce', 'quick'].includes(key)), 'INPUT', '快速交接格式无效。');
+        // This acknowledges a best-effort save attempt, not equality with the
+        // browser. Synchronization inventories the actual files after shutdown.
+        return { nonce: body.nonce, created: Date.now(), files: [], mode: 'disk' };
+    }
     requireThat(uuidPattern.test(body.nonce) && /^[a-f0-9]{64}$/.test(body.settingsDigest), 'INPUT', '保存确认格式无效。');
     const file = path.join(device.dataRoot, device.profile, 'settings.json');
     const settings = await readJson(file);
@@ -123,8 +129,6 @@ export async function init(router) {
         requireThat(managed, 'UNMANAGED', '请使用 TavernSyn 受控启动器启动酒馆。');
         requireThat(req.body && Object.keys(req.body).every(k => ['tab', 'receipt'].includes(k))
             && uuidPattern.test(req.body.tab) && uuidPattern.test(req.body.receipt), 'INPUT', 'USB 连接参数无效。');
-        const others = [...managed.tabs].filter(([tab, time]) => tab !== req.body.tab && Date.now() - time < 15000);
-        requireThat(!others.length, 'OTHER_TABS', '请关闭其他酒馆标签页，再执行 USB 完整同步。');
         res.status(202).json(await helper('usb-connect', req.body));
     }));
     router.post('/usb/select', endpoint(async (req, res) => {
@@ -152,7 +156,7 @@ export async function init(router) {
         res.json({ ok: true });
     }));
     router.post('/flush', endpoint(async (req, res) => {
-        requireThat(managed, 'UNMANAGED', '严格保存回执需要受控启动。');
+        requireThat(managed, 'UNMANAGED', '自动保存交接需要受控启动。');
         const receipt = await savedReceipt(device, req.body);
         if (managed.receipts.size > 64) managed.receipts.clear(); managed.receipts.set(receipt.nonce, receipt);
         res.json({ receipt: receipt.nonce });
@@ -160,10 +164,6 @@ export async function init(router) {
     router.post('/start', endpoint(async (req, res) => {
         const body = req.body;
         requireThat(Object.keys(body).every(k => ['direction', 'tab', 'preview', 'scope'].includes(k)), 'INPUT', '不接受未定义的同步参数。');
-        if (managed) {
-            const others = [...managed.tabs].filter(([tab, time]) => tab !== body.tab && Date.now() - time < 15000);
-            requireThat(!others.length, 'OTHER_TABS', '请先关闭其他正在打开的酒馆标签页，再执行同步。');
-        }
         res.status(202).json(await helper('start', body));
     }));
     for (const action of ['ready', 'page', 'cancel', 'resume-pending', 'resume-upload', 'resume-download', 'reconcile']) {
@@ -171,8 +171,6 @@ export async function init(router) {
             requireThat(Object.keys(req.body).every(k => ['id', 'receipt', 'tab', 'ticket', 'token'].includes(k)), 'INPUT', '不接受未定义的任务参数。');
             if (action === 'ready' && managed) {
                 requireThat(uuidPattern.test(req.body.tab), 'INPUT', '标签页标识无效。');
-                const others = [...managed.tabs].filter(([tab, time]) => tab !== req.body.tab && Date.now() - time < 15000);
-                requireThat(!others.length, 'OTHER_TABS', '请先关闭其他正在打开的酒馆标签页，再执行同步。');
             }
             res.json(await helper(action, req.body));
         }));
@@ -195,7 +193,7 @@ export function waitPage(config) {
 }
 function waitingDocument(config) {
     const base = '/api/plugins/tavernsyn/';
-    const labels = { QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建独立快照', UPLOADING: '正在上传同步副本', DOWNLOADING: '正在下载同步副本', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复更新前的数据', SUCCEEDED: '同步完成', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
+    const labels = { WAITING_PAGE: '正在自动交接重启任务', QUIESCING: '正在快速关闭酒馆', SNAPSHOT: '正在创建独立快照', UPLOADING: '正在上传同步副本', DOWNLOADING: '正在下载同步副本', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复更新前的数据', SUCCEEDED: '同步完成', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
     document.getElementById('back').onclick = () => location.replace('/');
     async function poll() {
         try {
@@ -205,17 +203,17 @@ function waitingDocument(config) {
             if (status.id !== config.id) { document.getElementById('state').textContent = '任务已改变，请返回酒馆检查。'; document.getElementById('back').hidden = false; return; }
             document.getElementById('state').textContent = labels[status.phase] || '正在同步';
             document.getElementById('detail').textContent = [status.error?.message || status.reason || status.note || '', progressDetail(status)].filter(Boolean).join('\n');
+            if (status.phase === 'WAITING_PAGE') {
+                const csrf = await (await fetch('/csrf-token')).json();
+                const result = await fetch(base + 'page', { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf.token, 'x-tavernsyn-epoch': config.epoch }, body: JSON.stringify({ id: config.id, tab: config.tab, ticket: config.ticket }) });
+                if (!result.ok) throw Error();
+            }
             if (status.phase === 'SUCCEEDED') { location.replace('/'); return; }
             if (['FAILED', 'RECOVERY_REQUIRED', 'PENDING_APPLY'].includes(status.phase)) { document.getElementById('back').hidden = false; return; }
         } catch { document.getElementById('state').textContent = '酒馆正在应用或重启，等待重新连接……'; }
         setTimeout(poll, 1200);
     }
-    (async () => {
-        try {
-            const csrf = await (await fetch('/csrf-token')).json();
-            const result = await fetch(base + 'page', { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf.token, 'x-tavernsyn-epoch': config.epoch }, body: JSON.stringify({ id: config.id, tab: config.tab, ticket: config.ticket }) });
-            if (!result.ok) throw Error();
-            poll();
-        } catch { document.getElementById('state').textContent = '无法确认等待页，未执行替换。请返回酒馆查看。'; document.getElementById('back').hidden = false; }
-    })();
+    // Retry the automatic handoff on a transient failure, including a lost
+    // reply when the fast shutdown has already begun. No manual ACK is needed.
+    poll();
 }

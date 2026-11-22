@@ -2,15 +2,15 @@ import { progressDetail } from './progress.js';
 
 const BASE = '/api/plugins/tavernsyn/';
 const tab = crypto.randomUUID();
-const labels = { IDLE: '就绪', PREFLIGHT: '正在检查环境', DOWNLOADING: '正在下载', VERIFYING: '正在校验文件', PREPARING: '正在准备插件', AWAITING_SAVE: '正在核对保存', WAITING_PAGE: '正在交接重启任务', QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建快照', UPLOADING: '正在上传', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复旧数据', SUCCEEDED: '同步完成', PREVIEW: '预览完成', PENDING_APPLY: '已下载，等待受控启动后应用', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
+const labels = { IDLE: '就绪', PREFLIGHT: '正在检查环境', DOWNLOADING: '正在下载', VERIFYING: '正在校验文件', PREPARING: '正在准备插件', AWAITING_SAVE: '正在核对保存', WAITING_PAGE: '正在交接重启任务', QUIESCING: '正在快速关闭酒馆', SNAPSHOT: '正在创建快照', UPLOADING: '正在上传', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复旧数据', SUCCEEDED: '同步完成', PREVIEW: '预览完成', PENDING_APPLY: '已下载，等待受控启动后应用', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
 let status = { phase: 'IDLE' }, handlingSave = false, starting = false, resumed = false, localError = '';
 let setupBusy = false, configLoaded = false, configLoading = false, savedTarget = '', passwordSaved = false;
 let driveConfig = {}, authorizationPending = false, authorizationDeadline = 0;
 let usbState = { stage: 'idle', supported: false }, usbBusy = false;
 const context = () => SillyTavern.getContext();
-async function api(route, body) {
+async function api(route, body, { signal } = {}) {
     const response = await fetch(BASE + route, { method: body === undefined ? 'GET' : 'POST', cache: 'no-store',
-        headers: body === undefined ? undefined : context().getRequestHeaders(), body: body === undefined ? undefined : JSON.stringify(body) });
+        headers: body === undefined ? undefined : context().getRequestHeaders(), body: body === undefined ? undefined : JSON.stringify(body), signal });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw Object.assign(new Error(result.message || `无法连接同步助手（${response.status}）`), { code: result.error });
     return result;
@@ -26,55 +26,53 @@ async function hash(value) {
     return [...new Uint8Array(bytes)].map(v => v.toString(16).padStart(2, '0')).join('');
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const visible = element => element && element.getClientRects().length > 0;
 async function flush() {
     const epoch = window.__TAVERNSYN__;
     if (!epoch) throw Error('页面尚未启用受控写入检查。请从 TavernSyn 入口启动酒馆并刷新页面。');
-    if (visible(document.querySelector('#mes_stop')) || visible(document.querySelector('.mes_edit_textarea'))
-        || document.querySelector('#send_textarea')?.value?.trim()) throw Error('请先完成生成、消息编辑和未发送的输入，再执行同步。');
-    if (document.querySelector('dialog[open]:not(.ts-dialog)')) throw Error('请先保存并关闭正在编辑的弹窗。');
-    const ctx = context(), nonce = crypto.randomUUID();
-    ctx.extensionSettings.tavernsyn ??= {};
-    ctx.extensionSettings.tavernsyn.flushReceipt = nonce;
-    await ctx.saveChat(); // A successful call is followed by disk readback, never treated as the barrier.
-    ctx.saveSettingsDebounced();
-    const settingsDigest = await hash({ extension_settings: ctx.extensionSettings, power_user: ctx.powerUserSettings,
-        oai_settings: ctx.chatCompletionSettings, textgenerationwebui_settings: ctx.textCompletionSettings });
-    let chat;
-    if (ctx.chatId && (ctx.groupId || ctx.characters?.[ctx.characterId]?.avatar)) chat = {
-        type: ctx.groupId ? 'group' : 'single', id: String(ctx.chatId), avatar: ctx.characters?.[ctx.characterId]?.avatar,
-        digest: await hash({ messages: ctx.chat, metadata: ctx.chatMetadata ?? {} }),
+    const ctx = context(), nonce = crypto.randomUUID(), controller = new AbortController();
+    const save = async () => {
+        // Save what can finish promptly; sync may use the current disk contents
+        // when a generation, editor or third-party save handler cannot finish.
+        try { if (ctx.stopGeneration) await ctx.stopGeneration(); else document.querySelector('#mes_stop')?.click(); } catch {}
+        if (controller.signal.aborted) return null;
+        ctx.extensionSettings.tavernsyn ??= {};
+        ctx.extensionSettings.tavernsyn.flushReceipt = nonce;
+        Promise.resolve(ctx.saveSettingsDebounced()).catch(() => {});
+        await ctx.saveChat();
+        if (controller.signal.aborted) return null;
+        const settingsDigest = await hash({ extension_settings: ctx.extensionSettings, power_user: ctx.powerUserSettings,
+            oai_settings: ctx.chatCompletionSettings, textgenerationwebui_settings: ctx.textCompletionSettings });
+        let chat;
+        if (ctx.chatId && (ctx.groupId || ctx.characters?.[ctx.characterId]?.avatar)) chat = {
+            type: ctx.groupId ? 'group' : 'single', id: String(ctx.chatId), avatar: ctx.characters?.[ctx.characterId]?.avatar,
+            digest: await hash({ messages: ctx.chat, metadata: ctx.chatMetadata ?? {} }),
+        };
+        while (!controller.signal.aborted) {
+            try { return (await api('flush', { nonce, settingsDigest, chat }, { signal: controller.signal })).receipt; }
+            catch (error) { if (!['SAVE_PENDING', 'FAILED'].includes(error.code)) throw error; }
+            await delay(100);
+        }
+        return null;
     };
-    const deadline = Date.now() + 20000;
-    while (Date.now() < deadline) {
-        try {
-            const result = await api('flush', { nonce, settingsDigest, chat });
-            if (!epoch.pending && Date.now() - epoch.lastWrite > 1500) return result.receipt;
-        } catch (error) { if (!['SAVE_PENDING', 'FAILED'].includes(error.code)) throw error; }
-        await delay(400);
-    }
-    throw Error('未能核对已保存的设置和聊天。请检查保存错误并稍后重试。');
+    let timer;
+    try {
+        const receipt = await Promise.race([save().catch(() => null), new Promise(resolve => { timer = setTimeout(() => resolve(null), 1500); })]);
+        if (receipt) return receipt;
+    } finally { clearTimeout(timer); controller.abort(); }
+    return (await api('flush', { nonce, quick: true })).receipt;
 }
 const root = document.createElement('div'); root.id = 'tavernsyn-panel'; root.className = 'extension_container';
 root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>TavernSyn 跨设备同步</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
 <div class="inline-drawer-content"><p class="ts-device"></p><p class="ts-phase" role="status">正在连接同步助手……</p>
-<div class="ts-actions"><button class="menu_button ts-push">推送到 VPS</button><button class="menu_button ts-pull">从 VPS 拉取</button>
-<button type="button" class="menu_button ts-resume-download" hidden>继续上次下载</button><button type="button" class="menu_button ts-resume-upload" hidden>继续上次上传</button><button type="button" class="menu_button ts-resume-apply" hidden>继续应用已下载文件</button></div>
-<button type="button" class="menu_button ts-reconcile" hidden>核对同步结果</button>
-<fieldset class="ts-scope"><legend>仅同步所选内容（增量传输，包含删除）</legend>
-<div class="ts-scope-options"><label><input type="checkbox" name="scope" value="chats" checked>聊天记录（含群聊）</label><label><input type="checkbox" name="scope" value="characters" checked>角色卡</label><label><input type="checkbox" name="scope" value="worlds" checked>世界书</label></div>
-<div class="ts-actions"><button type="button" class="menu_button ts-scoped-push">仅推送所选内容</button><button type="button" class="menu_button ts-scoped-pull">仅拉取所选内容</button></div>
-<div class="ts-scope-previews"><button type="button" class="menu_button ts-preview-scoped-push">预览分类推送</button><button type="button" class="menu_button ts-preview-scoped-pull">预览分类拉取</button></div>
-<small>所选类别以来源为准，接收端多出的文件会删除；其他类别、配置和插件保持不变。首次使用需先在 VPS 建立一次完整副本。</small></fieldset>
-<button type="button" class="menu_button ts-restore" disabled>恢复上一版</button><small class="ts-recovery"></small>
-<details class="ts-usb"><summary>USB 数据线完整同步</summary>
-<p>在电脑与手机上分别打开受控酒馆，点击下方“连接 USB”。连接完成后，在任意一端选择一次方向，另一端自动跟随。同步期间自动停止两端酒馆，结束后自动重启，无需启动脚本、配对码或二次确认。</p>
-<p>电脑需要安装 ADB 并通过数据线连接已允许 USB 调试的手机；所有 USB 传输只走数据线，不使用 VPS 或 Google Drive。覆盖包含删除，接收端保留最近一次恢复备份。</p>
-<div class="ts-actions"><button type="button" class="menu_button ts-usb-connect">连接 USB</button><button type="button" class="menu_button ts-usb-cancel" hidden>取消连接</button></div>
+<details class="ts-usb ts-section" open><summary><span class="ts-section-icon ts-usb-icon" aria-hidden="true">USB</span><span class="ts-section-heading"><strong>USB 数据线完整同步</strong><small>电脑 ⇄ 安卓手机 · 连接后选择方向</small></span><span class="ts-section-chevron" aria-hidden="true"></span></summary>
+<div class="ts-section-content"><p class="ts-usb-status" role="status">正在检测本机 USB 能力……</p>
+<div class="ts-actions ts-usb-connection"><button type="button" class="menu_button ts-usb-connect">连接 USB</button><button type="button" class="menu_button ts-usb-cancel" hidden>取消连接</button></div>
 <div class="ts-actions ts-usb-directions" hidden><button type="button" class="menu_button ts-usb-push">电脑 → 手机</button><button type="button" class="menu_button ts-usb-pull">手机 → 电脑</button></div>
-<p class="ts-usb-status" role="status">正在检测本机 USB 能力……</p>
-<a href="https://github.com/anyKami/tavernSyn/blob/main/docs/usb-sync.md" target="_blank" rel="noopener noreferrer">查看 USB 使用指南</a></details>
-<p class="ts-detail"></p><small class="ts-history"></small><details class="ts-settings"><summary>设置与检查 · 同步仓库</summary>
+<p class="ts-hint">两端连接后，任选一端点击方向，自动完成关闭、同步和重启。</p>
+<details class="ts-usb-help"><summary>连接方法与同步范围</summary><p>在电脑与手机上分别打开受控酒馆，点击“连接 USB”。电脑需要安装 ADB，并通过数据线连接已允许 USB 调试的手机。无需启动额外脚本、输入配对码或再次确认。</p>
+<p>传输只走数据线，不使用 VPS 或 Google Drive。以选定来源完整覆盖接收端，包含删除；接收端保留最近一次恢复备份。</p>
+<a href="https://github.com/anyKami/tavernSyn/blob/main/docs/usb-sync.md" target="_blank" rel="noopener noreferrer">查看 USB 使用指南</a></details></div></details>
+<details class="ts-settings ts-section"><summary><span class="ts-section-icon" aria-hidden="true">⚙</span><span class="ts-section-heading"><strong>设置与检查 · 同步仓库</strong><small>Google 云盘 / VPS · 配置与连接检查</small></span><span class="ts-section-chevron" aria-hidden="true"></span></summary><div class="ts-section-content">
 <form class="ts-config"><fieldset disabled><legend>同步仓库</legend>
 <label>存储位置<select class="text_pole" name="provider"><option value="vps">VPS（SSH / Tailscale）</option><option value="google-drive">Google 云盘</option></select></label>
 <div class="ts-vps-config">
@@ -101,18 +99,25 @@ root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle in
 <div class="ts-config-actions"><button type="submit" class="menu_button ts-save-config">保存配置</button><button type="button" class="menu_button ts-check">检查连接</button></div>
 </fieldset></form><p class="ts-config-result" role="status">正在读取连接配置……</p><p class="ts-check-result" role="status"></p>
 <p>默认同步：聊天、角色、世界书、预设、图片附件、API 密钥、用户设置、自定义用户数据及前后端插件。本机端口、网络与屏幕字段会保留。</p>
-<p>同步前请保存编辑并关闭其他酒馆标签页。浏览器数据库和未知脚本尚未提交的内存不在同步范围内。</p>
+<p>同步前会自动尝试保存并快速关闭酒馆，未及时保存的编辑可能丢失。浏览器数据库和未知脚本尚未提交的内存不在同步范围内。</p>
 <button type="button" class="menu_button ts-preview-push">预览推送</button><button type="button" class="menu_button ts-preview-pull">预览拉取</button>
-</details></div></div>`;
+</div></details>
+<p class="ts-hint ts-sync-hint">点击推送、拉取或恢复即开始，覆盖与删除自动执行。</p>
+<div class="ts-actions"><button class="menu_button ts-push">推送到 VPS</button><button class="menu_button ts-pull">从 VPS 拉取</button>
+<button type="button" class="menu_button ts-resume-download" hidden>继续上次下载</button><button type="button" class="menu_button ts-resume-upload" hidden>继续上次上传</button><button type="button" class="menu_button ts-resume-apply" hidden>继续应用已下载文件</button></div>
+<button type="button" class="menu_button ts-reconcile" hidden>核对同步结果</button>
+<fieldset class="ts-scope"><legend>仅同步所选内容（增量传输，包含删除）</legend>
+<div class="ts-scope-options"><label><input type="checkbox" name="scope" value="chats" checked>聊天记录（含群聊）</label><label><input type="checkbox" name="scope" value="characters" checked>角色卡</label><label><input type="checkbox" name="scope" value="worlds" checked>世界书</label></div>
+<div class="ts-actions"><button type="button" class="menu_button ts-scoped-push">仅推送所选内容</button><button type="button" class="menu_button ts-scoped-pull">仅拉取所选内容</button></div>
+<div class="ts-scope-previews"><button type="button" class="menu_button ts-preview-scoped-push">预览分类推送</button><button type="button" class="menu_button ts-preview-scoped-pull">预览分类拉取</button></div>
+<small>所选类别以来源为准，接收端多出的文件会删除；其他类别、配置和插件保持不变。首次使用需先在 VPS 建立一次完整副本。</small></fieldset>
+<button type="button" class="menu_button ts-restore" disabled>恢复上一版</button><small class="ts-recovery"></small>
+<p class="ts-detail"></p><small class="ts-history"></small></div></div>`;
 const dialog = document.createElement('dialog'); dialog.className = 'ts-dialog';
 dialog.innerHTML = '<h3>同步酒馆</h3><p class="ts-phase"></p><p class="ts-detail"></p><div class="ts-dialog-actions"><button type="button" class="menu_button ts-cancel" hidden>取消</button></div>';
 dialog.addEventListener('cancel', event => event.preventDefault());
 dialog.addEventListener('click', event => event.stopPropagation());
 document.body.append(dialog);
-const directionDialog = document.createElement('dialog'); directionDialog.className = 'ts-dialog ts-direction-dialog';
-directionDialog.innerHTML = '<h3></h3><p class="ts-detail"></p><div class="ts-dialog-actions"><button type="button" class="menu_button ts-decline">取消</button><button type="button" class="menu_button ts-accept"></button></div>';
-document.body.append(directionDialog);
-directionDialog.addEventListener('click', event => event.stopPropagation());
 const pairingDialog = document.createElement('dialog'); pairingDialog.className = 'ts-dialog ts-pairing-dialog';
 pairingDialog.innerHTML = '<h3>Google 云盘仓库配对码</h3><p>在另一台设备授权同一个 Google 账号后，粘贴此配对码加入仓库。它包含解密密钥，请保存到你自己的密码管理器；不要发到公开位置。</p><textarea class="text_pole ts-pairing-code" readonly rows="5" aria-label="仓库配对码" spellcheck="false"></textarea><p class="ts-pairing-result" role="status"></p><div class="ts-dialog-actions"><button type="button" class="menu_button ts-pairing-copy">复制配对码</button><button type="button" class="menu_button ts-pairing-close">关闭并隐藏</button></div>';
 document.body.append(pairingDialog);
@@ -133,35 +138,11 @@ pairingDialog.querySelector('.ts-pairing-copy').onclick = async () => {
     try { await navigator.clipboard.writeText(input.value); pairingDialog.querySelector('.ts-pairing-result').textContent = '已复制。'; }
     catch { input.focus(); input.select(); pairingDialog.querySelector('.ts-pairing-result').textContent = '请复制已选中的配对码。'; }
 };
-for (const modal of [dialog, directionDialog, pairingDialog]) for (const event of ['mousedown', 'touchstart']) {
+for (const modal of [dialog, pairingDialog]) for (const event of ['mousedown', 'touchstart']) {
     modal.addEventListener(event, interaction => interaction.stopPropagation());
 }
 const scopeNames = { chats: '聊天记录（含群聊）', characters: '角色卡', worlds: '世界书' };
 const scopeText = scope => scope.map(name => scopeNames[name]).join('、');
-function confirmDirection(direction, scope = null) {
-    const push = direction === 'push', restore = direction === 'restore', resume = direction === 'resume';
-    const remote = status.provider === 'google-drive' ? 'Google 云盘' : 'VPS';
-    directionDialog.querySelector('h3').textContent = resume ? '继续上次上传' : restore ? '确认恢复上一版' : push ? `确认推送到 ${remote}` : `确认从 ${remote} 拉取`;
-    directionDialog.querySelector('.ts-detail').textContent = resume
-        ? `将继续向 ${remote} 上传上次已保存的快照。快照之后的新聊天和修改留待下次推送。是否继续？` : restore
-        ? '将恢复到最近一次覆盖前的本机配置、插件和用户数据，替换此后的本机改动。另一台设备和远端副本不会改变。本次恢复副本使用后将不再保留。是否继续？' : push
-        ? `将以本机已保存的内容更新 ${remote} 同步副本，远端原有的共享数据可能被替换。是否继续？`
-        : `将以 ${remote} 同步副本更新本机，覆盖本机的共享配置、插件和用户数据。应用前替换旧备份，成功后保留一份本次覆盖前的恢复备份。是否继续？`;
-    directionDialog.querySelector('.ts-accept').textContent = resume ? '继续上传' : restore ? '确认恢复' : push ? '确认推送' : '确认拉取';
-    if (scope) {
-        directionDialog.querySelector('h3').textContent = push ? '确认分类推送' : '确认分类拉取';
-        directionDialog.querySelector('.ts-detail').textContent = `仅同步${scopeText(scope)}，以${push ? '本机' : remote}为准，包含修改和删除。其他类别、配置及插件保持不变。是否继续？`;
-    }
-    if (['push', 'pull'].includes(direction)) directionDialog.querySelector('.ts-detail').textContent += '\n确认后自动完成传输、覆盖及删除，不再逐步询问；待上传或待下载文件总大小会在进度中显示。';
-    if (restore && status.recovery?.scope) directionDialog.querySelector('.ts-detail').textContent = `将恢复${scopeText(status.recovery.scope)}到最近一次分类拉取前的状态，替换此后这些类别的改动。其他类别、配置及插件保持不变。是否继续？`;
-    return new Promise(resolve => {
-        const finish = result => { directionDialog.close(); resolve(result); };
-        directionDialog.querySelector('.ts-accept').onclick = () => finish(true);
-        directionDialog.querySelector('.ts-decline').onclick = () => finish(false);
-        directionDialog.oncancel = event => { event.preventDefault(); finish(false); };
-        directionDialog.showModal(); directionDialog.querySelector('.ts-decline').focus();
-    });
-}
 const target = document.querySelector('#extensions_settings2') ?? document.querySelector('#extensions_settings');
 if (target) target.append(root);
 const form = root.querySelector('.ts-config');
@@ -171,7 +152,7 @@ function render() {
     const google = status.provider === 'google-drive', remote = google ? 'Google 云盘' : 'VPS';
     text('.ts-device', `${status.deviceName ?? ''} · ${google ? (status.configured ? remote : `${remote} 尚未配置完成`) : status.host || '尚未配置 VPS'}`);
     const phase = status.phase === 'DOWNLOADING' ? `正在从 ${remote} 下载` : status.phase === 'UPLOADING' ? `正在上传到 ${remote}` : labels[status.phase] ?? status.phase;
-    text('.ts-phase', localError ? '本次操作未开始，请处理提示' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : phase);
+    text('.ts-phase', localError ? '操作未完成，请查看提示' : status.phase === 'SUCCEEDED' && status.direction === 'restore' ? '恢复完成' : phase);
     root.querySelector('.ts-push').textContent = `推送到 ${remote}`;
     root.querySelector('.ts-pull').textContent = `从 ${remote} 拉取`;
     root.querySelector('.ts-scope').hidden = google;
@@ -197,7 +178,7 @@ function render() {
     usbCancel.disabled = usbBusy;
     usbDirections.hidden = usbState.stage !== 'connected';
     for (const button of usbDirections.querySelectorAll('button')) button.disabled = usbBusy;
-    const usbNames = { idle: '未连接', connecting: '正在建立 USB 连接…', waiting: '等待另一端打开酒馆并点击“连接 USB”…', connected: 'USB 已连接：请选择方向；也可以在另一端选择。', selected: '已确定方向，准备关闭酒馆。', stopping: '正在保存并关闭酒馆…', transferring: '正在同步数据、校验并应用…', restarting: '同步结束，正在重新启动酒馆…', completed: 'USB 同步完成。', failed: 'USB 同步失败。', cancelled: '已取消 USB 连接。' };
+    const usbNames = { idle: '未连接', connecting: '正在建立 USB 连接…', waiting: '等待另一端打开酒馆并点击“连接 USB”…', connected: 'USB 已连接：请选择方向；也可以在另一端选择。', selected: '已确定方向，准备关闭酒馆。', stopping: '正在快速关闭酒馆…', transferring: '正在同步数据、校验并应用…', restarting: '同步结束，正在重新启动酒馆…', completed: 'USB 同步完成。', failed: 'USB 同步失败。', cancelled: '已取消 USB 连接。' };
     root.querySelector('.ts-usb-status').textContent = !status.managed ? '请使用 TavernSyn 受控启动器启动酒馆。'
         : !usbState.supported ? '当前操作系统不是 Windows 或 Android Termux，不能使用 USB 直连。'
             : (usbNames[usbState.stage] || 'USB 状态未知') + (usbState.peer?.deviceName ? ' 对端：' + usbState.peer.deviceName : '')
@@ -234,8 +215,7 @@ async function begin(direction, preview = false, scoped = false) {
         const scope = scoped ? [...root.querySelectorAll('.ts-scope input:checked')].map(input => input.value) : null;
         if (scoped && !scope.length) throw Error('请至少选择聊天记录、角色卡或世界书中的一项。');
         render();
-        if (!preview && !await confirmDirection(direction, scope)) { starting = false; render(); return; }
-        if (!preview && status.managed) { if (!dialog.open) dialog.showModal(); text('.ts-phase', '正在保存并核对内容'); text('.ts-detail', ''); await flush(); }
+        // Save once, at AWAITING_SAVE immediately before the controlled stop.
         const started = await api('start', { direction, preview, tab, ...(scope ? { scope } : {}) });
         status = { ...status, ...started, scope, reason: '', note: '', error: null, stats: null, summary: null, progress: null }; starting = false; render();
     } catch (error) { showError(error); }
@@ -244,8 +224,8 @@ async function usbConnect() {
     if (usbBusy || starting || setupBusy) return;
     usbBusy = true; localError = ''; render();
     try {
-        // The normal browser's save and disk receipt are required before the
-        // managed launcher may terminate SillyTavern and apply a mirror.
+        // Try a prompt save, then let the launcher use the current disk receipt
+        // if an editor or third-party save handler would delay the transfer.
         const receipt = await flush();
         usbState = await api('usb/connect', { tab, receipt });
         root.querySelector('.ts-usb').open = true;
@@ -287,7 +267,6 @@ root.querySelector('.ts-resume-upload').onclick = async () => {
     starting = true; localError = '';
     try {
         render();
-        if (!await confirmDirection('resume')) { starting = false; render(); return; }
         const started = await api('resume-upload', { id: status.id, tab });
         status = { ...status, ...started, error: null, progress: null }; starting = false; render();
     } catch (error) { showError(error); }
@@ -303,7 +282,6 @@ async function resumePending() {
     if (starting || setupBusy || status.phase !== 'PENDING_APPLY' || !status.managed) return;
     resumed = true; starting = true; localError = ''; render();
     try {
-        await flush();
         const started = await api('resume-pending', { tab });
         status = { ...status, ...started, reason: '', note: '', error: null, progress: null };
     } catch (error) { showError(error); }
@@ -460,6 +438,13 @@ async function poll() {
             // Reload to bind a fresh save/CSRF barrier before accepting writes.
             location.reload(); return;
         }
+        if (status.phase === 'WAITING_PAGE' && status.id && status.tab && status.ticket) {
+            // A ready reply may be lost after the helper accepted it. Any tab
+            // can follow the recorded owner without saving or asking again.
+            location.assign(`${BASE}wait?${new URLSearchParams({ id: status.id, tab: status.tab, ticket: status.ticket })}`);
+            return;
+        }
+        if (status.phase !== 'AWAITING_SAVE') handlingSave = false;
         if (status.managed) usbState = await api('usb/status').catch(() => usbState);
         if (!starting) render();
         if (!status.configured && !configLoaded) { root.querySelector('.ts-settings').open = true; loadConfiguration(); }
@@ -471,12 +456,12 @@ async function poll() {
             try {
                 const receipt = await flush();
                 const ready = await api('ready', { id: status.id, receipt, tab });
-                location.assign(`${BASE}wait?${new URLSearchParams({ id: ready.id, tab, ticket: ready.ticket })}`);
+                location.assign(`${BASE}wait?${new URLSearchParams({ id: ready.id, tab: ready.tab ?? tab, ticket: ready.ticket })}`);
                 return;
             } catch (error) {
-                handlingSave = false;
-                if (error.code === 'OTHER_TABS') text('.ts-phase', error.message);
-                else { await api('cancel', { id: status.id }).catch(() => {}); showError(error); }
+                handlingSave = ['INPUT', 'UNMANAGED', 'ADMIN_LOCAL_ONLY', 'OWNERSHIP'].includes(error.code);
+                if (handlingSave) { localError = error.message; render(); }
+                else { localError = ''; text('.ts-phase', '正在自动重试保存交接…'); text('.ts-detail', error.message); }
             }
         }
     } catch (error) { if (!starting) text('.ts-phase', error.message); }

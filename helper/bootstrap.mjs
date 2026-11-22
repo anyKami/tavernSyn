@@ -121,7 +121,16 @@ process.on('message', async message => {
     }
     if (message.type !== 'command') return;
     try {
-        if (message.op === 'pause') {
+        if (message.op === 'fast-shutdown') {
+            state.paused = true;
+            if (state.stopping) { reply(message, { ok: true }); return; }
+            state.stopping = true;
+            for (const server of servers) server.close();
+            for (const socket of sockets) socket.destroy();
+            reply(message, { ok: true });
+            if (process.listenerCount('SIGTERM')) process.emit('SIGTERM');
+            else process.exit(0);
+        } else if (message.op === 'pause') {
             state.paused = true; const deadline = Date.now() + 15000;
             while (state.active && Date.now() < deadline) await delay(20);
             const error = drain.failure();
@@ -150,12 +159,11 @@ async function closeWithTerminal() {
     if (terminalClosing) return;
     terminalClosing = true; state.paused = true;
     // A closed terminal must not leave an orphan, even after an aborted browser request.
-    setTimeout(() => { console.error('启动终端已关闭；酒馆清理超时，退出并保留恢复记录。'); process.exit(1); }, 8000).unref();
+    setTimeout(() => { console.error('启动终端已关闭；酒馆清理超过 2 秒，自动退出。'); process.exit(1); }, 2000).unref();
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error('启动终端已关闭。')); }
     pending.clear();
-    const deadline = Date.now() + 3000;
-    while (state.active && Date.now() < deadline) await delay(20);
     for (const server of servers) server.close();
+    for (const socket of sockets) socket.destroy();
     if (process.listenerCount('SIGTERM')) process.emit('SIGTERM');
     else process.exit(0);
 }

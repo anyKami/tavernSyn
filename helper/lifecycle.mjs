@@ -1,8 +1,8 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { requireThat, SyncError } from '../lib/io.mjs';
 import { hashFile } from '../lib/manifest.mjs';
@@ -22,6 +22,10 @@ export class Lifecycle {
         requireThat(!this.closing, 'CLOSING', '启动终端已关闭，不再重启酒馆。');
         requireThat(this.stopped, 'OWNERSHIP', '旧进程尚未确认退出。');
         await this.outputDrained;
+        if (this.child?.pid && this.exit) {
+            await this.exit;
+            await this.releaseExitedLease(this.child, this.nonce);
+        }
         this.nonce = randomUUID(); this.stopped = false;
         const log = fs.openSync(path.join(this.device.state, 'server.log'), 'a');
         let readyResolve, readyReject;
@@ -83,15 +87,57 @@ export class Lifecycle {
     }
     async close() {
         this.closing = true;
-        if (this.stopped) { await this.outputDrained; return; }
-        const child = this.child;
-        if (child.connected) child.disconnect();
-        // Only explicit terminal exit has a bound; synchronization still uses strict stop().
-        const timer = setTimeout(() => child.kill(), 10000);
-        try { await this.exit; await this.outputDrained; } finally { clearTimeout(timer); }
+        await this.stop({ fast: true });
     }
-    async stop({ interruptOnDrain = false, onInterrupt = () => {} } = {}) {
-        if (this.stopped) { await this.outputDrained; return; }
+    async releaseExitedLease(child, nonce) {
+        const file = path.join(this.device.state, 'instance.lock');
+        let lease;
+        try { lease = JSON.parse(await fsp.readFile(file, 'utf8')); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        if (lease) {
+            requireThat(lease.pid === child.pid && lease.nonce === nonce && lease.install === this.device.install,
+                'INSTANCE_LOCK', '实例锁不属于刚退出的酒馆，未删除其他实例的锁。');
+            await fsp.unlink(file).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        }
+    }
+    async stopFast() {
+        // Keep the original process identity and exit promise throughout. Never
+        // kill a process found by its port or allow a later child to satisfy this stop.
+        const child = this.child, nonce = this.nonce, exited = this.exit, outputDrained = this.outputDrained;
+        requireThat(Number.isInteger(child?.pid) && child.pid > 0 && nonce && exited, 'OWNERSHIP', '无法确认受控酒馆进程，未结束其他进程。');
+        let graceTimer, exitTimer, finished = false, forced = false;
+        const completion = new Promise((resolve, reject) => {
+            exited.then(result => { finished = true; resolve(result); }, reject);
+            // This deadline also covers an unresponsive IPC/event loop.
+            graceTimer = setTimeout(() => {
+                if (finished) return;
+                forced = true;
+                try { child.kill('SIGKILL'); }
+                catch (error) { reject(new SyncError('STOP_FAILED', `无法结束受控酒馆进程（${error.code ?? 'IO'}）。`)); return; }
+                exitTimer = setTimeout(() => reject(new SyncError('STOP_TIMEOUT', '受控酒馆进程仍未退出，未开始替换文件。')), 3000);
+            }, 2000);
+        });
+        // The exit event is authoritative even if the shutdown reply is lost.
+        if (child.connected) this.command('fast-shutdown').catch(() => {});
+        let result;
+        try { result = await completion; }
+        finally { clearTimeout(graceTimer); clearTimeout(exitTimer); }
+        await outputDrained;
+        // SIGKILL skips the server's exit hook. Remove only this exited child's
+        // lease, so both a sync restart and the next normal launch can proceed.
+        await this.releaseExitedLease(child, nonce);
+        return { ...result, forced };
+    }
+    async stop({ fast = false, interruptOnDrain = false, onInterrupt = () => {} } = {}) {
+        if (this.stopped) {
+            await this.outputDrained;
+            if (fast && this.child?.pid && this.exit) {
+                await this.exit;
+                await this.releaseExitedLease(this.child, this.nonce);
+            }
+            return;
+        }
+        if (fast) return this.stopFast();
         try {
             const drained = await this.command('pause');
             requireThat(drained.ok && !drained.active && !drained.uncertain, 'DRAIN', '请求未能安全排空，酒馆保持运行。');

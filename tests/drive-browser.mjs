@@ -16,7 +16,7 @@ const checks = [], errors = [], calls = [];
 const server = http.createServer(async (req, res) => {
     if (req.url === '/') {
         res.setHeader('Content-Type', 'text/html');
-        res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Drive UI browser fixture</title><style>body{margin:24px auto;max-width:640px;background:#20242d;color:#eee;font:16px system-ui;padding:0 12px}button,input,select,textarea{font:inherit}button{background:#3c414c;color:#eee;border:1px solid #9995;border-radius:6px;padding:8px;cursor:pointer}button:disabled{opacity:.45}.text_pole{background:#161a22;color:#eee;border:1px solid #9997;border-radius:5px;padding:8px}a{color:#9cc9ff}button[hidden]{display:none}</style><link rel="stylesheet" href="/ui/style.css"><div id="extensions_settings2"></div><script>window.SillyTavern={getContext:()=>({getRequestHeaders:()=>({'Content-Type':'application/json'})})};</script><script type="module" src="/ui/index.js"></script>`);
+        res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TavernSyn UI browser fixture</title><style>body{margin:24px auto;max-width:640px;background:#20242d;color:#eee;font:16px system-ui;padding:0 12px}button,input,select,textarea{font:inherit}button{background:#3c414c;color:#eee;border:1px solid #9995;border-radius:6px;padding:8px;cursor:pointer}button:disabled{opacity:.45}.text_pole{background:#161a22;color:#eee;border:1px solid #9997;border-radius:5px;padding:8px}a{color:#9cc9ff}.menu_button{display:flex;align-items:center;justify-content:center;width:min-content;margin:5px 0}.extension_container{display:contents}#extensions_settings2{display:flex;flex-direction:column}button[hidden]{display:none}</style><link rel="stylesheet" href="/ui/style.css"><div id="extensions_settings2"></div><script>window.__TAVERNSYN__={epoch:'browser-fixture',pending:0,lastWrite:0};const fixtureContext={getRequestHeaders:()=>({'Content-Type':'application/json'}),extensionSettings:{},powerUserSettings:{},chatCompletionSettings:{},textCompletionSettings:{},stopGeneration(){},saveChat:async()=>{},saveSettingsDebounced(){}};window.SillyTavern={getContext:()=>fixtureContext};</script><script type="module" src="/ui/index.js"></script>`);
         return;
     }
     if (/^\/ui\/(index\.js|progress\.js|style\.css)$/.test(req.url)) {
@@ -29,16 +29,22 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 let browser, page;
 try {
     browser = await chromium.launch({ headless: true, ...(process.env.TAVERNSYN_CHROMIUM ? { executablePath: process.env.TAVERNSYN_CHROMIUM } : {}) });
-    const context = await browser.newContext({ viewport: { width: 1000, height: 1000 } });
+    const context = await browser.newContext({ viewport: { width: 1000, height: 1000 }, isMobile: true, hasTouch: true });
     let config = { provider: 'vps', host: '100.64.0.1', user: 'tavernsyn', passwordSaved: true, configured: true,
         dataset: 'vps-fixture', runtimeReady: true, drive: { clientConfigured: false, authorized: false, configured: false } };
     let status = { phase: 'IDLE', provider: 'vps', host: config.host, configured: true, deviceName: 'Browser fixture', managed: false, recovery: { available: false } };
+    let usbStatus = { stage: 'idle', supported: true };
     const pair = 'TSDRIVE1.' + 'secret-pairing-fixture_'.repeat(20);
     await context.route('**/api/plugins/tavernsyn/**', async route => {
-        const action = new URL(route.request().url()).pathname.split('/').at(-1);
+        const action = new URL(route.request().url()).pathname.slice('/api/plugins/tavernsyn/'.length);
         const body = route.request().postDataJSON(); calls.push({ action, body });
         let result = { ok: true };
         if (action === 'status') result = status;
+        if (action === 'usb/status') result = usbStatus;
+        if (action === 'flush') result = { receipt: 'browser-fixture-receipt' };
+        if (action === 'usb/connect') result = usbStatus = { stage: 'connected', supported: true, peer: { deviceName: 'My phone' } };
+        if (action === 'usb/select') result = usbStatus = { ...usbStatus, stage: 'selected', selection: { direction: body.direction } };
+        if (action === 'start') result = status = { ...status, phase: 'SUCCEEDED', id: 'browser-fixture-job', direction: body.direction };
         if (action === 'configuration') result = config;
         if (action === 'configure') {
             config = { ...config, provider: body.provider, configured: false, drive: { clientConfigured: true, clientId: body.clientId, authorized: false, configured: false } };
@@ -105,12 +111,15 @@ try {
     await page.waitForFunction(() => document.querySelector('.ts-check-result').textContent.includes('仓库还没有同步副本'));
     checks.push('join errors preserve usable controls and empty repository checks instruct initial push');
 
+    status.managed = true;
+    await page.waitForFunction(() => !document.querySelector('.ts-usb-connect').disabled);
     await page.locator('.ts-pull').click();
-    await page.locator('.ts-direction-dialog').waitFor({ state: 'visible' });
-    assert.match(await page.locator('.ts-direction-dialog .ts-detail').textContent(), /Google 云盘/);
-    await page.locator('.ts-decline').click();
-    assert.equal(calls.some(call => call.action === 'start'), false);
-    checks.push('Drive pull confirmation uses correct target and cancel never starts a task');
+    await page.waitForFunction(() => document.querySelector('.ts-phase').textContent === '同步完成');
+    const started = calls.filter(call => call.action === 'start');
+    assert.equal(started.length, 1); assert.equal(started[0].body.direction, 'pull');
+    assert.equal(calls.some(call => call.action === 'flush'), false, 'managed sync defers saving until the real handoff');
+    assert.equal(await page.locator('.ts-direction-dialog').count(), 0);
+    checks.push('Drive pull starts once with the clicked direction and no additional confirmation');
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: `${root}/drive-ui-mobile.png`, fullPage: true });
@@ -128,8 +137,63 @@ try {
     await page.waitForFunction(() => document.querySelector('.ts-config-result').textContent.includes('已移除本机 Google 授权'));
     assert.equal(await page.locator('.ts-drive-create').isDisabled(), true);
     checks.push('disconnect updates authorization state without a cloud delete action');
+
+    config = { provider: 'vps', host: '100.64.0.1', user: 'tavernsyn', passwordSaved: true, configured: true,
+        dataset: 'vps-fixture', runtimeReady: true, drive: {} };
+    status = { phase: 'IDLE', provider: 'vps', host: config.host, configured: true, deviceName: 'My Android phone', managed: true,
+        epoch: 'browser-fixture', recovery: { available: false } };
+    await page.reload();
+    await page.waitForFunction(() => !document.querySelector('.ts-usb-connect').disabled);
+    assert.equal(calls.some(call => call.action === 'usb/select'), false, 'connecting must never choose a direction by itself');
+    for (const width of [320, 360, 390, 430]) {
+        await page.setViewportSize({ width, height: 844 });
+        for (const selector of ['.ts-usb>summary', '.ts-settings>summary', '.ts-usb-connect']) {
+            const target = await page.locator(selector).boundingBox();
+            assert.ok(target.height >= 48, `${width}px ${selector} must remain easy to tap`);
+            assert.ok(target.x >= 0 && target.x + target.width <= width, `${width}px ${selector} must fit`);
+        }
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        await page.locator('.ts-settings>summary').tap();
+        assert.equal(await page.locator('.ts-config').isVisible(), true);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        for (const button of await page.locator('.ts-settings .menu_button:visible').all()) {
+            const target = await button.boundingBox();
+            assert.ok(target.height >= 48 && target.x >= 0 && target.x + target.width <= width, `${width}px settings buttons must fit`);
+        }
+        for (const selector of ['.ts-preview-push', '.ts-preview-pull']) {
+            const target = await page.locator(selector).boundingBox();
+            assert.ok(target.width >= 90 && target.height <= 64, 'ST min-content button styling must not make Chinese labels vertical');
+        }
+        await page.locator('.ts-settings>summary').tap();
+        await page.locator('.ts-usb>summary').tap();
+        assert.equal(await page.locator('.ts-usb-connect').isVisible(), false);
+        await page.locator('.ts-usb>summary').tap();
+        assert.equal(await page.locator('.ts-usb-connect').isVisible(), true);
+        if ([360, 390].includes(width)) await page.screenshot({ path: `${root}/usb-settings-${width}px.png`, fullPage: true });
+    }
+    checks.push('320/360/390/430px touch layouts: USB/settings cards toggle, targets are at least 48px, no horizontal overflow');
+
+    for (const direction of ['push', 'pull']) {
+        usbStatus = { stage: 'idle', supported: true };
+        await page.reload();
+        await page.setViewportSize({ width: 360, height: 844 });
+        await page.waitForFunction(() => !document.querySelector('.ts-usb-connect').disabled);
+        await page.locator('.ts-usb-connect').tap();
+        await page.locator('.ts-usb-directions').waitFor({ state: 'visible' });
+        for (const selector of ['.ts-usb-push', '.ts-usb-pull']) {
+            const target = await page.locator(selector).boundingBox();
+            assert.ok(target.height >= 48 && target.x >= 0 && target.x + target.width <= 360);
+        }
+        const before = calls.filter(call => call.action === 'usb/select').length;
+        await page.locator(`.ts-usb-${direction}`).tap();
+        await page.waitForFunction(() => document.querySelector('.ts-usb-status').textContent.includes('已确定方向'));
+        const selections = calls.filter(call => call.action === 'usb/select');
+        assert.equal(selections.length, before + 1); assert.equal(selections.at(-1).body.direction, direction);
+        assert.equal(await page.locator('dialog[open]').count(), 0);
+    }
+    checks.push('touch connection and both USB direction buttons send one selection each without another dialog');
     assert.deepEqual(errors, []);
-    await fs.writeFile(`${root}/drive-ui-browser.json`, JSON.stringify({ checks, errors, passed: checks.length, browser: 'headless Chromium, mocked API, no real Google account', at: new Date().toISOString() }, null, 2));
+    await fs.writeFile(`${root}/drive-ui-browser.json`, JSON.stringify({ checks, errors, passed: checks.length, browser: 'headless Chromium with touch emulation, mocked API; no physical Android, USB or Google account', at: new Date().toISOString() }, null, 2));
     console.log(JSON.stringify({ passed: checks.length, checks, errors }, null, 2));
 } catch (error) {
     // All displayed account data and pairing codes in this fixture are synthetic.

@@ -80,12 +80,12 @@ export async function executeScoped(manager) {
                 local = await inventory();
                 const summary = difference(metadata.sourceState, local);
                 await m.write('PREFLIGHT', { summary });
-                const approved = local.digest;
                 await m.saveAndStop();
                 try {
-                    requireThat((await inventory()).digest === approved, 'LOCAL_CHANGED', '保存交接期间所选内容有更新，请重新发起同步；未发布。');
-                    await m.write('SNAPSHOT'); frozen = await snapshot(device, payload, { scope });
-                    requireThat(frozen.metadata.sourceState.digest === approved, 'LOCAL_CHANGED', '创建快照期间所选数据发生变化，未上传。');
+                    const stopped = await inventory();
+                    await m.write('SNAPSHOT', { summary: difference(metadata.sourceState, stopped) });
+                    frozen = await snapshot(device, payload, { scope });
+                    requireThat(frozen.metadata.sourceState.digest === stopped.digest, 'LOCAL_CHANGED', '创建快照期间所选数据发生变化，未上传。');
                 } finally { if (m.lifecycle.stopped) { await m.write('STARTING'); await m.lifecycle.start(); } else await m.lifecycle.resume(); }
                 await atomicJson(path.join(root, 'manifest.json'), frozen.manifest);
             }
@@ -126,9 +126,9 @@ export async function executeScoped(manager) {
         const prepared = await prepare(device, payload, downloaded.manifest, root, { scope });
         local = await inventory();
         await m.write('PREPARING', { summary: difference(local, metadata.sourceState) });
-        const approved = local.digest;
         await m.saveAndStop();
-        requireThat((await inventory()).digest === approved, 'LOCAL_CHANGED', '应用前所选数据发生变化，保留下载，请重新发起同步。');
+        local = await inventory();
+        await m.write('QUIESCING', { summary: difference(local, metadata.sourceState) });
         await retireRecovery(device);
         m.plan = await buildPlan(device, prepared, root);
         await m.write('APPLYING'); await applyPlan(device, m.plan);
@@ -139,7 +139,7 @@ export async function executeScoped(manager) {
     } catch (error) {
         if (m.plan && !['committed', 'rolled-back'].includes(m.plan.phase)) {
             await m.write('ROLLING_BACK');
-            if (!m.lifecycle.stopped) await m.lifecycle.stop();
+            if (!m.lifecycle.stopped) await m.lifecycle.stop({ fast: true });
             await rollback(device, m.plan); await m.lifecycle.start();
         } else if (m.lifecycle?.stopped) await m.lifecycle.start();
         throw error;

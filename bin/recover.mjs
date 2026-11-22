@@ -46,7 +46,6 @@ export async function recoverStopped(device) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     try {
         const options = cliOptions(), device = await loadDevice(options.state);
-        requireThat(options['acknowledge-stopped'] === 'yes', 'ACK', '先确认所有酒馆和助手已关闭，再提供 --acknowledge-stopped yes。本工具仅清理已死进程的锁，不会结束进程或删除用户数据。');
         await recoverStopped(device);
         console.log('已清理确认退出的进程锁。再次从 TavernSyn 入口启动时，将先检查并恢复未完成的替换记录。');
     } catch (error) { console.error(error.message); process.exitCode = 1; }

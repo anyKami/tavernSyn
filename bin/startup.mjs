@@ -23,7 +23,7 @@ export function compareVersions(a, b) {
 
 export function windowsLauncher({ node, repository, state }) {
     for (const value of [node, repository, state]) if (/["%\r\n!]/.test(value)) throw fail('INSTALL', '启动路径含批处理不支持的字符。');
-    return `@echo off\r\nchcp 65001 >nul\r\npushd "%~dp0"\r\nif /I "%~1"=="--desktop-shortcut" goto desktop_shortcut\r\nset NODE_ENV=production\r\n"${node}" "%~dp0${STARTUP}" --st "%~dp0." --state "${state}" %*\r\nset "tavernsyn_exit=%ERRORLEVEL%"\r\npopd\r\nif not "%tavernsyn_exit%"=="0" pause\r\nexit /b %tavernsyn_exit%\r\n:desktop_shortcut\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${path.join(repository, 'bin/create-desktop-shortcut.ps1')}" -LauncherPath "%~f0"\r\nset "tavernsyn_exit=%ERRORLEVEL%"\r\npopd\r\nif not "%tavernsyn_exit%"=="0" pause\r\nexit /b %tavernsyn_exit%\r\n`;
+    return `@echo off\r\nchcp 65001 >nul\r\npushd "%~dp0"\r\nif /I "%~1"=="--desktop-shortcut" goto desktop_shortcut\r\nset NODE_ENV=production\r\n"${node}" "%~dp0${STARTUP}" --st "%~dp0." --state "${state}" %*\r\nset "tavernsyn_exit=%ERRORLEVEL%"\r\npopd\r\nif not "%tavernsyn_exit%"=="0" echo TavernSyn 未完成，退出码：%tavernsyn_exit% 1>&2\r\nexit /b %tavernsyn_exit%\r\n:desktop_shortcut\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${path.join(repository, 'bin/create-desktop-shortcut.ps1')}" -LauncherPath "%~f0"\r\nset "tavernsyn_exit=%ERRORLEVEL%"\r\npopd\r\nif not "%tavernsyn_exit%"=="0" echo TavernSyn 未完成，退出码：%tavernsyn_exit% 1>&2\r\nexit /b %tavernsyn_exit%\r\n`;
 }
 
 export function termuxLauncher({ node, install, state }) {
