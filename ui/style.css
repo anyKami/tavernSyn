@@ -1,7 +1,8 @@
 #tavernsyn-panel .ts-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem}
-#tavernsyn-panel .ts-actions>.menu_button{display:flex;align-items:center;width:100%;min-width:0;box-sizing:border-box;margin:0;white-space:nowrap;justify-content:center;padding:.65em .8em}
+#tavernsyn-panel .ts-actions>.menu_button{display:flex;align-items:center;width:100%;min-width:0;box-sizing:border-box;margin:0;white-space:normal;justify-content:center;padding:.65em .8em}
 #tavernsyn-panel .ts-actions>.ts-resume-download,#tavernsyn-panel .ts-actions>.ts-resume-upload,#tavernsyn-panel .ts-actions>.ts-resume-apply{grid-column:1/-1}
 #tavernsyn-panel .menu_button[hidden]{display:none}
+#tavernsyn-panel [hidden]{display:none!important}
 #tavernsyn-panel .ts-restore{width:auto;white-space:nowrap;display:inline-flex;margin:.65em 0;justify-content:center}
 #tavernsyn-panel .ts-recovery{display:block;overflow-wrap:anywhere}
 #tavernsyn-panel details>.menu_button{width:auto;min-width:6em;white-space:nowrap;display:inline-flex;justify-content:center}
@@ -23,6 +24,13 @@
 #tavernsyn-panel .ts-scope-previews>.menu_button{width:auto;white-space:normal;margin:0}
 #tavernsyn-panel .ts-scope small{display:block;line-height:1.5;opacity:.85}
 #tavernsyn-panel .ts-dataset,#tavernsyn-panel .ts-config-result{overflow-wrap:anywhere}
+#tavernsyn-panel .ts-drive-config{min-width:0}
+#tavernsyn-panel .ts-drive-config a{overflow-wrap:anywhere}
+#tavernsyn-panel .ts-drive-repository-actions{margin-top:.8em}
+#tavernsyn-panel .ts-drive-state{font-size:.9em;overflow-wrap:anywhere}
+#tavernsyn-panel .ts-drive-disconnect{margin-top:.8em;white-space:normal}
+.ts-pairing-dialog .ts-pairing-code{width:100%;box-sizing:border-box;min-height:8em;resize:vertical;font-family:monospace;overflow-wrap:anywhere}
+.ts-pairing-dialog p{line-height:1.5}
 .ts-dialog{background:var(--SmartThemeBlurTintColor,#20242d);color:var(--SmartThemeBodyColor,#eee);border:1px solid #8885;border-radius:12px;box-sizing:border-box;padding:24px;width:min(520px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:85vh;overflow:auto}
 .ts-dialog::backdrop{background:#000a}
 .ts-dialog h3{margin:0 0 1rem}

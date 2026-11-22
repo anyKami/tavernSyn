@@ -24,6 +24,10 @@ export async function recoverStopped(device) {
     const statusFile = path.join(device.state, 'status.json');
     if (await exists(statusFile)) {
         const status = await readJson(statusFile);
+        // A confirmed result remains historical when the user later selects
+        // another storage backend. It needs no completion repair, and its old
+        // connection must not prevent cleaning independently verified dead locks.
+        if (status.phase === 'SUCCEEDED') return;
         const receipt = status.id ? await readCompletion(device, status.id) : null;
         const applyFile = path.join(device.state, 'apply.json');
         const journal = await exists(applyFile) ? await readJson(applyFile) : null;

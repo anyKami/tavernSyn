@@ -2,11 +2,13 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { uuidPattern } from '../lib/device.mjs';
 import { noLinks, readJson, requireThat, exists, canonical } from '../lib/io.mjs';
-import { connectionId } from '../lib/completion.mjs';
+import { connectionId, configuredProvider } from '../lib/completion.mjs';
 import { validateManifest } from '../lib/manifest.mjs';
 import { normalizeScope, sameScope, inScope } from '../lib/scope.mjs';
 
 export function validateDownloadBinding(device, job, record) {
+    requireThat(configuredProvider(device) === 'vps' && (!record?.provider || record.provider === 'vps'),
+        'DOWNLOAD_BINDING', '此下载续传记录不属于当前存储；Google 云盘部分下载请重新拉取。');
     requireThat(uuidPattern.test(job) && record?.format === 1 && record.job === job && record.direction === 'pull'
         && record.connection === connectionId(device) && record.dataset === device.remote.dataset
         && uuidPattern.test(record.generation) && ['transferring', 'verified'].includes(record.state)

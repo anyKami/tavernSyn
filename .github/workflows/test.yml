@@ -21,6 +21,7 @@ jobs:
       - name: Unit, Linux locks, rsync and actual server lifecycle
         env:
           SILLYTAVERN_SOURCE: ${{ runner.temp }}/SillyTavern
+          TAVERNSYN_DRIVE_TEST_REPORT: ${{ runner.temp }}/tavernsyn-drive-results.json
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           node --test tests/*.test.mjs
@@ -28,7 +29,22 @@ jobs:
           node tests/rsync.mjs
           node tests/integration.mjs
           node tests/usb-integration.mjs
-  usb-portable:
+          node tests/drive-integration.mjs
+      - name: Chromium Drive settings and synchronization flow
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tavernsyn-browser" --no-save --package-lock=false playwright@1.62.1
+          "$RUNNER_TEMP/tavernsyn-browser/node_modules/.bin/playwright" install --with-deps chromium
+          TAVERNSYN_PLAYWRIGHT_PACKAGE="$RUNNER_TEMP/tavernsyn-browser/node_modules/playwright/package.json" TAVERNSYN_BROWSER_OUTPUT="$RUNNER_TEMP/tavernsyn-browser-results" node tests/drive-browser.mjs
+      - name: Preserve Drive integration and browser results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-drive-tests
+          path: |
+            ${{ runner.temp }}/tavernsyn-drive-results.json
+            ${{ runner.temp }}/tavernsyn-browser-results
+          if-no-files-found: ignore
+  portable:
     strategy:
       matrix:
         include:
@@ -44,3 +60,5 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: USB protocol, ADB selection and entry points
         run: node --test tests/usb-adb.test.mjs tests/usb-stream.test.mjs tests/usb-service.test.mjs tests/usb-launchers.test.mjs
+      - name: Google Drive protocol, encryption, authorization and settings
+        run: node --test tests/drive-api.test.mjs tests/drive-repository.test.mjs tests/drive-archive.test.mjs tests/drive-auth.test.mjs tests/drive-ui.test.mjs

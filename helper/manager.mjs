@@ -6,18 +6,18 @@ import { atomicJson, digest, exists, readJson, requireThat, removeOwned, SyncErr
 import { copyTree, verify, validateManifest } from '../lib/manifest.mjs';
 import { portableState, snapshot } from '../lib/snapshot.mjs';
 import { prepare, buildPlan, applyPlan, rollback, commitPlan, retireRecovery, recoveryStatus, preserveSyncCode, validatePlan } from './apply.mjs';
-import * as transport from './transport.mjs';
+import * as transport from './remote-transport.mjs';
 import { configuration, configureDevice, withDeviceLock } from '../lib/connection.mjs';
 import { validateContent } from '../lib/content.mjs';
-import { completionPath, readCompletion, validateCompletion, completedStatus, connectionId } from '../lib/completion.mjs';
+import { completionPath, readCompletion, validateCompletion, completedStatus, connectionId, connectionIdentity, configuredProvider, remoteDataset, remoteLabel } from '../lib/completion.mjs';
 import { normalizeScope } from '../lib/scope.mjs';
 import { executeScoped } from './scoped.mjs';
 import { loadDownloadBinding } from './download-binding.mjs';
 import { HYBRID_PROTOCOL } from '../lib/hybrid.mjs';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'PREVIEW', 'PENDING_APPLY', 'RECOVERY_REQUIRED']);
-const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '从 VPS 下载', VERIFYING: '校验文件', PREPARING: '准备插件',
-    AWAITING_SAVE: '核对保存', WAITING_PAGE: '等待页面交接', QUIESCING: '安全停止酒馆', SNAPSHOT: '创建独立快照', UPLOADING: '上传到 VPS',
+const PHASES = { PREFLIGHT: '检查环境', DOWNLOADING: '下载同步副本', VERIFYING: '校验文件', PREPARING: '准备插件',
+    AWAITING_SAVE: '核对保存', WAITING_PAGE: '等待页面交接', QUIESCING: '安全停止酒馆', SNAPSHOT: '创建独立快照', UPLOADING: '上传同步副本',
     APPLYING: '应用更新', RESTORING: '恢复上一版', STARTING: '重新启动酒馆', ROLLING_BACK: '回滚数据', SUCCEEDED: '同步完成',
     FAILED: '同步失败', PREVIEW: '预览完成', PENDING_APPLY: '等待受控应用', RECOVERY_REQUIRED: '需要人工恢复' };
 export function stateDifference(before, after) {
@@ -46,6 +46,7 @@ export class Manager {
         return status;
     }
     async canResumeDownload(status) {
+        if (configuredProvider(this.device) === 'google-drive' || status.provider === 'google-drive' || status.transport === 'google-drive') return false;
         if (this.busy || status.phase !== 'FAILED' || status.direction !== 'pull' || status.commit || !['DOWNLOADING', 'VERIFYING'].includes(status.failurePhase)) return false;
         try {
             const root = path.join(this.device.state, 'jobs', status.id);
@@ -67,12 +68,13 @@ export class Manager {
         this.writeQueue = this.writeQueue.catch(() => {}).then(() => atomicJson(path.join(this.device.state, 'status.json'), snapshot));
         try { await this.writeQueue; this.statusWriteFailed = false; }
         catch (error) { this.statusWriteFailed = true; throw error; }
-        const phaseLabel = value => this.job.transport === 'usb' && ['UPLOADING', 'DOWNLOADING'].includes(value)
-            ? (value === 'UPLOADING' ? '通过 USB 发送' : '通过 USB 接收') : PHASES[value] ?? value;
+        const phaseLabel = value => ['UPLOADING', 'DOWNLOADING'].includes(value)
+            ? this.job.transport === 'usb' ? (value === 'UPLOADING' ? '通过 USB 发送' : '通过 USB 接收')
+                : (value === 'UPLOADING' ? `上传到 ${remoteLabel(this.device)}` : `从 ${remoteLabel(this.device)} 下载`) : PHASES[value] ?? value;
         if (phase !== oldPhase) { if (oldPhase) this.log(`阶段 ${phaseLabel(oldPhase)} 耗时 ${Math.round((Date.now() - this.phaseStarted) / 1000)} 秒`); this.phaseStarted = Date.now(); this.log(`阶段：${phaseLabel(phase)} (${phase})`); }
         if (fields.files !== undefined) this.log(`快照：${fields.files} 个文件，${fields.bytes ?? 0} 字节`);
         if (fields.summary) this.log(`文件差异：新增 ${fields.summary.added}，修改 ${fields.summary.changed}，删除 ${fields.summary.deleted}`);
-        if (fields.remote?.generation) this.log(`${this.job.transport === 'usb' ? 'USB 快照' : 'VPS 代次'}：${fields.remote.generation}；SHA-256：${fields.remote.digest}`);
+        if (fields.remote?.generation) this.log(`${this.job.transport === 'usb' ? 'USB 快照' : `${remoteLabel(this.device)} 代次`}：${fields.remote.generation}；SHA-256：${fields.remote.digest}`);
         if (fields.stats && Number.isFinite(fields.stats.sentBytes)) this.log(`传输统计：发送 ${fields.stats.sentBytes} 字节，接收 ${fields.stats.receivedBytes} 字节，新增内容 ${fields.stats.literalBytes} 字节，复用内容 ${fields.stats.matchedBytes ?? 0} 字节`);
         if (fields.note && fields.note !== oldNote) this.log(fields.note);
         if (fields.error) this.log(`错误 [${fields.error.code}]：${fields.error.message}`);
@@ -98,7 +100,7 @@ export class Manager {
         if (action === 'status') return this.status();
         if (action === 'recovery') return recoveryStatus(this.device);
         if (action === 'configuration') return configuration(this.device);
-        if (action === 'configure') {
+        if (['configure', 'drive-authorize', 'drive-create', 'drive-join', 'drive-pairing', 'drive-disconnect'].includes(action)) {
             requireThat(!this.busy, 'BUSY', '同步正在进行，请结束任务后再修改连接。');
             return configureDevice(this.device, action, payload);
         }
@@ -114,13 +116,14 @@ export class Manager {
             const previous = await this.status();
             requireThat(previous.id === payload.id && !previous.commit && previous.phase === 'FAILED' && previous.direction === 'push'
                 && previous.snapshotReady === true, 'JOB', '没有可继续上传的完整快照，请重新推送。');
-            requireThat(previous.connection === this.connectionId(), 'CONFIG_CHANGED', '连接目标已改变，不能把旧快照发送到另一数据集。');
+            requireThat(previous.connection === connectionId(this.device, previous), 'CONFIG_CHANGED', '连接目标已改变，不能把旧快照发送到另一数据集。');
             return this.start({ direction: 'push', tab: payload.tab, resume: previous }, { authorized: true });
         }
         if (action === 'resume-pending') {
             const pending = await this.status();
             requireThat(this.lifecycle && pending.phase === 'PENDING_APPLY', 'PENDING_APPLY', '没有可由受控启动器继续的待应用任务。');
             requireThat(pending.jobRoot === path.join(this.device.state, 'jobs', pending.id), 'JOURNAL', '待应用记录路径无效。');
+            requireThat(pending.connection === connectionId(this.device, pending), 'CONFIG_CHANGED', '待应用数据的存储或仓库已改变，未应用旧副本。');
             return this.start({ direction: 'pull', tab: payload.tab, preview: false, pending }, { authorized: true });
         }
         if (action === 'ready') {
@@ -145,7 +148,7 @@ export class Manager {
             requireThat(!this.busy, 'BUSY', '同步正在进行，请结束任务后再检查连接。');
             return withDeviceLock(this.device, async () => {
                 const connection = await this.transport.connect(this.device);
-                try { return { ok: true, current: connection.hello.current, dataset: connection.hello.dataset }; } finally { connection.control.close(); }
+                try { return { ok: true, provider: configuredProvider(this.device), current: connection.hello.current, dataset: connection.hello.dataset }; } finally { connection.control.close(); }
             });
         }
         throw new SyncError('ACTION', '不支持的同步操作。');
@@ -166,6 +169,11 @@ export class Manager {
         requireThat(internal.authorized === true || (!pending && !resume), 'INPUT', '不能从外部注入恢复状态。');
         const downloadResume = internal.downloadResume ?? null;
         scope = normalizeScope(resume?.scope ?? pending?.scope ?? scope);
+        const provider = configuredProvider(this.device);
+        requireThat(!scope || provider !== 'google-drive', 'UNSUPPORTED_SCOPE', 'Google 云盘目前支持完整同步，请使用完整推送或拉取。');
+        requireThat(!downloadResume || provider !== 'google-drive', 'DOWNLOAD_BINDING', 'Google 云盘不支持跨任务继续部分下载，请重新拉取。');
+        if (resume || pending) requireThat((resume ?? pending).connection === connectionId(this.device, resume ?? pending),
+            'CONFIG_CHANGED', '连接目标已改变，不能继续另一存储或仓库的旧任务。');
         requireThat(!scope || direction !== 'restore', 'INPUT', '恢复操作使用上次实际应用的范围，不能另选类别。');
         requireThat(['push', 'pull', 'restore'].includes(direction) && typeof preview === 'boolean' && !(direction === 'restore' && preview), 'INPUT', '同步方向无效。');
         requireThat(typeof tab === 'string' && /^[a-f0-9-]{36}$/.test(tab), 'INPUT', '浏览器标签页标识无效。');
@@ -188,11 +196,13 @@ export class Manager {
             }
             this.progressTime = 0;
             this.job = { ...(resume ?? {}), id: resume?.id ?? randomUUID(), direction, tab, preview, ticket: randomUUID(),
+                provider, ...(provider === 'google-drive' ? { transport: 'google-drive', connectionBinding: connectionIdentity(this.device) } : {}),
                 ...(scope ? { scope } : {}),
                 started: resume?.started ?? new Date().toISOString(), error: null, progress: null, transferPlan: null,
-                ...(resume ? { resumedAt: new Date().toISOString(), note: direction === 'push' ? '正在继续上次的已保存快照；此后的本机改动留待下次推送。' : '正在继续下载上次固定的 VPS 代次，并重新校验文件。' } : {}) };
+                ...(pending ? { connection: pending.connection } : {}),
+                ...(resume ? { resumedAt: new Date().toISOString(), note: direction === 'push' ? '正在继续上次的已保存快照；此后的本机改动留待下次推送。' : '正在继续下载上次固定的远端代次，并重新校验文件。' } : {}) };
             await handle.writeFile(JSON.stringify({ id: this.job.id, pid: process.pid })); await handle.sync();
-            this.log(`${resume ? '续传' : '开始'}任务 ${this.job.id}；${preview ? '仅预览；' : ''}VPS：${this.device.remote?.user ?? ''}@${this.device.remote?.host ?? '未配置'}`);
+            this.log(`${resume ? '续传' : '开始'}任务 ${this.job.id}；${preview ? '仅预览；' : ''}${remoteLabel(this.device)}：${provider === 'google-drive' ? this.device.drive?.dataset ?? '未配置' : `${this.device.remote?.user ?? ''}@${this.device.remote?.host ?? '未配置'}`}`);
             await this.write(downloadResume ? 'DOWNLOADING' : 'PREFLIGHT');
         } catch (error) {
             this.busy = false;
@@ -367,8 +377,8 @@ export class Manager {
                 let remote = { generation: id, digest: manifest.digest };
                 try {
                     if (previous.scope) remote = await session.control.request('published', { job: id, snapshotDigest: manifest.digest, scope: previous.scope });
-                    else requireThat(session.hello.dataset === this.device.remote.dataset && session.hello.current?.generation === id
-                        && session.hello.current.digest === manifest.digest, 'COMMIT_NOT_CONFIRMED', 'VPS 当前代次尚不能证明此任务已发布；可继续原快照上传，未修改 VPS。');
+                    else requireThat(session.hello.dataset === remoteDataset(this.device) && session.hello.current?.generation === id
+                        && session.hello.current.digest === manifest.digest, 'COMMIT_NOT_CONFIRMED', '远端当前代次尚不能证明此任务已发布；可继续原快照上传，未修改远端副本。');
                 } finally { session.control.close(); }
                 const payload = await exists(path.join(path.dirname(file), 'payload')) ? path.join(path.dirname(file), 'payload') : path.join(this.device.state, 'cache/payload');
                 await verify(payload, manifest);
@@ -394,7 +404,7 @@ export class Manager {
         // Recheck the publication after local inventory/save; a stale hello must
         // never let us skip another device's newly published update.
         const latest = await session.control.request('hello', { requiredProtocol: HYBRID_PROTOCOL });
-        requireThat(latest.dataset === this.device.remote.dataset, 'REMOTE_DATASET', 'VPS 数据集已经改变，停止跳过同步。');
+        requireThat(latest.dataset === remoteDataset(this.device), 'REMOTE_DATASET', '远端数据集已经改变，停止跳过同步。');
         if (latest.current?.digest !== baseline.remote.digest) return false;
         if ((await portableState(this.device)).digest !== local.digest) return false;
         if (this.job.direction === 'push') await this.lifecycle.verifyReceipt(this.receipt);
@@ -451,16 +461,19 @@ export class Manager {
                 let frozen;
                 if (this.resumeSource) {
                     await this.write('VERIFYING');
-                    requireThat(session.hello.current?.generation === this.job.id
-                        || (session.hello.current?.digest ?? null) === (this.resumeSource.remoteBase?.digest ?? null),
-                    'REMOTE_CHANGED', 'VPS 已发布其他数据，请重新预览后推送；不会用旧快照覆盖。');
                     const manifest = await readJson(path.join(root, 'manifest.json'));
                     requireThat(manifest.digest === this.resumeSource.snapshotDigest, 'MANIFEST', '快照清单与中断记录不符。');
+                    const current = session.hello.current, base = this.resumeSource.remoteBase;
+                    const published = current?.generation === this.job.id && current.digest === manifest.digest;
+                    const unchanged = (current?.digest ?? null) === (base?.digest ?? null)
+                        && (this.job.provider !== 'google-drive' || (Object.hasOwn(this.resumeSource, 'remoteBase')
+                            && (current?.generation ?? null) === (base?.generation ?? null)));
+                    requireThat(published || unchanged, 'REMOTE_CHANGED', '远端已发布其他数据，请重新预览后推送；不会用旧快照覆盖。');
                     await verify(payload, manifest);
                     frozen = { manifest, metadata: await readJson(path.join(payload, 'environment.json')) };
                 } else {
                     const local = await portableState(this.device);
-                    if (this.job.preview) { await this.write('PREVIEW', { summary: stateDifference(baseline?.local, local), remote: session.hello.current, note: '以当前设备为准更新 VPS；预览不制作停机快照。' }); return; }
+                    if (this.job.preview) { await this.write('PREVIEW', { summary: stateDifference(baseline?.local, local), remote: session.hello.current, note: `以当前设备为准更新${remoteLabel(this.device)}；预览不制作停机快照。` }); return; }
                     const diff = stateDifference(baseline?.local, local);
                     await this.write('PREFLIGHT', { summary: diff });
                     if (!await this.saveAndStop({ skipStop: () => this.skipUnchanged(session, baseline) })) return;
@@ -481,6 +494,14 @@ export class Manager {
                 if (this.pendingSource) {
                     const old = this.pendingSource;
                     const manifest = await readJson(path.join(old.jobRoot, 'manifest.json'));
+                    requireThat(old.connection === connectionId(this.device, old), 'CONFIG_CHANGED', '待应用数据与当前存储或仓库不匹配。');
+                    if (this.job.provider === 'google-drive') {
+                        const record = await readJson(path.join(old.jobRoot, 'download.json'));
+                        requireThat(record.format === 1 && record.provider === 'google-drive' && record.job === old.id
+                            && record.connection === old.connection && record.dataset === remoteDataset(this.device)
+                            && record.generation === old.remote?.generation && record.digest === old.remote?.digest
+                            && record.digest === manifest.digest, 'DOWNLOAD_BINDING', '云盘下载回执与待应用任务、仓库或摘要不匹配。');
+                    }
                     await verify(path.join(old.jobRoot, 'payload'), manifest);
                     await copyTree(path.join(old.jobRoot, 'payload'), payload);
                     downloaded = { generation: old.remote.generation, manifest, stats: old.stats };
@@ -494,7 +515,7 @@ export class Manager {
                 let summary = stateDifference(local, metadata.sourceState);
                 const remote = { generation: downloaded.generation, digest: downloaded.manifest.digest,
                     ...(downloaded.maintenance?.length ? { maintenance: downloaded.maintenance } : {}) };
-                if (this.job.preview) { await this.cache(payload); await this.write('PREVIEW', { summary, remote, note: '以 VPS 为准替换当前设备共享内容；预览未应用。' }); return; }
+                if (this.job.preview) { await this.cache(payload); await this.write('PREVIEW', { summary, remote, note: `以${remoteLabel(this.device)}为准替换当前设备共享内容；预览未应用。` }); return; }
                 if (!this.lifecycle) {
                     await verify(payload, downloaded.manifest); await validateContent(payload, downloaded.manifest);
                     await this.write('PENDING_APPLY', { jobRoot: root, remote, localDigest: local.digest, reason: '当前酒馆未通过受控入口启动。已下载并校验；关闭酒馆后从 TavernSyn 入口启动以继续。' });
@@ -509,8 +530,13 @@ export class Manager {
                     ...(metadata.warnings?.length ? { note: `远端设置含 ${metadata.warnings.length} 个设备绝对路径字段，按现有设备字段保留策略同步。` } : {}) });
                 this.approvedLocal = local.digest;
                 try {
+                    await session?.assertCurrent?.();
                     await this.saveAndStop();
                     requireThat((await portableState(this.device)).digest === this.approvedLocal, 'LOCAL_CHANGED', '应用前共享数据发生变化，保留下载并停止覆盖；请重新发起同步。');
+                    // Dependency preparation and the browser handoff can take
+                    // minutes. A changed cloud publication must not silently
+                    // overwrite this device with the previously downloaded one.
+                    await session?.assertCurrent?.();
                     await retireRecovery(this.device);
                     this.plan = await buildPlan(this.device, prepared, root);
                     await this.write('APPLYING'); await applyPlan(this.device, this.plan);
@@ -538,7 +564,10 @@ export class Manager {
             // A rejected begin never owns a remote job. Preserve the exact frozen snapshot.
             try {
                 if (remoteBegun) await this.write(this.job.phase, { remoteJob: this.job.id,
-                    note: this.job.direction === 'pull'
+                    note: this.job.provider === 'google-drive'
+                        ? this.job.direction === 'pull' ? '云盘下载未完成；暂存数据没有应用。请重新拉取，完整校验后再覆盖。'
+                            : '云盘上传结果尚未确认，已保留完整本机快照。可先核对同步结果，或继续上次上传；后续本机修改留待下次推送。'
+                        : this.job.direction === 'pull'
                         ? '下载任务中断，暂存文件已保留；文件传输进度不代表应用完成。完整下载可校验后继续应用，否则可恢复下载。'
                         : session?.hello.capabilities?.includes('paused-jobs')
                         ? '传输中断，暂存数据已保留。连接结束后 VPS 会释放占用；可继续上次上传，或重新推送最新内容。'

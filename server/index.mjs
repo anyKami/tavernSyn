@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadDevice, uuidPattern } from '../lib/device.mjs';
 import { digest, exists, readJson, requireThat, SyncError } from '../lib/io.mjs';
 import { hashFile, portablePath } from '../lib/manifest.mjs';
-import { connect } from '../helper/transport.mjs';
+import { connect, configuredProvider, remoteLabel } from '../helper/remote-transport.mjs';
 import { Manager } from '../helper/manager.mjs';
 import { configuration, configureDevice, withDeviceLock } from '../lib/connection.mjs';
 import { recoveryStatus } from '../helper/apply.mjs';
@@ -67,7 +67,7 @@ export async function init(router) {
         if (managed) return managed.helper(action, payload);
         if (action === 'configuration') return configuration(device);
         if (action === 'recovery') return recoveryStatus(device);
-        if (action === 'configure') return configureDevice(device, action, payload);
+        if (['configure', 'drive-authorize', 'drive-create', 'drive-join', 'drive-pairing', 'drive-disconnect'].includes(action)) return configureDevice(device, action, payload);
         if (action === 'status') return worker ? workerAction(worker, 'status', {}) : new Manager(device, null).status();
         if (action === 'check') return withDeviceLock(device, async () => { const session = await connect(device); try { return { ok: true, ...session.hello }; } finally { session.control.close(); } });
         if (worker && action === 'cancel') return workerAction(worker, action, payload);
@@ -109,16 +109,21 @@ export async function init(router) {
         catch { historyUnavailable = true; }
         // History is optional bookkeeping. Its I/O failure must not hide a
         // confirmed publish/apply result or prevent its repair button loading.
-        res.json({ ...status, managed: !!managed, deviceName: device.deviceName, host: device.remote?.host ?? '', configured: (await helper('configuration')).configured, epoch: nonce, history, recovery: await helper('recovery'),
+        const config = await helper('configuration');
+        const provider = config.provider ?? configuredProvider(device);
+        res.json({ ...status, managed: !!managed, deviceName: device.deviceName, host: device.remote?.host ?? '',
+            provider, remoteLabel: config.remoteLabel ?? remoteLabel(device), configured: config.configured,
+            capabilities: { scopedSync: provider === 'vps', downloadResume: provider === 'vps' }, epoch: nonce, history, recovery: await helper('recovery'),
             ...(historyUnavailable ? { historyUnavailable: true, ...(status.commit ? { maintenancePending: true,
                 maintenance: { ...status.maintenance, pending: [...new Set([...(status.maintenance?.pending ?? []), 'history'])] } } : {}) } : {}),
             ...(managed?.drain ? { drain: managed.drain.summary() } : {}) });
     }));
     router.post('/check', endpoint(async (_req, res) => res.json(await helper('check'))));
     router.get('/configuration', endpoint(async (_req, res) => res.json(await helper('configuration'))));
-    for (const action of ['configure']) router.post(`/${action}`, endpoint(async (req, res) => {
+    for (const action of ['configure', 'drive-authorize', 'drive-create', 'drive-join', 'drive-pairing', 'drive-disconnect']) router.post(`/${action}`, endpoint(async (req, res) => {
         const result = await helper(action, req.body);
-        if (action === 'configure') device.remote = (await loadDevice(device.state)).remote;
+        const current = await loadDevice(device.state);
+        device.provider = current.provider; device.remote = current.remote; device.drive = current.drive;
         res.json(result);
     }));
     router.post('/tabs', endpoint(async (req, res) => {
@@ -173,7 +178,7 @@ export function waitPage(config) {
 }
 function waitingDocument(config) {
     const base = '/api/plugins/tavernsyn/';
-    const labels = { QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建独立快照', UPLOADING: '正在上传到 VPS', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复更新前的数据', SUCCEEDED: '同步完成', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
+    const labels = { QUIESCING: '正在安全停止酒馆', SNAPSHOT: '正在创建独立快照', UPLOADING: '正在上传同步副本', DOWNLOADING: '正在下载同步副本', APPLYING: '正在应用更新', RESTORING: '正在恢复上一版数据', STARTING: '正在重新启动', ROLLING_BACK: '正在恢复更新前的数据', SUCCEEDED: '同步完成', FAILED: '同步未完成', RECOVERY_REQUIRED: '需要恢复处理' };
     document.getElementById('back').onclick = () => location.replace('/');
     async function poll() {
         try {

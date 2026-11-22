@@ -4,9 +4,9 @@
 
 首版支持固定的 SillyTavern **1.19.0**、Node 20 或更高版本和本机 HTTP 访问（`listen: false`）。默认同步一个管理员用户 `default-user`；其他用户用 `--profile 用户目录名` 明确绑定，不镜像账户数据库。程序核对生命周期源码指纹，版本不匹配就拒绝自动应用。
 
-完整 TavernSyn 仓库统一安装到酒馆的 `plugins/tavernsyn`，与其他服务端插件放在一起；前端界面安装到 `public/scripts/extensions/third-party/tavernsyn`，与其他前端扩展放在一起。设备控制目录独立于酒馆，保存任务、暂存、最新一份覆盖前恢复备份和 SSH 身份，必须与酒馆数据处于同一文件系统，并留足空间。Termux 使用私有 HOME，不放入 `/sdcard`。
+完整 TavernSyn 仓库统一安装到酒馆的 `plugins/tavernsyn`，与其他服务端插件放在一起；前端界面安装到 `public/scripts/extensions/third-party/tavernsyn`，与其他前端扩展放在一起。设备控制目录独立于酒馆，保存任务、暂存、最新一份覆盖前恢复备份和同步凭据，必须与酒馆数据处于同一文件系统，并留足空间。Termux 使用私有 HOME，不放入 `/sdcard`。
 
-安装前正常启动过一次酒馆，确保用户目录存在，然后关闭它。VPS 日常同步通过酒馆界面操作；USB 完整同步使用安装器生成的独立入口，先保存并关闭两端酒馆。仅使用 USB 无需配置 VPS 或 Tailscale，详见 [USB 使用指南](usb-sync.md)。
+安装前正常启动过一次酒馆，确保用户目录存在，然后关闭它。VPS 和 Google 云盘日常同步通过酒馆界面操作；USB 完整同步使用安装器生成的独立入口，先保存并关闭两端酒馆。Google 云盘和 USB 均无需配置 VPS 或 Tailscale，分别见 [Google 云盘指南](google-drive.md)与 [USB 使用指南](usb-sync.md)。
 
 ## Windows
 
@@ -85,13 +85,35 @@ bash "$TMPDIR/tavernsyn-install.sh" "$HOME/SillyTavern"
 
 ## 启用 USB 完整同步
 
-两端更新到同一版 0.3.0 后，分别重新运行安装器，生成上述 USB 入口；已有自定义控制目录必须继续指定原目录。源码版本尚未发布为稳定标签时，启动器的标签更新检查不会自动取得该功能，应手动更新仓库再安装。不要移动旧稳定标签。
+两端更新到同一版 0.3.0 或更新版本后，分别重新运行安装器，生成上述 USB 入口；已有自定义控制目录必须继续指定原目录。源码版本尚未发布为稳定标签时，启动器的标签更新检查不会自动取得该版本，应手动更新仓库再安装。不要移动旧稳定标签。
 
 电脑额外安装官方 [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools)，手机启用开发者选项中的 USB 调试并授权电脑。TavernSyn 安装器不下载 ADB，USB 入口可交互填写 `adb.exe` 的完整路径。无需为 USB 配置 SSH 账号、VPS 或 Tailscale。
 
 每次先保存并正常关闭两端酒馆及启动器，手机运行酒馆目录的 `bash usb-tavernsyn.sh`，电脑运行 `USB-TavernSyn.cmd`。输入手机显示的本次配对码和覆盖方向，核对设备名称后输入 `YES`。完成后通过平时入口启动酒馆。完整命令、多设备与端口选项见 [USB 使用指南](usb-sync.md)。
 
 USB 数据不经互联网中转，但目标插件依赖恢复可能仍需 npm 缓存或网络。两端酒馆核心和 Node 环境不由 USB 同步安装。
+
+## 启用 Google 云盘仓库
+
+两端更新到 0.4.0 或更新版本，使用平时的 TavernSyn 受控入口启动。在「扩展设置 → TavernSyn 跨设备同步 → 设置与检查 · 同步仓库」选择 **Google 云盘**。
+
+先在自己的 Google Cloud 项目启用 Drive API，并创建 Desktop app OAuth 客户端。两端填写同一组客户端 ID / 客户端密钥，保存后分别授权同一个 Google 账号。第一台设备创建新仓库并保管配对码；第二台设备粘贴配对码加入已有仓库。检查连接后，先从内容完整的设备推送，再从另一设备拉取。
+
+Google 云盘使用完整压缩加密快照，保存和受控重启过程与完整 VPS 同步一致。云端确认新发布后删除旧快照，本机应用前轮换恢复备份；小型提交元数据保留用于判断版本与并发。当前不支持分类或 rsync 增量同步。OAuth 应用配置、Termux 授权、配对码保管及故障处理见 [Google 云盘指南](google-drive.md)。
+
+只使用 Google 云盘的新安装，可以在已具备 Node.js 20+、Git 和完整 TavernSyn 仓库的情况下，直接运行下面的 Node 安装入口，跳过 SSH/rsync 运行库准备：
+
+```powershell
+node bin/setup-device.mjs --st "D:\SillyTavern" --provider google-drive
+```
+
+Termux 对应命令：
+
+```sh
+node bin/setup-device.mjs --st "$HOME/SillyTavern" --provider google-drive
+```
+
+从 TavernSyn 仓库目录执行。已有自定义控制目录时增加 `--state 原控制目录`，不要生成第二套设备状态。常规 `install.ps1` / `install.sh` 仍可使用；它们默认兼容 VPS 安装流程，可能额外准备 SSH/rsync。之后若切换到 VPS，需要准备其对应运行库。
 
 ## 新建 VPS 同步存储
 
@@ -135,7 +157,7 @@ sudo python3 vps/update.py --root /srv/tavernsyn-sync --account tavernsyn --data
 
 ## 在酒馆中配置 VPS
 
-从 `Start-TavernSyn.cmd` / `start-tavernsyn.sh` 启动酒馆，进入 **扩展设置 → TavernSyn 跨设备同步 → 设置与检查 · VPS 配置**。
+从 `Start-TavernSyn.cmd` / `start-tavernsyn.sh` 启动酒馆，进入 **扩展设置 → TavernSyn 跨设备同步 → 设置与检查 · 同步仓库**，选择 **VPS**。
 
 1. 填写 VPS 的 Tailscale 地址、账号（默认 `tavernsyn`）和密码。
 2. 点击「保存配置」，再点击「检查连接」。首次连接会自动识别数据集并保存。
@@ -164,7 +186,7 @@ node bin/configure.mjs --state "D:/TavernSyn-device" --host 100.100.100.100 --us
 
 保存回执和页面交接自动完成，仍有 10 分钟超时用于检测页面无响应。准备完成后会重新核对本机内容，保存交接期间共享内容再次变化仍会停止覆盖并保留下载。
 
-同步成功后可在目标设备点击「恢复上一版」，恢复到最近一次实际覆盖前的数据。每台设备只保留这一份，USB 接收和 VPS 拉取共用；下一次实际应用时替换旧备份。VPS 推送、预览或无变化检查不会删除本机有效备份，没有副本或未受控启动时恢复按钮禁用。失败任务仍保留恢复所需数据。详见[恢复说明](recovery.md)。
+同步成功后可在目标设备点击「恢复上一版」，恢复到最近一次实际覆盖前的数据。每台设备只保留这一份，USB 接收、Google 云盘拉取和 VPS 拉取共用；下一次实际应用时替换旧备份。推送、预览或无变化检查不会删除本机有效备份，没有副本或未受控启动时恢复按钮禁用。失败任务仍保留恢复所需数据。详见[恢复说明](recovery.md)。
 
 ## 更新与卸载
 

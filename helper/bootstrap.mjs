@@ -28,7 +28,10 @@ const runtime = globalThis.tavernsynRuntime = { device, nonce, state, drain, plu
     helper(action, payload = {}) {
         const id = randomUUID();
         return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => { pending.delete(id); reject(new Error('启动器未响应。')); }, 30000);
+            // Repository creation/join verifies several cloud objects and may
+            // encounter API backoff. Authorization itself returns a URL promptly.
+            const timeout = ['drive-create', 'drive-join'].includes(action) ? 180000 : 30000;
+            const timer = setTimeout(() => { pending.delete(id); reject(new Error('启动器未响应。')); }, timeout);
             pending.set(id, { resolve, reject, timer });
             process.send({ channel: 'tavernsyn', type: 'request', nonce, id, action, payload });
         });

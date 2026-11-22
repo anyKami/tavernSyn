@@ -21,6 +21,7 @@ async function windowsTools(directory) {
 export async function setupDevice(options) {
     requireThat(Number(process.versions.node.split('.')[0]) >= 20, 'NODE', '需要 Node.js 20 或以上版本。');
     requireThat(options.st, 'INSTALL', '请指定酒馆目录。');
+    requireThat(options.provider === undefined || ['vps', 'google-drive'].includes(options.provider), 'CONFIG', '--provider 仅支持 vps 或 google-drive。');
     const st = await noLinks(path.resolve(options.st));
     const state = await noLinks(path.resolve(options.state ?? path.join(path.dirname(st), `.tavernsyn-${path.basename(st)}`)));
     requireThat(!inside(st, state, true) && !inside(state, st, true) && !inside(PROJECT, state, true) && !inside(state, PROJECT, true), 'INSTALL', '设备控制目录必须独立于酒馆和同步插件仓库。');
@@ -48,7 +49,13 @@ export async function setupDevice(options) {
     console.log('正在安装 TavernSyn 前后端和启动入口…');
     const installed = await install({ st, state, repository, profile: options.profile ?? previous?.profile ?? 'default-user' });
     const device = await loadDevice(state);
-    if (process.platform === 'win32') {
+    if (options.provider) {
+        const saved = await readJson(savedFile); saved.provider = options.provider;
+        await atomicJson(savedFile, saved); device.provider = options.provider;
+    }
+    if (device.provider === 'google-drive') {
+        console.log('Google 云盘同步使用 Node.js，无需安装 SSH/rsync 运行库。');
+    } else if (process.platform === 'win32') {
         let tools = !options.runtime && await windowsTools(path.dirname(device.tools?.ssh ?? ''));
         if (!tools) {
             const runtime = path.resolve(options.runtime ?? path.join(path.dirname(state), `.tavernsyn-runtime-${path.basename(st)}`));
@@ -70,6 +77,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     setupDevice(cliOptions()).then(result => {
         console.log(`\n安装完成。\n代码目录：${result.repository}\n启动入口：${result.launcher}\n设备控制目录：${result.state}\n设备 ID：${result.deviceId}\n`);
         if (result.repositoryBackup) console.log(`原代码备份：${result.repositoryBackup}`);
-        console.log(result.configured ? '已有 VPS 配置和账号密码已保留。' : '请从酒馆「扩展设置 → TavernSyn」填写 VPS 地址、同步账号和密码，再检查连接。');
+        console.log(result.configured ? '已有同步存储配置已保留。' : '请从酒馆「扩展设置 → TavernSyn」选择 VPS 或 Google 云盘，完成配置并检查连接。');
     }).catch(error => { console.error(`安装失败：${error.message}`); process.exitCode = 1; });
 }

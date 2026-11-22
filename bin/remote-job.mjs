@@ -7,19 +7,21 @@ import { verify } from '../lib/manifest.mjs';
 import { connect, push, pull } from '../helper/transport.mjs';
 import { Manager } from '../helper/manager.mjs';
 import { loadDownloadBinding } from '../helper/download-binding.mjs';
-import { connectionId } from '../lib/completion.mjs';
+import { connectionId, configuredProvider } from '../lib/completion.mjs';
 import { sameScope } from '../lib/scope.mjs';
 
 let lock, handle, session;
 try {
     const options = cliOptions(), device = await loadDevice(options.state);
+    requireThat(configuredProvider(device) === 'vps', 'UNSUPPORTED_PROVIDER', '此工具只处理 VPS 暂存任务；Google 云盘请在酒馆中核对同步结果或继续上次上传，部分下载请重新拉取。');
     requireThat(uuidPattern.test(options.job) && ['resume', 'abort'].includes(options.action), 'INPUT', '使用 --job 任务UUID --action resume 或 abort。');
     const statusFile = path.join(device.state, 'status.json'), latest = await readJson(statusFile);
     const root = path.join(device.state, 'jobs', options.job), payload = path.join(root, 'payload');
     const status = latest.id === options.job ? latest : await readJson(path.join(root, 'job.json'));
     requireThat(status.id === options.job && ['FAILED', 'PENDING_APPLY'].includes(status.phase)
         && (latest.id === options.job || ['FAILED', 'SUCCEEDED', 'PREVIEW', 'IDLE'].includes(latest.phase)), 'JOB', '只能处理本机记录的失败或待应用任务。');
-    const connection = connectionId(device);
+    requireThat((status.provider ?? 'vps') === 'vps' && status.transport !== 'usb', 'CONFIG_CHANGED', '旧任务不属于 VPS，未执行远端操作。');
+    const connection = connectionId(device, status);
     requireThat((status.connection && status.connection === connection) || (latest.id === options.job && !status.connection),
         'CONFIG_CHANGED', '旧任务缺少连接绑定或目标已改变，未执行远端操作。');
     lock = path.join(device.state, 'operation.lock'); handle = await fs.open(lock, 'wx', 0o600);

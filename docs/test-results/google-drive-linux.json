@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-22T10:37:21.011Z",
+  "platform": "linux",
+  "node": "v24.22.3",
+  "sillyTavern": "1.19.0",
+  "commit": "06bde939fb1e9c4c8d8641d810f0a916b5bce127",
+  "passed": true,
+  "checks": [
+    "production_google_transport_compressed_encrypted_chunked_publication_over_fake_http",
+    "computer_to_phone_complete_mirror_deletions_secrets_local_fields_and_real_st_plugin_health",
+    "latest_phone_backup_restored_through_manager_with_real_shutdown_restart_and_health",
+    "second_publication_deletes_only_old_owned_payload_and_preserves_commit_metadata_and_foreign_file",
+    "phone_to_computer_complete_mirror_with_real_st_save_handoff_stop_start_and_health",
+    "latest_computer_backup_restored_without_changing_cloud_publication",
+    "eight_actual_pinned_st_startups_and_final_graceful_shutdown_leave_no_instance_lock"
+  ],
+  "actualSillyTavern": true,
+  "driveService": "in-memory HTTP contract fake",
+  "realGoogleAccount": false,
+  "realGoogleOAuth": false,
+  "physicalWindowsAndroidDevices": false,
+  "actualServerStartups": 8,
+  "note": "Production Drive API/repository/encryption/transport and real SillyTavern HTTP save/flush/controlled lifecycle; no live Google account or hardware test."
+}
