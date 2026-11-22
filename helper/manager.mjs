@@ -67,10 +67,12 @@ export class Manager {
         this.writeQueue = this.writeQueue.catch(() => {}).then(() => atomicJson(path.join(this.device.state, 'status.json'), snapshot));
         try { await this.writeQueue; this.statusWriteFailed = false; }
         catch (error) { this.statusWriteFailed = true; throw error; }
-        if (phase !== oldPhase) { if (oldPhase) this.log(`阶段 ${PHASES[oldPhase] ?? oldPhase} 耗时 ${Math.round((Date.now() - this.phaseStarted) / 1000)} 秒`); this.phaseStarted = Date.now(); this.log(`阶段：${PHASES[phase] ?? phase} (${phase})`); }
+        const phaseLabel = value => this.job.transport === 'usb' && ['UPLOADING', 'DOWNLOADING'].includes(value)
+            ? (value === 'UPLOADING' ? '通过 USB 发送' : '通过 USB 接收') : PHASES[value] ?? value;
+        if (phase !== oldPhase) { if (oldPhase) this.log(`阶段 ${phaseLabel(oldPhase)} 耗时 ${Math.round((Date.now() - this.phaseStarted) / 1000)} 秒`); this.phaseStarted = Date.now(); this.log(`阶段：${phaseLabel(phase)} (${phase})`); }
         if (fields.files !== undefined) this.log(`快照：${fields.files} 个文件，${fields.bytes ?? 0} 字节`);
         if (fields.summary) this.log(`文件差异：新增 ${fields.summary.added}，修改 ${fields.summary.changed}，删除 ${fields.summary.deleted}`);
-        if (fields.remote?.generation) this.log(`VPS 代次：${fields.remote.generation}；SHA-256：${fields.remote.digest}`);
+        if (fields.remote?.generation) this.log(`${this.job.transport === 'usb' ? 'USB 快照' : 'VPS 代次'}：${fields.remote.generation}；SHA-256：${fields.remote.digest}`);
         if (fields.stats && Number.isFinite(fields.stats.sentBytes)) this.log(`传输统计：发送 ${fields.stats.sentBytes} 字节，接收 ${fields.stats.receivedBytes} 字节，新增内容 ${fields.stats.literalBytes} 字节，复用内容 ${fields.stats.matchedBytes ?? 0} 字节`);
         if (fields.note && fields.note !== oldNote) this.log(fields.note);
         if (fields.error) this.log(`错误 [${fields.error.code}]：${fields.error.message}`);
@@ -154,6 +156,9 @@ export class Manager {
             timeout = setTimeout(() => { delete this.wake[name]; reject(new SyncError('USER_TIMEOUT', '等待保存或页面交接超时；未替换数据。')); }, 10 * 60 * 1000);
             this.wake[name] = error => { clearTimeout(timeout); delete this.wake[name]; if (error) reject(error); else resolve(); };
         });
+        // A browser can cancel after the phase is visible but before its fsync
+        // finishes. Handle that rejection immediately; await below still throws it.
+        promise.catch(() => {});
         try { await this.write(phase, fields); await promise; }
         finally { clearTimeout(timeout); delete this.wake[name]; }
     }
@@ -223,10 +228,21 @@ export class Manager {
         }
     }
     async cleanupCompleted(outcome) {
-        // Keep the latest transfer cache and the small, durable receipt.
-        await retireRecovery(this.device);
+        // Keep exactly the latest committed pre-apply recovery point. It is
+        // retired immediately before the next replacement, never by a push or
+        // an unchanged check. A completed restore has consumed its backup.
+        const applyFile = path.join(this.device.state, 'apply.json');
+        const journal = await exists(applyFile) ? await readJson(applyFile) : null;
+        if (journal?.phase === 'rolled-back') await retireRecovery(this.device);
+        else if (journal) {
+            requireThat(journal.phase === 'committed', 'RECOVERY_REQUIRED', '上次应用尚未完成，保留全部恢复数据。');
+            await validatePlan(this.device, journal);
+        }
         const root = path.dirname(completionPath(this.device, outcome.id));
-        for (const name of ['payload', 'candidate']) await removeOwned(root, path.join(root, name));
+        await removeOwned(root, path.join(root, 'payload'));
+        // Applied roots have moved out of candidate. Keep its small metadata
+        // and empty parent directories: rollback moves the live roots here.
+        if (journal?.phase !== 'committed' || journal.jobRoot !== root) await removeOwned(root, path.join(root, 'candidate'));
         await this.pruneCompleted();
     }
     reportTransfer = async transferPlan => {
@@ -314,7 +330,7 @@ export class Manager {
             if (outcome.kind === 'restored') { if (await exists(file)) await fs.unlink(file); }
             else await atomicJson(file, { connection: this.connectionId(), local: outcome.localState, remote: outcome.remote, direction: this.job.direction, at: outcome.completedAt });
         });
-        // Discard recovery data only once all completion records are durable.
+        // Clean transfer staging only once all completion records are durable.
         if (!pending.length) await attempt('cleanup', () => this.cleanupCompleted(outcome));
         const completed = completedStatus(outcome, pending);
         this.job.commit = completed.commit;
@@ -385,12 +401,12 @@ export class Manager {
         await this.success(local, latest.current, { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 }, { noChanges: true });
         return true;
     }
-    connectionId() { return connectionId(this.device); }
+    connectionId() { return connectionId(this.device, this.job); }
     async restore() {
-        requireThat((await recoveryStatus(this.device)).available, 'NO_RECOVERY', '没有可用的上一版恢复副本；同步成功后会自动删除备份。');
+        requireThat((await recoveryStatus(this.device)).available, 'NO_RECOVERY', '没有可用的上一版恢复副本；应用更新后只保留最近一次覆盖前的备份。');
         const file = path.join(this.device.state, 'apply.json'), journal = await readJson(file), journalDigest = digest(journal);
         const approved = (await portableState(this.device)).digest;
-        await this.write('PREPARING', { note: '准备恢复到最近一次拉取前的本机数据。' });
+        await this.write('PREPARING', { note: '准备恢复到最近一次覆盖前的本机数据。' });
         try {
             await this.saveAndStop();
             requireThat((await portableState(this.device)).digest === approved, 'LOCAL_CHANGED', '确认后本机数据发生变化，未恢复上一版。');

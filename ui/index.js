@@ -65,6 +65,11 @@ root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle in
 <div class="ts-scope-previews"><button type="button" class="menu_button ts-preview-scoped-push">预览分类推送</button><button type="button" class="menu_button ts-preview-scoped-pull">预览分类拉取</button></div>
 <small>所选类别以来源为准，接收端多出的文件会删除；其他类别、配置和插件保持不变。首次使用需先在 VPS 建立一次完整副本。</small></fieldset>
 <button type="button" class="menu_button ts-restore" disabled>恢复上一版</button><small class="ts-recovery"></small>
+<details class="ts-usb"><summary>USB 数据线完整同步</summary>
+<p>两端更新后重新运行安装器。先保存并正常关闭两端酒馆及启动器，手机通过 USB 连接电脑并允许 USB 调试；手机运行酒馆目录中的 usb-tavernsyn.sh，电脑运行 USB-TavernSyn.cmd。</p>
+<p>电脑输入 ADB 路径、手机本次配对码和覆盖方向，核对双方设备名称后输入 YES。目标完整镜像来源，包含删除；不需要 VPS。目标保留一份最新的覆盖前备份，完成后使用平时入口启动酒馆。</p>
+<p>电脑需安装 Android SDK Platform-Tools。USB 传输完整快照；插件依赖恢复可能仍需 npm 缓存或网络。</p>
+<a href="https://github.com/anyKami/tavernSyn/blob/main/docs/usb-sync.md" target="_blank" rel="noopener noreferrer">查看 USB 使用指南</a></details>
 <p class="ts-detail"></p><small class="ts-history"></small><details class="ts-settings"><summary>设置与检查 · VPS 配置</summary>
 <form class="ts-config"><fieldset disabled><legend>VPS 连接</legend>
 <label>VPS 地址<input class="text_pole" name="host" required maxlength="253" placeholder="100.100.100.100 或设备的完整 .ts.net 域名" autocomplete="off" spellcheck="false"></label>
@@ -97,9 +102,9 @@ function confirmDirection(direction, scope = null) {
     directionDialog.querySelector('h3').textContent = resume ? '继续上次上传' : restore ? '确认恢复上一版' : push ? '确认推送到 VPS' : '确认从 VPS 拉取';
     directionDialog.querySelector('.ts-detail').textContent = resume
         ? '将继续上传上次已保存的快照，复用 VPS 暂存文件。快照之后的新聊天和修改留待下次推送。是否继续？' : restore
-        ? '将恢复到最近一次拉取前的本机配置、插件和用户数据，替换此后的本机改动。VPS 副本不会改变。本次恢复副本使用后将不再保留。是否继续？' : push
+        ? '将恢复到最近一次覆盖前的本机配置、插件和用户数据，替换此后的本机改动。另一台设备和 VPS 副本不会改变。本次恢复副本使用后将不再保留。是否继续？' : push
         ? '将以本机已保存的内容更新 VPS 同步副本，VPS 原有的共享数据可能被替换。是否继续？'
-        : '将以 VPS 同步副本更新本机，覆盖本机的共享配置、插件和用户数据。恢复副本将在成功后自动删除。是否继续？';
+        : '将以 VPS 同步副本更新本机，覆盖本机的共享配置、插件和用户数据。应用前替换旧备份，成功后保留一份本次覆盖前的恢复备份。是否继续？';
     directionDialog.querySelector('.ts-accept').textContent = resume ? '继续上传' : restore ? '确认恢复' : push ? '确认推送' : '确认拉取';
     if (scope) {
         directionDialog.querySelector('h3').textContent = push ? '确认分类推送' : '确认分类拉取';
@@ -131,8 +136,8 @@ function render() {
     text('.ts-detail', detail);
     const when = value => value ? new Date(value).toLocaleString() : '尚无';
     text('.ts-history', `最近推送：${when(status.history?.push)}\n最近拉取：${when(status.history?.pull)}\n最近恢复：${when(status.history?.restore)}`);
-    text('.ts-recovery', status.recovery?.available ? `可恢复到 ${when(status.recovery.created)} 拉取前的本机数据。`
-        : status.recovery?.reason || '暂无可用恢复副本；同步成功后自动删除备份。');
+    text('.ts-recovery', status.recovery?.available ? `可恢复到 ${when(status.recovery.created)} 覆盖前的本机数据；下次实际覆盖时替换此备份。`
+        : status.recovery?.reason || '暂无可用恢复备份；本机应用后保留最新一份覆盖前备份。');
     dialog.querySelector('.ts-cancel').hidden = !['AWAITING_SAVE', 'WAITING_PAGE'].includes(status.phase);
     const terminal = ['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED', 'PENDING_APPLY', 'RECOVERY_REQUIRED'].includes(status.phase);
     for (const button of root.querySelectorAll('button')) button.disabled = !terminal || starting || setupBusy;

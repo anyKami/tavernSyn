@@ -4,9 +4,9 @@
 
 首版支持固定的 SillyTavern **1.19.0**、Node 20 或更高版本和本机 HTTP 访问（`listen: false`）。默认同步一个管理员用户 `default-user`；其他用户用 `--profile 用户目录名` 明确绑定，不镜像账户数据库。程序核对生命周期源码指纹，版本不匹配就拒绝自动应用。
 
-完整 TavernSyn 仓库统一安装到酒馆的 `plugins/tavernsyn`，与其他服务端插件放在一起；前端界面安装到 `public/scripts/extensions/third-party/tavernsyn`，与其他前端扩展放在一起。设备控制目录独立于酒馆，保存任务、暂存、一次恢复和 SSH 身份，必须与酒馆数据处于同一文件系统，并留足空间。Termux 使用私有 HOME，不放入 `/sdcard`。
+完整 TavernSyn 仓库统一安装到酒馆的 `plugins/tavernsyn`，与其他服务端插件放在一起；前端界面安装到 `public/scripts/extensions/third-party/tavernsyn`，与其他前端扩展放在一起。设备控制目录独立于酒馆，保存任务、暂存、最新一份覆盖前恢复备份和 SSH 身份，必须与酒馆数据处于同一文件系统，并留足空间。Termux 使用私有 HOME，不放入 `/sdcard`。
 
-安装前正常启动过一次酒馆，确保用户目录存在，然后关闭它。初始安装需要终端，日常同步通过界面操作。
+安装前正常启动过一次酒馆，确保用户目录存在，然后关闭它。VPS 日常同步通过酒馆界面操作；USB 完整同步使用安装器生成的独立入口，先保存并关闭两端酒馆。仅使用 USB 无需配置 VPS 或 Tailscale，详见 [USB 使用指南](usb-sync.md)。
 
 ## Windows
 
@@ -32,7 +32,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer -SillyTavernPath 
 
 设备控制目录默认在酒馆同级的 `.tavernsyn-酒馆目录名`，运行库在同级 `.tavernsyn-runtime-酒馆目录名`。需要复用原自定义路径时增加 `-StatePath "D:\TavernSyn-device"`；已有官方 MSYS2 可用 `-RuntimePath "C:\msys64"`，也可用 `-Profile 用户目录名`。原先的 `node bin/install.mjs` 和 `node bin/windows-runtime.mjs` 命令仍可用于手动安装。
 
-安装器备份 `config.yaml`，只启用服务端插件并安装自己的前后端入口，生成 `Start-TavernSyn.cmd`，保留原启动脚本。设备控制目录 ACL 仅允许当前用户、SYSTEM 和管理员访问。重新运行保留设备 ID、账号密码和 VPS 配置；发现运行中的实例、端口占用或待处理同步任务会停止安装。
+安装器备份 `config.yaml`，只启用服务端插件并安装自己的前后端入口，生成 `Start-TavernSyn.cmd` 和 `USB-TavernSyn.cmd`，保留原启动脚本。设备控制目录 ACL 仅允许当前用户、SYSTEM 和管理员访问。重新运行保留设备 ID、账号密码和 VPS 配置；发现运行中的实例、端口占用或待处理同步任务会停止安装。
 
 双击 `Start-TavernSyn.cmd` 后，先检查 GitHub 的 `vX.Y.Z` 稳定版本标签；有更高版本时更新本机 TavernSyn 后端及配套前端，再启动酒馆。酒馆通过健康检查后自动打开浏览器；同步过程中的受控重启不会重复开网页。独立的 `TavernSyn-Startup.mjs` 放在酒馆根目录，重新安装时会同时生成，避免只更新前端而后端仍使用旧版本。
 
@@ -54,7 +54,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer -SillyTavernPath 
 
 ## Android Termux
 
-从 [Termux 官方渠道](https://github.com/termux/termux-app#installation)安装，准备 Tailscale，正常安装并首次启动本机酒馆，然后关闭酒馆：
+从 [Termux 官方渠道](https://github.com/termux/termux-app#installation)安装；使用 VPS 同步时准备 Tailscale。正常安装并首次启动本机酒馆，然后关闭酒馆：
 
 ```sh
 cd "$HOME/SillyTavern/plugins/tavernsyn"
@@ -75,13 +75,23 @@ curl -fL https://raw.githubusercontent.com/anyKami/tavernSyn/main/install.sh -o 
 bash "$TMPDIR/tavernsyn-install.sh" "$HOME/SillyTavern"
 ```
 
-安装结束后运行显示的 `start-tavernsyn.sh`，使用与 Windows 相同的稳定版本检查、代码更新和受控启动流程，并在健康检查通过后打开浏览器。`bash start-tavernsyn.sh --skip-update` 可跳过本次版本检查。可将入口用于 Termux:Widget；关闭启动会话或使用 Termux 的 Exit 会停止所属酒馆，切到浏览器时保持运行。
+安装结束后运行显示的 `start-tavernsyn.sh`，使用与 Windows 相同的稳定版本检查、代码更新和受控启动流程，并在健康检查通过后打开浏览器。`bash start-tavernsyn.sh --skip-update` 可跳过本次版本检查。可将入口用于 Termux:Widget；关闭启动会话或使用 Termux 的 Exit 会停止所属酒馆，切到浏览器时保持运行。另生成 `usb-tavernsyn.sh`，供关闭酒馆后等待电脑经 USB 连接。
 
 安装器会检查 `$HOME/install.sh`。发现兼容的 **ClewdR & SillyTavern 管理工具** 时，自动将选项 **4** 接到此入口，保留 ClewdR 及其他菜单操作；重复安装会更新同一段集成代码。识别到原管理工具的自动下载 `.bashrc` 行时，会改为优先运行本地已集成的工具，避免登录时被下载覆盖。未安装该工具或菜单格式无法识别时保留原文件，使用独立启动脚本即可。
 
 此前已验证 Android 真机的受控拉取、重启及 Exit 行为；本次启动自更新与安装时集成另有隔离回归检查。Android 系统可能回收后台进程，仍需依靠日志恢复；唤醒锁不构成存活保证。
 
 安装器会寻找系统 npm 的 JS 入口；若依赖恢复提示缺少 npm，在设备配置设置 `npmCli`，Termux 通常是 `$PREFIX/lib/node_modules/npm/bin/npm-cli.js`。
+
+## 启用 USB 完整同步
+
+两端更新到同一版 0.3.0 后，分别重新运行安装器，生成上述 USB 入口；已有自定义控制目录必须继续指定原目录。源码版本尚未发布为稳定标签时，启动器的标签更新检查不会自动取得该功能，应手动更新仓库再安装。不要移动旧稳定标签。
+
+电脑额外安装官方 [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools)，手机启用开发者选项中的 USB 调试并授权电脑。TavernSyn 安装器不下载 ADB，USB 入口可交互填写 `adb.exe` 的完整路径。无需为 USB 配置 SSH 账号、VPS 或 Tailscale。
+
+每次先保存并正常关闭两端酒馆及启动器，手机运行酒馆目录的 `bash usb-tavernsyn.sh`，电脑运行 `USB-TavernSyn.cmd`。输入手机显示的本次配对码和覆盖方向，核对设备名称后输入 `YES`。完成后通过平时入口启动酒馆。完整命令、多设备与端口选项见 [USB 使用指南](usb-sync.md)。
+
+USB 数据不经互联网中转，但目标插件依赖恢复可能仍需 npm 缓存或网络。两端酒馆核心和 Node 环境不由 USB 同步安装。
 
 ## 新建 VPS 同步存储
 
@@ -140,9 +150,9 @@ sudo python3 vps/update.py --root /srv/tavernsyn-sync --account tavernsyn --data
 node bin/configure.mjs --state "D:/TavernSyn-device" --host 100.100.100.100 --user tavernsyn
 ```
 
-## 第一次同步
+## 第一次 VPS 同步
 
-从生成的 TavernSyn 入口启动，在扩展设置中检查连接。先用保留完整内容的设备推送，再到另一设备拉取。推送和拉取均只在点击按钮后确认一次，首次同步也一样；应用时建立临时恢复副本，重启健康检查及完成记录写入成功后自动删除。
+从生成的 TavernSyn 入口启动，在扩展设置中检查连接。先用保留完整内容的设备推送，再到另一设备拉取。推送和拉取均只在点击按钮后确认一次，首次同步也一样；目标应用前清理旧的已完成恢复备份，再建立本次覆盖前备份，健康检查及完成记录写入成功后保留这一份最新备份。
 
 启动终端会实时显示酒馆和服务端插件的标准输出、错误与启动日志；受控重启后继续显示。同时保留设备控制目录中的 `server.log`，供排查历史错误。Windows 启动失败时窗口会暂停，便于读取报错。
 
@@ -154,7 +164,7 @@ node bin/configure.mjs --state "D:/TavernSyn-device" --host 100.100.100.100 --us
 
 保存回执和页面交接自动完成，仍有 10 分钟超时用于检测页面无响应。准备完成后会重新核对本机内容，保存交接期间共享内容再次变化仍会停止覆盖并保留下载。
 
-同步成功后不保留手动恢复副本。「恢复上一版」仅供处理旧版本遗留、尚未清理的副本，没有副本或未受控启动时禁用。失败任务仍保留恢复所需数据。详见[恢复说明](recovery.md)。
+同步成功后可在目标设备点击「恢复上一版」，恢复到最近一次实际覆盖前的数据。每台设备只保留这一份，USB 接收和 VPS 拉取共用；下一次实际应用时替换旧备份。VPS 推送、预览或无变化检查不会删除本机有效备份，没有副本或未受控启动时恢复按钮禁用。失败任务仍保留恢复所需数据。详见[恢复说明](recovery.md)。
 
 ## 更新与卸载
 

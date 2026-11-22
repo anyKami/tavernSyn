@@ -36,8 +36,10 @@ test('cleanup failure preserves success and recovery, then reconciliation retrie
     assert.equal(await exists(path.join(device.state, 'recovery')), true);
     manager.cleanupCompleted = cleanup; manager.transport = noRemote;
     assert.equal((await manager.action('reconcile', { id: status.id })).maintenancePending, false);
-    assert.equal(await exists(path.join(device.state, 'recovery')), false);
-    assert.equal(await exists(path.join(device.state, 'jobs', status.id, 'candidate')), false);
+    assert.equal(await exists(path.join(device.state, 'recovery')), true);
+    assert.equal((await readJson(path.join(device.state, 'apply.json'))).phase, 'committed');
+    assert.equal(await exists(path.join(device.state, 'jobs', status.id, 'candidate')), true);
+    assert.equal(await exists(path.join(device.state, 'jobs', status.id, 'payload')), false);
 });
 
 test('a published push survives cache ENOSPC and repairs maintenance without another transfer', async () => {

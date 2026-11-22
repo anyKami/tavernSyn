@@ -1,0 +1,41 @@
+{
+  "date": "2026-11-22T01:57:19.194Z",
+  "platform": "linux",
+  "node": "v24.22.3",
+  "sillyTavern": "1.19.0",
+  "commit": "06bde939fb1e9c4c8d8641d810f0a916b5bce127",
+  "passed": true,
+  "checks": [
+    "computer_to_phone_real_http_full_mirror_and_actual_st_health",
+    "usb_backup_restores_original_target",
+    "phone_to_computer_real_http_full_mirror_and_actual_st_health",
+    "both_directions_preserve_local_fields_and_recover_latest_backup"
+  ],
+  "hardwareUsb": false,
+  "note": "Real loopback HTTP and actual SillyTavern lifecycle; ADB and physical Windows/Android hardware not exercised.",
+  "tavernSynVersion": "0.3.0",
+  "baseCommit": "26216bbec9753043ebd6e8ca2506ac101d1bf73f",
+  "nodeTests": {
+    "total": 280,
+    "passed": 277,
+    "skipped": 3,
+    "failed": 0,
+    "skips": "Existing Windows-specific tests on Linux"
+  },
+  "usbTests": {
+    "total": 53,
+    "passed": 53,
+    "failed": 0
+  },
+  "pythonVpsTests": {
+    "passed": 40,
+    "failed": 0
+  },
+  "rsyncChecks": 8,
+  "existingSillyTavernIntegrationChecks": 32,
+  "limitations": [
+    "No physical Windows-to-Android USB cable or Android/Termux hardware available.",
+    "ADB executable selection and forwarding ownership tested with controlled subprocess fixtures.",
+    "Real HTTP loopback and actual pinned SillyTavern processes tested in both directions with synthetic data."
+  ]
+}

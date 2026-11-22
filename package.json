@@ -1,6 +1,6 @@
 {
   "name": "tavernsyn",
-  "version": "0.2.14",
+  "version": "0.3.0",
   "private": true,
   "description": "SillyTavern 跨设备同步：受控重启、校验镜像和设备配置保留",
   "type": "module",
@@ -12,7 +12,10 @@
     "install:device": "node bin/install.mjs",
     "setup:device": "node bin/setup-device.mjs",
     "start": "node helper/launcher.mjs",
-    "verify:restart": "node probes/restart-probe.mjs"
+    "verify:restart": "node probes/restart-probe.mjs",
+    "sync:usb": "node bin/usb.mjs",
+    "test:usb": "node --test tests/usb*.test.mjs",
+    "test:usb:integration": "node tests/usb-integration.mjs"
   },
   "engines": {
     "node": ">=20"

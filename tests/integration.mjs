@@ -459,20 +459,21 @@ try {
     checks.push('Legacy SSH failure after complete download: offline SHA-256 recovery, original-generation automatic continuation, real ST same-port restart and successful application without reconnecting');
     checks.push('Automatic save binds the handoff to its current page and refuses another still-active TavernSyn tab');
     assert.equal(await exists(path.join(fixture, 'data/default-user/worlds/local-only.json')), false);
-    assert.equal((await readJson(path.join(state, 'last-apply.json'))).phase, 'committed');
-    assert.equal(await exists(path.join(state, 'recovery')), false);
-    assert.equal(await exists(path.join(state, 'jobs', manager.job.id, 'candidate')), false);
+    assert.equal((await readJson(path.join(state, 'apply.json'))).phase, 'committed');
+    assert.equal(await exists(path.join(state, 'recovery')), true);
+    assert.equal(await exists(path.join(state, 'jobs', manager.job.id, 'candidate')), true);
+    assert.equal(await exists(path.join(state, 'jobs', manager.job.id, 'payload')), false);
     assert.ok(await exists(path.join(state, 'jobs', manager.job.id, 'outcome.json')));
-    checks.push('Protected plugin pull: verified stage, automatic overwrite, owned stop, journal apply, healthy restart and automatic recovery cleanup after durable completion');
+    checks.push('Protected plugin pull: verified stage, automatic overwrite, owned stop, journal apply, healthy restart and latest pre-apply backup retained after durable completion');
     const syncText = await fs.readFile(path.join(state, 'sync.log'), 'utf8');
     for (const label of ['上传到 VPS', '从 VPS 下载', '校验文件', '应用更新', '同步完成']) {
         assert.ok(syncText.includes(label), label); assert.ok(liveStdout.includes(label), label);
     }
     assert.ok(!syncText.includes(configurationBody.password));
     checks.push('Push/pull phase, file count, verification, restart and completion logs reach both the live console and sync.log without logging the saved password');
-    assert.equal((await api('status')).recovery.available, false);
+    assert.equal((await api('status')).recovery.available, true);
     assert.equal(await exists(path.join(fixture, 'data/default-user/worlds/local-only.json')), false);
-    checks.push('Healthy completed pulls retain the current data and small receipt without an obsolete manual recovery option');
+    checks.push('Healthy completed pulls retain current data, a durable receipt and exactly the latest manual recovery point');
     assert.equal((await readJson(path.join(repository, '.tavernsyn-install.json'))).state, state);
     assert.ok(await exists(path.join(repository, 'helper/launcher.mjs')));
     assert.ok(liveStdout.split('TAVERN_SYN_FIXTURE_STDOUT').length >= 5);

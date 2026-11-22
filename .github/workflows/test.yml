@@ -27,3 +27,20 @@ jobs:
           python -m unittest discover -s tests -p 'test_vps*.py' -v
           node tests/rsync.mjs
           node tests/integration.mjs
+          node tests/usb-integration.mjs
+  usb-portable:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            node: '22'
+          - os: ubuntu-latest
+            node: '20'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: USB protocol, ADB selection and entry points
+        run: node --test tests/usb-adb.test.mjs tests/usb-stream.test.mjs tests/usb-service.test.mjs tests/usb-launchers.test.mjs

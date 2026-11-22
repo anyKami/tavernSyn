@@ -11,6 +11,7 @@ import { checkCompatibility } from '../adapters/release-1.19.mjs';
 import { prepareRepository, repositoryPath } from '../lib/repository.mjs';
 import { codeFingerprint, termuxLauncher, windowsLauncher } from './startup.mjs';
 import { prepareDependencyCache } from '../lib/dependencies.mjs';
+import { termuxUsbLauncher, windowsUsbLauncher } from './usb-launchers.mjs';
 
 export async function install({ st, state, profile = 'default-user', repository }) {
     requireThat(st && path.isAbsolute(st), 'INSTALL', '请使用 --st 指定酒馆完整路径。');
@@ -59,8 +60,10 @@ export async function install({ st, state, profile = 'default-user', repository 
     if (process.platform === 'win32') {
         const script = windowsLauncher({ node: process.execPath, repository, state });
         await fs.writeFile(path.join(directory, 'Start-TavernSyn.cmd'), script);
+        await fs.writeFile(path.join(directory, 'USB-TavernSyn.cmd'), windowsUsbLauncher({ node: process.execPath, repository, state }));
     } else {
         await fs.writeFile(path.join(directory, 'start-tavernsyn.sh'), termuxLauncher({ node: process.execPath, install: directory, state }), { mode: 0o700 });
+        await fs.writeFile(path.join(directory, 'usb-tavernsyn.sh'), termuxUsbLauncher({ node: process.execPath, repository, state }), { mode: 0o700 });
     }
     let maintenance;
     try {

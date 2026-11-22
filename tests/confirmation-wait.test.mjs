@@ -16,4 +16,21 @@ for (const [name, phase] of [['ready', 'AWAITING_SAVE'], ['page', 'WAITING_PAGE'
         await rejected;
         assert.deepEqual(manager.wake, {});
     });
+
+    test(`${phase} accepts cancellation while its phase record is still being persisted`, async t => {
+        const manager = new Manager(await fixture());
+        manager.job = { id: randomUUID(), direction: 'pull' };
+        let finishWrite;
+        const persisted = new Promise(resolve => { finishWrite = resolve; });
+        t.after(() => finishWrite());
+        manager.write = async nextPhase => { manager.job.phase = nextPhase; await persisted; };
+        const waiting = manager.waitFor(name, phase);
+        const rejected = assert.rejects(waiting, { code: 'CANCELLED' });
+        await manager.action('cancel', { id: manager.job.id });
+        // Let Node detect any unhandled rejection before allowing the write to
+        // complete. The original await-write-then-await-wake ordering raced here.
+        await new Promise(resolve => setImmediate(resolve));
+        finishWrite(); await rejected;
+        assert.deepEqual(manager.wake, {});
+    });
 }

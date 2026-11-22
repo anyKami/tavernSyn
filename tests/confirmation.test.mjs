@@ -56,9 +56,10 @@ test('a reloaded sole page can automatically save and own the handoff without an
     await assert.rejects(manager.action('page', { id: page.id, tab: saving.tab, ticket: page.ticket }), { code: 'JOB' });
     await manager.action('page', { id: page.id, tab: reloadedTab, ticket: page.ticket }); await manager.done;
     assert.equal((await manager.status()).phase, 'SUCCEEDED');
-    const journal = await readJson(path.join(device.state, 'last-apply.json'));
+    const journal = await readJson(path.join(device.state, 'apply.json'));
     const oldProfile = journal.steps.find(s => s.live === path.join(device.dataRoot, device.profile)).old;
-    assert.equal(await exists(oldProfile), false);
+    assert.equal(await exists(oldProfile), true);
+    assert.deepEqual(await readJson(path.join(oldProfile, 'worlds/book.json')), { local: true });
 });
 
 test('first overwrite and clearing the worldbook category proceed with only the initial sync consent', async () => {
