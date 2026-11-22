@@ -100,7 +100,9 @@ function renderedReconcile(status, api = async () => { assert.fail('unexpected A
     };
     const root = { querySelector: node, querySelectorAll: selector => selector === 'button' ? [...nodes.values()] : [] };
     const dialog = { open: false, querySelector: selector => node(`dialog ${selector}`), close() { this.open = false; }, showModal() { this.open = true; } };
-    const context = vm.createContext({ status, root, dialog, api, usbState: { supported: true, stage: 'idle' }, usbBusy: false, form: { querySelector: node },
+    const context = vm.createContext({ status, root, dialog, api, usbState: { supported: true, stage: 'idle' }, usbBusy: false,
+        usbIntent: null, usbWatchToken: '', usbOverlay: { hidden: true }, usbLabel: () => '', usbAccepted: () => false,
+        form: { querySelector: node },
         labels: { SUCCEEDED: '同步完成', FAILED: '同步未完成', PREVIEW: '预览完成' }, localError: '', starting: false,
         setupBusy: false, configLoaded: true, driveConfig: {}, updateProviderFields() {}, progressDetail: () => '',
         text: (selector, value) => messages.set(selector, value), scopeText: value => value.join('、'),

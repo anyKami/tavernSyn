@@ -76,7 +76,7 @@ test('continuing downloaded files defers its only save to the actual handoff', a
 for (const acceptedTab of ['first-tab', undefined]) test(`automatic save handoff uses ${acceptedTab ? 'the accepted owner tab' : 'the current tab for an older helper'}`, async () => {
     const calls = [], redirects = [];
     const status = { configured: true, phase: 'AWAITING_SAVE', id: 'fixture-job', tab: 'old-tab' };
-    const context = vm.createContext({ status, tab: 'current-tab', starting: false, configLoaded: true, resumed: false, handlingSave: false,
+    const context = vm.createContext({ status, tab: 'current-tab', usbIntent: null, usbWatchToken: '', usbState: { stage: 'idle' }, starting: false, configLoaded: true, resumed: false, handlingSave: false,
         BASE: '/api/plugins/tavernsyn/', URLSearchParams, render() {}, setTimeout() {},
         flush: async () => { calls.push({ route: 'flush' }); return 'saved-receipt'; }, location: { assign: url => redirects.push(url) },
         api: async (route, body) => {
@@ -98,7 +98,7 @@ function pollCode() { return source.slice(source.indexOf('async function poll()'
 test('a lost ready reply follows the recorded handoff on the next poll without cancelling or saving again', async () => {
     const calls = [], redirects = [];
     let backend = { configured: true, phase: 'AWAITING_SAVE', id: 'fixture-job', tab: 'old-tab', ticket: 'fixture-ticket' };
-    const context = vm.createContext({ status: {}, tab: 'current-tab', starting: false, configLoaded: true, resumed: false, handlingSave: false, localError: '',
+    const context = vm.createContext({ status: {}, tab: 'current-tab', usbIntent: null, usbWatchToken: '', usbState: { stage: 'idle' }, starting: false, configLoaded: true, resumed: false, handlingSave: false, localError: '',
         BASE: '/api/plugins/tavernsyn/', URLSearchParams, render() {}, setTimeout() {}, text() {},
         flush: async () => { calls.push('flush'); return 'saved-receipt'; }, location: { assign: url => redirects.push(url) },
         api: async route => {
@@ -122,7 +122,7 @@ test('a lost ready reply follows the recorded handoff on the next poll without c
 test('a transient automatic save failure retries while an invalid handoff is not repeatedly submitted', async () => {
     for (const code of [undefined, 'INPUT', 'UNMANAGED']) {
         let saves = 0; const calls = [];
-        const context = vm.createContext({ status: {}, tab: 'current-tab', starting: false, configLoaded: true, resumed: false, handlingSave: false, localError: '',
+        const context = vm.createContext({ status: {}, tab: 'current-tab', usbIntent: null, usbWatchToken: '', usbState: { stage: 'idle' }, starting: false, configLoaded: true, resumed: false, handlingSave: false, localError: '',
             render() {}, setTimeout() {}, text() {},
             flush: async () => { saves++; throw Object.assign(Error('synthetic handoff failure'), { code }); },
             api: async route => { calls.push(route); assert.equal(route, 'status'); return { configured: true, phase: 'AWAITING_SAVE', id: 'fixture-job' }; },
@@ -138,7 +138,7 @@ test('a browser tab from before USB stop/start reloads when the managed epoch ch
     const poll = source.slice(source.indexOf('async function poll()'), source.indexOf('setInterval(() =>'));
     const calls = []; let reloads = 0;
     const context = vm.createContext({
-        status: {}, tab: 'current-tab', starting: false, configLoaded: true, resumed: false,
+        status: {}, tab: 'current-tab', usbIntent: null, usbWatchToken: '', usbState: { stage: 'idle' }, starting: false, configLoaded: true, resumed: false,
         handlingSave: false, window: { __TAVERNSYN__: { epoch: 'old-epoch' } },
         location: { reload: () => { reloads++; } }, render() { assert.fail('must reload before rendering stale data'); },
         setTimeout() { assert.fail('must reload before scheduling another stale poll'); },
