@@ -19,11 +19,15 @@ export async function connect(device, apiFactory = driveApi, log = () => {}) {
     const credentials = await readDriveCredentials(device), key = driveKey(credentials);
     requireThat(credentials.refreshToken && credentials.clientId === device.drive.clientId
         && driveFingerprint(key) === device.drive.keyFingerprint, 'DRIVE_CONFIG', '云盘授权或仓库密钥与本机绑定不一致。');
-    const identity = connectionId(device), cacheFile = path.join(device.state, 'drive-head.json');
-    await noLinks(cacheFile);
+    const identity = connectionId(device), cacheFile = path.join(device.state, 'drive-head.json'), uploadsFile = path.join(device.state, 'drive-uploads.json');
+    await noLinks(cacheFile); await noLinks(uploadsFile);
     const cached = await exists(cacheFile) ? await readJson(cacheFile).catch(() => null) : null;
+    const uploads = await exists(uploadsFile) ? await readJson(uploadsFile) : null;
+    requireThat(!uploads || (uploads.format === 1 && uploads.connection === identity && Array.isArray(uploads.uploads)),
+        'DRIVE_JOURNAL', '云盘未完成上传记录与当前仓库不一致，未覆盖恢复记录。');
     const api = apiFactory(device), repository = new DriveRepository(api, { ...device.drive, key,
-        anchor: cached?.connection === identity ? cached.head : null });
+        anchor: cached?.connection === identity ? cached.head : null, pendingUploads: uploads?.uploads ?? [],
+        savePendingUploads: next => atomicJson(uploadsFile, { format: 1, connection: identity, uploads: next }) });
     await repository.open();
     const current = await repository.head();
     const session = { provider: 'google-drive', api, repository, key, identity, log, closed: false,
@@ -33,6 +37,15 @@ export async function connect(device, apiFactory = driveApi, log = () => {}) {
         await atomicJson(cacheFile, { connection: identity, head }).catch(() => log('云盘提交缓存未保存；下次连接将重新读取提交链。'));
     };
     session.remember = remember;
+    session.runMaintenance = async () => {
+        const result = await repository.retryCleanup().catch(() => ({ maintenancePending: true,
+            maintenance: ['Google 云盘旧快照或失败上传尚未清理；下次连接或核对结果时会重试。'] }));
+        session.maintenance = result.maintenance ?? []; session.maintenancePending = !!result.maintenancePending;
+        session.hello.maintenance = session.maintenance; session.hello.maintenancePending = session.maintenancePending;
+        for (const message of session.maintenance) log(message);
+        if (result.current) await remember(result.current);
+        return result;
+    };
     session.control = {
         close() { session.closed = true; },
         async request(operation, fields = {}) {
@@ -41,7 +54,8 @@ export async function connect(device, apiFactory = driveApi, log = () => {}) {
             const head = await repository.head(); await remember(head);
             if (operation === 'published') {
                 requireThat(head?.generation === fields.job && head.digest === fields.snapshotDigest, 'COMMIT_NOT_CONFIRMED', '尚不能确认此云盘快照已发布。');
-                return head;
+                const cleanup = await session.runMaintenance();
+                return { ...head, maintenance: cleanup.maintenance ?? [], maintenancePending: !!cleanup.maintenancePending };
             }
             return { ...session.hello, current: head };
         },
@@ -52,7 +66,9 @@ export async function connect(device, apiFactory = driveApi, log = () => {}) {
         requireThat(sameHead(latest, session.downloadHead ?? session.hello.current), 'REMOTE_CHANGED', 'Google 云盘已有新快照，请重新拉取；本机数据未被替换。');
         await remember(latest);
     };
-    await remember(current);
+    const cleanup = await session.runMaintenance();
+    if (cleanup.current) session.hello.current = cleanup.current;
+    await remember(session.hello.current);
     log(`Google 云盘连接成功；仓库 ${device.drive.dataset}；当前代次 ${current?.generation ?? '尚未发布'}`);
     return session;
 }
@@ -62,8 +78,10 @@ export async function push(session, device, job, payload, manifest, onProgress =
     const latest = await session.repository.head();
     if (latest?.generation === job) {
         requireThat(latest.digest === manifest.digest, 'DRIVE_INTEGRITY', '同一云盘任务的快照摘要发生变化。');
+        const cleanup = await session.runMaintenance();
         await session.remember(latest);
-        return { ...latest, stats: { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 } };
+        return { ...latest, maintenance: cleanup.maintenance ?? [], maintenancePending: !!cleanup.maintenancePending,
+            stats: { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 } };
     }
     requireThat(sameHead(latest, session.hello.current), 'REMOTE_CHANGED', '另一台设备已推送新快照，请重新检查后推送。');
     const root = path.dirname(payload), archiveFile = path.join(root, `drive-${randomUUID()}.bin`);
@@ -124,7 +142,7 @@ export async function pull(session, device, job, payload, onProgress = () => {},
         const stats = { sentBytes: 0, receivedBytes: remote.size, literalBytes: remote.size, matchedBytes: 0,
             transferredFiles: 1, unit: 'encrypted snapshot bytes; excludes HTTP and retry overhead' };
         await onProgress({ stage: 'transferred', stats });
-        return { ...remote, manifest, stats };
+        return { ...remote, manifest, stats, maintenance: session.maintenance ?? [], maintenancePending: !!session.maintenancePending };
     } finally { await fs.unlink(archiveFile).catch(() => {}); }
 }
 export async function catalog() { requireThat(false, 'UNSUPPORTED_SCOPE', 'Google 云盘目前只支持完整同步。'); }

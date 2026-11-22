@@ -94,3 +94,54 @@ test('Drive progress describes complete encrypted snapshots without claiming rsy
     assert.doesNotMatch(detail, /rsync|差异数据|新增、修改文件|不含删除和未变化/);
     assert.match(progressDetail({ transport: 'google-drive', noChanges: true, direction: 'pull' }), /Google 云盘版本/);
 });
+
+function renderedReconcile(status, api = async () => { assert.fail('unexpected API request'); }) {
+    const nodes = new Map(), messages = new Map();
+    const node = selector => {
+        if (!nodes.has(selector)) nodes.set(selector, { hidden: false, disabled: false, textContent: '' });
+        return nodes.get(selector);
+    };
+    const root = { querySelector: node, querySelectorAll: selector => selector === 'button' ? [...nodes.values()] : [] };
+    const dialog = { open: false, querySelector: selector => node(`dialog ${selector}`), close() { this.open = false; }, showModal() { this.open = true; } };
+    const context = vm.createContext({ status, root, dialog, api, form: { querySelector: node },
+        labels: { SUCCEEDED: '同步完成', FAILED: '同步未完成', PREVIEW: '预览完成' }, localError: '', starting: false,
+        setupBusy: false, configLoaded: true, driveConfig: {}, updateProviderFields() {}, progressDetail: () => '',
+        text: (selector, value) => messages.set(selector, value), scopeText: value => value.join('、'),
+    });
+    const render = source.slice(source.indexOf('function render()'), source.indexOf('function showError('));
+    const handler = source.slice(source.indexOf("root.querySelector('.ts-reconcile').onclick"), source.indexOf("root.querySelector('.ts-resume-upload').onclick"));
+    vm.runInContext(render + '\n' + handler, context); context.render();
+    return { context, button: node('.ts-reconcile'), messages };
+}
+
+for (const kind of ['published', 'applied', 'checked']) test(`confirmed Drive ${kind} with cloud cleanup warnings can reconcile without changing sync success`, async () => {
+    const generation = 'completed-generation', digest = 'completed-digest', calls = [];
+    const status = { id: 'completed-job', provider: 'google-drive', phase: 'SUCCEEDED', managed: true,
+        direction: kind === 'published' ? 'push' : 'pull', commit: { kind }, remote: { generation, digest },
+        maintenancePending: false, maintenance: { pending: [], remote: ['旧快照清理未完成'] } };
+    const { context, button, messages } = renderedReconcile(status, async (route, body) => {
+        calls.push({ route, body });
+        return { phase: 'SUCCEEDED', maintenancePending: false, maintenance: { pending: [], remote: [] }, remote: { generation, digest } };
+    });
+    assert.equal(button.hidden, false); assert.equal(button.disabled, false);
+    assert.equal(messages.get('.ts-phase'), '同步完成');
+    await button.onclick();
+    assert.equal(calls.length, 1); assert.equal(calls[0].route, 'reconcile'); assert.equal(calls[0].body.id, status.id);
+    assert.equal(button.hidden, true); assert.equal(context.status.phase, 'SUCCEEDED');
+    assert.equal(context.status.remote.generation, generation); assert.equal(context.status.remote.digest, digest);
+    assert.equal(messages.get('.ts-phase'), '同步完成');
+});
+
+test('cloud cleanup visibility is limited to confirmed Google outcomes and preserves existing local/VPS controls', () => {
+    const base = { provider: 'google-drive', phase: 'SUCCEEDED', managed: true, commit: { kind: 'published' },
+        maintenancePending: false, maintenance: { pending: [], remote: ['cleanup pending'] } };
+    for (const status of [
+        { ...base, provider: 'vps' }, { ...base, commit: { kind: 'restored' } }, { ...base, commit: undefined },
+        { ...base, phase: 'PREVIEW' }, { ...base, maintenance: { pending: [], remote: [] } },
+    ]) assert.equal(renderedReconcile(status).button.hidden, true);
+    assert.equal(renderedReconcile({ ...base, provider: undefined, transport: 'google-drive' }).button.hidden, false);
+    assert.equal(renderedReconcile({ ...base, provider: 'vps', maintenancePending: true }).button.hidden, false);
+    assert.equal(renderedReconcile({ provider: 'vps', phase: 'FAILED', direction: 'push', snapshotReady: true, managed: true }).button.hidden, false);
+    const unmanaged = renderedReconcile({ ...base, managed: false }).button;
+    assert.equal(unmanaged.hidden, false); assert.equal(unmanaged.disabled, true);
+});

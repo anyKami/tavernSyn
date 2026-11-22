@@ -5,7 +5,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Manager } from '../helper/manager.mjs';
 import { validateDownloadBinding } from '../helper/download-binding.mjs';
-import { connectionId, connectionIdentity, remoteDataset, remoteLabel } from '../lib/completion.mjs';
+import { completionPath, connectionId, connectionIdentity, remoteDataset, remoteLabel } from '../lib/completion.mjs';
 import { atomicJson, digest, exists, readJson, SyncError } from '../lib/io.mjs';
 import { verifiedDownload } from '../lib/download.mjs';
 import { withDeviceLock } from '../lib/connection.mjs';
@@ -22,10 +22,12 @@ async function deviceForDrive(identity) {
 }
 
 class MemoryDrive extends MemoryTransport {
-    constructor(root) { super(root); this.uploads = 0; this.downloads = 0; this.checks = 0; }
+    constructor(root) { super(root); this.uploads = 0; this.downloads = 0; this.checks = 0; this.connections = 0; }
     async connect(device) {
+        this.connections++;
+        if (this.failConnect) throw new SyncError('DRIVE_NETWORK', '测试清理连接失败。');
         const current = this.current ? { ...this.current } : null;
-        const hello = () => ({ dataset: device.drive.dataset, current: this.current ? { ...this.current } : null });
+        const hello = () => ({ dataset: device.drive.dataset, current: this.current ? { ...this.current } : null, maintenance: this.maintenance ?? [] });
         return { provider: 'google-drive', hello: { ...hello(), current }, control: {
             close() {}, request: async op => { assert.equal(op, 'hello'); return hello(); },
         }, assertCurrent: async () => {
@@ -40,7 +42,7 @@ class MemoryDrive extends MemoryTransport {
         if (this.failBefore) { await args[6]?.({ job: args[2] }); throw new SyncError('DRIVE_NETWORK', '测试上传中断。'); }
         const result = await super.push(...args);
         if (this.failAfter) throw new SyncError('DRIVE_RESULT_UNKNOWN', '测试发布回执丢失。');
-        return result;
+        return { ...result, ...(this.maintenance?.length ? { maintenance: [...this.maintenance] } : {}) };
     }
     async pull(...args) {
         this.downloads++;
@@ -149,6 +151,46 @@ test('Drive lost publish acknowledgement is reconciled without another upload', 
     assert.equal(status.phase, 'FAILED'); assert.equal(remote.current.generation, status.id);
     const repaired = await new Manager(source, null, remote).action('reconcile', { id: status.id });
     assert.equal(repaired.phase, 'SUCCEEDED'); assert.equal(repaired.commit.kind, 'published'); assert.equal(remote.uploads, 1);
+});
+
+test('Drive reconciliation retries cloud cleanup even with a durable completed receipt', async () => {
+    const { source, remote } = await setup(); remote.maintenance = ['旧快照暂未清理'];
+    const { manager, lifecycle, status } = await upload(source, remote), connections = remote.connections;
+    assert.deepEqual(status.maintenance.remote, ['旧快照暂未清理']);
+    remote.maintenance = [];
+    // Another device may already have published; cleanup must not rewrite the
+    // generation in this device's historical success receipt.
+    remote.current = { generation: randomUUID(), digest: 'e'.repeat(64) };
+    const repaired = await manager.action('reconcile', { id: status.id });
+    assert.equal(remote.connections, connections + 1); assert.equal(remote.uploads, 1); assert.equal(lifecycle.starts, 1);
+    assert.equal(repaired.phase, 'SUCCEEDED'); assert.deepEqual(repaired.maintenance.remote, []);
+    assert.equal(repaired.remote.generation, status.remote.generation); assert.equal(repaired.remote.digest, status.remote.digest);
+    assert.deepEqual((await readJson(completionPath(source, status.id))).remote.maintenance, []);
+});
+
+test('Drive cleanup connection failure remains a successful publication and is retryable', async () => {
+    const { source, remote } = await setup(); const { manager, status } = await upload(source, remote);
+    remote.failConnect = true;
+    const pending = await manager.action('reconcile', { id: status.id });
+    assert.equal(pending.phase, 'SUCCEEDED'); assert.equal(pending.commit.kind, 'published');
+    assert.equal(pending.remote.generation, status.remote.generation); assert.equal(remote.uploads, 1);
+    assert.match(pending.maintenance.remote.join(' '), /清理尚未完成/);
+    assert.equal(await exists(path.join(source.state, 'operation.lock')), false);
+    remote.failConnect = false;
+    assert.deepEqual((await manager.action('reconcile', { id: status.id })).maintenance.remote, []);
+    assert.equal(remote.uploads, 1);
+});
+
+test('Drive unchanged sync preserves cloud cleanup warnings and retries without another transfer', async () => {
+    const { source, remote } = await setup(); await upload(source, remote);
+    remote.maintenance = ['云盘旧快照等待清理'];
+    const { manager, status } = await upload(source, remote);
+    assert.equal(status.phase, 'SUCCEEDED'); assert.equal(status.commit.kind, 'checked');
+    assert.equal(remote.uploads, 1); assert.deepEqual(status.maintenance.remote, remote.maintenance);
+    remote.maintenance = [];
+    const repaired = await manager.action('reconcile', { id: status.id });
+    assert.equal(repaired.commit.kind, 'checked'); assert.deepEqual(repaired.maintenance.remote, []);
+    assert.equal(remote.uploads, 1);
 });
 
 test('Drive completed pending download applies offline only with its original repository receipt', async () => {

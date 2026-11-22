@@ -39,7 +39,8 @@ export class MemoryDrive {
             const kind = /key='kind' and value='([^']+)'/.exec(q)?.[1];
             const dataset = /key='repositoryId' and value='([^']+)'/.exec(q)?.[1];
             return response({ files: [...this.files.values()].map(file => file.metadata).filter(file => file.parents?.includes(parent)
-                && file.appProperties?.kind === kind && file.appProperties?.repositoryId === dataset) });
+                && file.appProperties?.kind === kind && file.appProperties?.repositoryId === dataset
+                && (!q.includes('trashed = false') || !file.trashed)) });
         }
         if (url.pathname === '/upload/drive/v3/files' && url.searchParams.get('uploadType') === 'multipart') {
             const boundary = /boundary=(.+)/.exec(options.headers['content-type'])[1];

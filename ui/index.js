@@ -189,7 +189,10 @@ function render() {
     root.querySelector('.ts-resume-download').hidden = !status.canResumeDownload;
     root.querySelector('.ts-resume-upload').hidden = !(status.phase === 'FAILED' && !status.commit && status.direction === 'push' && status.snapshotReady === true);
     root.querySelector('.ts-resume-upload').disabled ||= !status.managed;
-    root.querySelector('.ts-reconcile').hidden = !(status.maintenancePending || (status.phase === 'FAILED' && status.direction === 'push' && status.snapshotReady));
+    const driveCleanupPending = (google || status.transport === 'google-drive') && status.phase === 'SUCCEEDED'
+        && ['published', 'applied', 'checked'].includes(status.commit?.kind)
+        && Array.isArray(status.maintenance?.remote) && status.maintenance.remote.length > 0;
+    root.querySelector('.ts-reconcile').hidden = !(status.maintenancePending || driveCleanupPending || (status.phase === 'FAILED' && status.direction === 'push' && status.snapshotReady));
     root.querySelector('.ts-reconcile').disabled ||= !status.managed;
     form.querySelector('fieldset').disabled = !configLoaded || !terminal || starting || setupBusy;
     root.querySelector('.ts-drive-authorize').disabled ||= !driveConfig.clientConfigured;

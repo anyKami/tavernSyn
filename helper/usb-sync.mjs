@@ -12,7 +12,7 @@ import { prepare, buildPlan, applyPlan, commitPlan, retireRecovery, rollback, va
 import { Manager, stateDifference } from './manager.mjs';
 import { Lifecycle } from './lifecycle.mjs';
 
-export const USB_PROTOCOL = 'tavernsyn-usb-v1';
+export const USB_PROTOCOL = 'tavernsyn-usb-v2';
 const TERMINAL = new Set(['IDLE', 'SUCCEEDED', 'PREVIEW', 'FAILED']);
 
 export function usbPeer(device, peer) {

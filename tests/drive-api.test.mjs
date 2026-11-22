@@ -178,3 +178,16 @@ test('Drive download still bounds credential lookup before the response headers 
     await assert.rejects(stalled.downloadFile(fileId, target), { code: 'DRIVE_NETWORK' });
     assert.equal(calls, 2); assert.equal(await exists(target), false);
 });
+
+test('Drive cleanup can inspect owned trash explicitly and permanently deletes only the selected file', async t => {
+    const { api, drive, archiveFile, dataset } = await driveFixture(t), parentId = await api.createFolder('TavernSyn'), [fileId] = await api.generateIds(1);
+    await api.uploadFile({ id: fileId, parentId, repositoryId: dataset, file: archiveFile });
+    drive.files.get(fileId).metadata.trashed = true;
+    await assert.rejects(api.metadata(fileId), { code: 'DRIVE_METADATA' });
+    assert.equal((await api.metadata(fileId, { includeTrashed: true })).trashed, true);
+    assert.equal((await api.list({ parentId, kind: 'payload', repositoryId: dataset })).length, 0);
+    assert.equal((await api.list({ parentId, kind: 'payload', repositoryId: dataset, includeTrashed: true })).length, 1);
+    await api.deleteFile(fileId); assert.equal(drive.files.has(fileId), false);
+    const deletions = drive.requests.filter(request => request.method === 'DELETE');
+    assert.deepEqual(deletions.map(request => request.url.pathname), [`/drive/v3/files/${fileId}`]);
+});

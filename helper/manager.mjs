@@ -360,7 +360,7 @@ export class Manager {
         this.busy = true;
         try {
             await handle.writeFile(JSON.stringify({ id, pid: process.pid, purpose: 'completion' })); await handle.sync();
-            let outcome = await readCompletion(this.device, id);
+            let outcome = await readCompletion(this.device, id), driveMaintenance;
             this.job = structuredClone(previous);
             if (!outcome && previous.direction === 'pull') {
                 const journal = await readJson(path.join(this.device.state, 'apply.json'));
@@ -379,6 +379,7 @@ export class Manager {
                     if (previous.scope) remote = await session.control.request('published', { job: id, snapshotDigest: manifest.digest, scope: previous.scope });
                     else requireThat(session.hello.dataset === remoteDataset(this.device) && session.hello.current?.generation === id
                         && session.hello.current.digest === manifest.digest, 'COMMIT_NOT_CONFIRMED', '远端当前代次尚不能证明此任务已发布；可继续原快照上传，未修改远端副本。');
+                    if (previous.provider === 'google-drive') driveMaintenance = session.hello.maintenance ?? [];
                 } finally { session.control.close(); }
                 const payload = await exists(path.join(path.dirname(file), 'payload')) ? path.join(path.dirname(file), 'payload') : path.join(this.device.state, 'cache/payload');
                 await verify(payload, manifest);
@@ -386,6 +387,21 @@ export class Manager {
                 outcome = this.makeOutcome(metadata.sourceState, remote, previous.stats, { cache: !previous.scope });
             }
             requireThat(outcome, 'COMMIT_NOT_CONFIRMED', '未找到可核对的提交回执，未应用或发布数据。');
+            if (outcome.kind !== 'restored' && outcome.job.provider === 'google-drive') {
+                // A durable success receipt normally needs no remote query. A
+                // Drive reconciliation also retries storage cleanup, while the
+                // already-confirmed generation and digest remain unchanged.
+                if (driveMaintenance === undefined) {
+                    let session;
+                    try {
+                        session = await this.transport.connect(this.device, undefined, this.log);
+                        driveMaintenance = session.hello.maintenance ?? [];
+                    } catch {
+                        driveMaintenance = ['同步结果已确认；Google 云盘旧快照或失败上传清理尚未完成，可稍后再次核对同步结果。'];
+                    } finally { session?.control.close(); }
+                }
+                outcome.remote = { ...outcome.remote, maintenance: driveMaintenance };
+            }
             this.outcome = outcome; await this.finishOutcome(outcome);
         } finally {
             await this.releaseOperation(); this.busy = false;
@@ -408,7 +424,9 @@ export class Manager {
         if (latest.current?.digest !== baseline.remote.digest) return false;
         if ((await portableState(this.device)).digest !== local.digest) return false;
         if (this.job.direction === 'push') await this.lifecycle.verifyReceipt(this.receipt);
-        await this.success(local, latest.current, { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 }, { noChanges: true });
+        const remote = this.job.provider === 'google-drive'
+            ? { ...latest.current, maintenance: latest.maintenance ?? [] } : latest.current;
+        await this.success(local, remote, { sentBytes: 0, receivedBytes: 0, literalBytes: 0, matchedBytes: 0, transferredFiles: 0 }, { noChanges: true });
         return true;
     }
     connectionId() { return connectionId(this.device, this.job); }

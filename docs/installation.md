@@ -85,21 +85,21 @@ bash "$TMPDIR/tavernsyn-install.sh" "$HOME/SillyTavern"
 
 ## 启用 USB 完整同步
 
-两端更新到同一版 0.3.0 或更新版本后，分别重新运行安装器，生成上述 USB 入口；已有自定义控制目录必须继续指定原目录。源码版本尚未发布为稳定标签时，启动器的标签更新检查不会自动取得该版本，应手动更新仓库再安装。不要移动旧稳定标签。
+两端更新到同一版本，至少为 **0.5.0**；已有 USB 入口可以直接复用，没有入口时才重新运行安装器生成。已有自定义控制目录必须继续指定原目录。0.5.0 使用新的 USB 自动连接协议，不能一端新版、一端旧版混用。源码版本尚未发布为稳定标签时，启动器的标签更新检查不会自动取得该版本，应手动更新仓库；不要移动旧稳定标签。
 
-电脑额外安装官方 [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools)，手机启用开发者选项中的 USB 调试并授权电脑。TavernSyn 安装器不下载 ADB，USB 入口可交互填写 `adb.exe` 的完整路径。无需为 USB 配置 SSH 账号、VPS 或 Tailscale。
+电脑额外安装官方 [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) 并加入 PATH，手机启用开发者选项中的 USB 调试并授权电脑。TavernSyn 安装器不下载 ADB；未设置 PATH 时可用高级命令的 `--adb` 指定路径。无需为 USB 配置 SSH 账号、VPS 或 Tailscale。
 
-每次先保存并正常关闭两端酒馆及启动器，手机运行酒馆目录的 `bash usb-tavernsyn.sh`，电脑运行 `USB-TavernSyn.cmd`。输入手机显示的本次配对码和覆盖方向，核对设备名称后输入 `YES`。完成后通过平时入口启动酒馆。完整命令、多设备与端口选项见 [USB 使用指南](usb-sync.md)。
+每次先保存并正常关闭两端酒馆及启动器，手机运行酒馆目录的 `bash usb-tavernsyn.sh`，电脑运行 `USB-TavernSyn.cmd`。连接已授权的 USB 手机后，在任意一端选择 `1 电脑 → 手机` 或 `2 手机 → 电脑`，程序立即按该方向同步，另一端自动跟随进度。完成后通过平时入口启动酒馆。完整命令、多设备与端口选项见 [USB 使用指南](usb-sync.md)。
 
 USB 数据不经互联网中转，但目标插件依赖恢复可能仍需 npm 缓存或网络。两端酒馆核心和 Node 环境不由 USB 同步安装。
 
 ## 启用 Google 云盘仓库
 
-两端更新到 0.4.0 或更新版本，使用平时的 TavernSyn 受控入口启动。在「扩展设置 → TavernSyn 跨设备同步 → 设置与检查 · 同步仓库」选择 **Google 云盘**。
+两端更新到 0.5.0 或更新版本，使用平时的 TavernSyn 受控入口启动。在「扩展设置 → TavernSyn 跨设备同步 → 设置与检查 · 同步仓库」选择 **Google 云盘**。
 
 先在自己的 Google Cloud 项目启用 Drive API，并创建 Desktop app OAuth 客户端。两端填写同一组客户端 ID / 客户端密钥，保存后分别授权同一个 Google 账号。第一台设备创建新仓库并保管配对码；第二台设备粘贴配对码加入已有仓库。检查连接后，先从内容完整的设备推送，再从另一设备拉取。
 
-Google 云盘使用完整压缩加密快照，保存和受控重启过程与完整 VPS 同步一致。云端确认新发布后删除旧快照，本机应用前轮换恢复备份；小型提交元数据保留用于判断版本与并发。当前不支持分类或 rsync 增量同步。OAuth 应用配置、Termux 授权、配对码保管及故障处理见 [Google 云盘指南](google-drive.md)。
+Google 云盘使用完整压缩加密快照，保存和受控重启过程与完整 VPS 同步一致。云端确认新发布后永久删除可核实归属的旧快照和失败上传文件，包括已在回收站中的此类文件；清理失败会记录并重试。正常发布和清理完成后保留最新一份完整快照及小型仓库记录，本机应用前另轮换恢复备份。上传期间新旧快照会暂时并存，需要预留空间；未知在途和无法核实的旧遗留文件不会被猜测删除。当前不支持分类或 rsync 增量同步。完整授权、清理规则与限制见 [Google 云盘指南](google-drive.md)。
 
 只使用 Google 云盘的新安装，可以在已具备 Node.js 20+、Git 和完整 TavernSyn 仓库的情况下，直接运行下面的 Node 安装入口，跳过 SSH/rsync 运行库准备：
 

@@ -96,3 +96,68 @@ test('a progress write failure after confirmed publication cannot turn success i
     assert.equal((await session.repository.head()).generation, job); assert.equal(payloads(cloud).length, 1);
     session.control.close();
 });
+
+test('same-job Drive push retries remote cleanup without uploading or publishing another archive', async t => {
+    const { cloud, devices: [pc], adapter } = await setup(t);
+    const source = new Manager(pc, new FakeLifecycle(), adapter); await sync(source, 'push');
+    await fs.writeFile(path.join(pc.dataRoot, pc.profile, 'new-data.txt'), 'latest data');
+    const job = randomUUID(), payload = path.join(pc.state, 'jobs', job, 'payload'), frozen = await snapshot(pc, payload);
+    const session = await adapter.connect(pc);
+    cloud.before = request => request.method === 'DELETE' ? new Response('{}', { status: 403 }) : undefined;
+    const first = await transport.push(session, pc, job, payload, frozen.manifest);
+    assert.equal(first.generation, job); assert.equal(first.maintenancePending, true); assert.equal(payloads(cloud).length, 2);
+    const uploads = cloud.requests.filter(request => request.method === 'PUT' && request.body?.length).length;
+    cloud.before = null;
+    const retried = await transport.push(session, pc, job, payload, frozen.manifest);
+    assert.equal(retried.generation, job); assert.equal(retried.stats.sentBytes, 0); assert.equal(retried.maintenancePending, false);
+    assert.deepEqual(retried.maintenance, []); assert.equal(payloads(cloud).length, 1);
+    assert.equal(cloud.requests.filter(request => request.method === 'PUT' && request.body?.length).length, uploads);
+    assert.equal((await readJson(path.join(pc.state, 'drive-uploads.json'))).uploads.length, 0);
+    session.control.close();
+});
+
+test('reconnecting Drive cleans an owned failed full upload from the persisted journal and exposes maintenance state', async t => {
+    const { cloud, devices: [pc], adapter } = await setup(t);
+    const source = new Manager(pc, new FakeLifecycle(), adapter); await sync(source, 'push');
+    await fs.writeFile(path.join(pc.dataRoot, pc.profile, 'retry-data.txt'), 'new pending data');
+    const job = randomUUID(), payload = path.join(pc.state, 'jobs', job, 'payload'), frozen = await snapshot(pc, payload);
+    let session = await adapter.connect(pc);
+    cloud.before = request => request.method === 'DELETE' || (request.method === 'POST'
+        && request.url.searchParams.get('uploadType') === 'multipart' && request.body.toString().includes('"kind":"commit"'))
+        ? new Response('{}', { status: 403 }) : undefined;
+    await assert.rejects(transport.push(session, pc, job, payload, frozen.manifest), { status: 403 });
+    assert.equal(payloads(cloud).length, 2);
+    const journal = await readJson(path.join(pc.state, 'drive-uploads.json'));
+    assert.equal(journal.format, 1); assert.equal(journal.uploads.length, 1); assert.equal(journal.uploads[0].phase, 'failed');
+    session.control.close(); cloud.before = null;
+    session = await adapter.connect(pc);
+    assert.equal(payloads(cloud).length, 1); assert.equal(session.hello.maintenancePending, false); assert.deepEqual(session.hello.maintenance, []);
+    assert.notEqual(session.hello.current.generation, job);
+    assert.equal((await readJson(path.join(pc.state, 'drive-uploads.json'))).uploads.length, 0);
+    session.control.close();
+});
+
+test('Drive reconnect reports a cleanup failure while retaining the confirmed latest snapshot', async t => {
+    const { cloud, devices: [pc], adapter } = await setup(t);
+    const manager = new Manager(pc, new FakeLifecycle(), adapter); await sync(manager, 'push');
+    await fs.writeFile(path.join(pc.dataRoot, pc.profile, 'another.txt'), 'new generation');
+    cloud.before = request => request.method === 'DELETE' ? new Response('{}', { status: 403 }) : undefined;
+    const second = await sync(manager, 'push'); assert.equal(payloads(cloud).length, 2);
+    const session = await adapter.connect(pc);
+    assert.equal(session.hello.current.generation, second.id); assert.equal(session.hello.maintenancePending, true);
+    assert(session.hello.maintenance.length > 0); assert.equal(payloads(cloud).length, 2);
+    session.control.close();
+});
+
+test('a successful Drive pull carries remote cleanup warnings without changing the committed snapshot', async t => {
+    const { cloud, devices: [pc, phone], adapter } = await setup(t);
+    const manager = new Manager(pc, new FakeLifecycle(), adapter); await sync(manager, 'push');
+    await fs.writeFile(path.join(pc.dataRoot, pc.profile, 'latest.txt'), 'keep latest');
+    cloud.before = request => request.method === 'DELETE' ? new Response('{}', { status: 403 }) : undefined;
+    const latest = await sync(manager, 'push'), session = await adapter.connect(phone);
+    const job = randomUUID(), payload = path.join(phone.state, 'jobs', job, 'payload');
+    const result = await transport.pull(session, phone, job, payload);
+    assert.equal(result.generation, latest.id); assert.equal(result.maintenancePending, true); assert(result.maintenance.length > 0);
+    assert.equal(await fs.readFile(path.join(payload, 'profile/latest.txt'), 'utf8'), 'keep latest');
+    assert.equal(payloads(cloud).length, 2); session.control.close();
+});
