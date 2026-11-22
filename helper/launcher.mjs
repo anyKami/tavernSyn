@@ -48,6 +48,10 @@ async function main() {
     let stopping = false;
     const shutdown = async () => {
         if (stopping) return;
+        if (['selected', 'stopping', 'transferring', 'restarting'].includes(usbController.status().stage)) {
+            console.warn('USB 同步已经开始，关闭命令暂不退出受控启动器，以免中断数据写入及恢复。');
+            return;
+        }
         stopping = true;
         console.log('正在停止酒馆…');
         try { await usbController.cancelForExit(); await lifecycle.close(); release(); process.exit(0); }

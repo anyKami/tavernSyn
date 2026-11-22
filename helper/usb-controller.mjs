@@ -65,7 +65,7 @@ export class UsbController {
         requireThat(CHOICES.has(direction), 'INPUT', 'USB 同步方向无效。');
         requireThat(this.stage === 'connected' && this.peer, 'USB_STAGE', '请先连接另一端 USB 设备。');
         const selected = this.mode === 'serve' ? this.server.chooseDirection(direction) : await this.connection.chooseDirection(direction);
-        requireThat(selected.direction === direction, 'USB_DIRECTION', '另一端已先选择了不同方向，本机自动跟随该方向。');
+        // The first accepted selection wins; the other end simply follows it.
         this.selection = selected;
         this.update('selected', { note: '已选择方向，正在交接两端酒馆。' });
         return this.status();

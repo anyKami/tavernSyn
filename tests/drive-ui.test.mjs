@@ -6,7 +6,7 @@ import { progressDetail } from '../ui/progress.js';
 
 const source = await fs.readFile(new URL('../ui/index.js', import.meta.url), 'utf8');
 const direction = source.slice(source.indexOf('function confirmDirection('), source.indexOf('const target ='));
-const begin = source.slice(source.indexOf('async function begin('), source.indexOf("root.querySelector('.ts-push').onclick"));
+const begin = source.slice(source.indexOf('async function begin('), source.indexOf('async function usbConnect()'));
 
 for (const action of ['push', 'pull']) test(`Drive ${action} confirmation identifies the actual saved provider`, async () => {
     const nodes = new Map(), modal = { close() {}, showModal() {}, querySelector(selector) {
@@ -98,12 +98,12 @@ test('Drive progress describes complete encrypted snapshots without claiming rsy
 function renderedReconcile(status, api = async () => { assert.fail('unexpected API request'); }) {
     const nodes = new Map(), messages = new Map();
     const node = selector => {
-        if (!nodes.has(selector)) nodes.set(selector, { hidden: false, disabled: false, textContent: '' });
+        if (!nodes.has(selector)) nodes.set(selector, { hidden: false, disabled: false, textContent: '', querySelectorAll: () => [] });
         return nodes.get(selector);
     };
     const root = { querySelector: node, querySelectorAll: selector => selector === 'button' ? [...nodes.values()] : [] };
     const dialog = { open: false, querySelector: selector => node(`dialog ${selector}`), close() { this.open = false; }, showModal() { this.open = true; } };
-    const context = vm.createContext({ status, root, dialog, api, form: { querySelector: node },
+    const context = vm.createContext({ status, root, dialog, api, usbState: { supported: true, stage: 'idle' }, usbBusy: false, form: { querySelector: node },
         labels: { SUCCEEDED: '同步完成', FAILED: '同步未完成', PREVIEW: '预览完成' }, localError: '', starting: false,
         setupBusy: false, configLoaded: true, driveConfig: {}, updateProviderFields() {}, progressDetail: () => '',
         text: (selector, value) => messages.set(selector, value), scopeText: value => value.join('、'),
