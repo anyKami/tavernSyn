@@ -49,6 +49,14 @@ async function makeDevice(name) {
 async function pair(computer, phone, direction) {
     const host = await new UsbSession(computer).open(), peer = await new UsbSession(phone).open();
     sessions.push(host, peer);
+    const observedBytes = new Map();
+    for (const endpoint of [host, peer]) {
+        const progress = endpoint.manager.progress;
+        endpoint.manager.progress = value => {
+            if (Number.isSafeInteger(value.bytes)) observedBytes.set(endpoint, value.bytes);
+            return progress.call(endpoint.manager, value);
+        };
+    }
     const server = await startUsbServer(peer, { port: 0 }); servers.push(server);
     const result = await syncUsb(host, { origin: `http://127.0.0.1:${server.port}`, token: server.token, direction,
         confirmPeer: async identity => { assert.equal(identity.deviceId, phone.deviceId); } });
@@ -56,8 +64,9 @@ async function pair(computer, phone, direction) {
     // Both sides must expose real file-content progress, not a synthetic timer.
     for (const session of [host, peer]) {
         const job = session.manager.job;
-        assert.ok(job.bytes > 0 && job.progress && Number.isSafeInteger(job.progress.bytes));
-        assert.equal(job.progress.bytes, job.bytes, 'final transfer byte counter must match the frozen manifest');
+        assert.ok(job.bytes > 0 && Number.isSafeInteger(observedBytes.get(session)),
+            'send and receive must each report real file content bytes before completion');
+        assert.equal(observedBytes.get(session), job.bytes, 'transfer byte counter must match the manifest');
     }
     await server.closed; await host.close(); await peer.close();
     return { host, peer, result };
