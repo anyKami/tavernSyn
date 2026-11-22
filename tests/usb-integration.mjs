@@ -191,7 +191,7 @@ try {
             await until(() => instances.every(x => x.usb.stage === 'completed' && !x.manager.busy), 'both completed and restarted');
             assert.equal(instances.every(x => !x.lifecycle.stopped), true);
             for (const instance of instances) {
-                const response = await fetch(instance.device.origin);
+                const response = await fetch(instance.device.origin, { redirect: 'manual' });
                 assert.ok([200, 302].includes(response.status));
                 assert.equal(response.headers.get('x-tavernsyn-epoch'), instance.lifecycle.nonce);
                 await response.arrayBuffer();
