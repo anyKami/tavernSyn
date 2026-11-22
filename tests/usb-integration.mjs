@@ -10,6 +10,10 @@ import { PROJECT, loadDevice } from '../lib/device.mjs';
 import { atomicJson, exists, readJson, run } from '../lib/io.mjs';
 import { install } from '../bin/install.mjs';
 import { UsbSession } from '../helper/usb-sync.mjs';
+import { UsbController } from '../helper/usb-controller.mjs';
+import { Lifecycle } from '../helper/lifecycle.mjs';
+import { Manager } from '../helper/manager.mjs';
+import { hashFile } from '../lib/manifest.mjs';
 import { startUsbServer, syncUsb } from '../helper/usb-service.mjs';
 import { portableState } from '../lib/snapshot.mjs';
 import { recoveryStatus, rollback } from '../helper/apply.mjs';
@@ -140,6 +144,77 @@ try {
         assert.equal(await exists(path.join(profile(computer), 'cli-computer.txt')), false);
         checks.push('real_cli_phone_choice_controls_waiting_computer_with_same_direction_meaning');
     }
+
+    // The browser-driven flow must be tested while both actual ST processes
+    // are running. Only physical ADB is simulated by a localhost tunnel.
+    async function managedPair(direction, chooser) {
+        const port = await freePort(), instances = [];
+        async function createManaged(device, mode) {
+            let manager;
+            const lifecycle = new Lifecycle(device, (action, payload) => manager.action(action, payload));
+            manager = new Manager(device, lifecycle);
+            const leaseFile = path.join(device.state, 'launcher.lock');
+            await atomicJson(leaseFile, { pid: process.pid, nonce: randomUUID() });
+            const usb = new UsbController(device, lifecycle, manager, { mode, port, log: () => {},
+                adapter: mode === 'client' ? { connectUsb: async () => ({ origin: 'http://127.0.0.1:' + port + '/', close: async () => {} }) } : {},
+            });
+            manager.usb = usb;
+            // The fixture has no browser. Return a genuine on-disk hash receipt.
+            lifecycle.receipt = async nonce => {
+                const file = path.join(device.dataRoot, device.profile, 'settings.json');
+                return { nonce, created: Date.now(), files: [{ path: file, sha256: await hashFile(file) }] };
+            };
+            const instance = { device, lifecycle, manager, usb, leaseFile };
+            instances.push(instance);
+            await lifecycle.start();
+            return instance;
+        }
+        const until = async (predicate, label) => {
+            const deadline = Date.now() + 90000;
+            while (Date.now() < deadline) {
+                if (predicate()) return;
+                if (instances.some(x => x.usb.stage === 'failed')) throw new Error(label + ': ' +
+                    instances.map(x => x.device.deviceName + ':' + x.usb.stage + ':' + (x.usb.error?.message || '')).join('; '));
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            throw new Error('Timed out: ' + label + ' / ' + instances.map(x => x.usb.stage).join(','));
+        };
+        try {
+            const phoneApp = await createManaged(phone, 'serve');
+            const computerApp = await createManaged(computer, 'client');
+            const uuid = () => randomUUID();
+            await phoneApp.usb.connect({ receipt: uuid(), tab: uuid() });
+            await computerApp.usb.connect({ receipt: uuid(), tab: uuid() });
+            await until(() => instances.every(x => x.usb.stage === 'connected'), 'both connected with live ST');
+            assert.equal(instances.every(x => !x.lifecycle.stopped), true);
+            await (chooser === 'phone' ? phoneApp.usb : computerApp.usb).select(direction);
+            await until(() => instances.every(x => x.usb.stage === 'completed' && !x.manager.busy), 'both completed and restarted');
+            assert.equal(instances.every(x => !x.lifecycle.stopped), true);
+            for (const instance of instances) {
+                const response = await fetch(instance.device.origin);
+                assert.ok([200, 302].includes(response.status));
+                assert.equal(response.headers.get('x-tavernsyn-epoch'), instance.lifecycle.nonce);
+                await response.arrayBuffer();
+            }
+        } finally {
+            for (const instance of instances.reverse()) {
+                await instance.usb.cancelForExit().catch(() => {});
+                await instance.lifecycle.close().catch(() => {});
+                await fs.unlink(instance.leaseFile).catch(() => {});
+            }
+        }
+    }
+    if (process.platform !== 'win32') {
+        await fs.writeFile(path.join(profile(computer), 'plugin-ui-computer.txt'), 'computer controls USB UI');
+        await managedPair('push', 'computer');
+        assert.equal(await fs.readFile(path.join(profile(phone), 'plugin-ui-computer.txt'), 'utf8'), 'computer controls USB UI');
+        checks.push('plugin_ui_pc_selects_direction_with_both_real_st_servers_running_then_restarts_both');
+        await fs.writeFile(path.join(profile(phone), 'plugin-ui-phone.txt'), 'phone controls USB UI');
+        await managedPair('pull', 'phone');
+        assert.equal(await fs.readFile(path.join(profile(computer), 'plugin-ui-phone.txt'), 'utf8'), 'phone controls USB UI');
+        checks.push('plugin_ui_phone_selects_direction_with_both_real_st_servers_running_then_restarts_both');
+    }
+
     const report = { date: new Date().toISOString(), platform: process.platform, node: process.version,
         sillyTavern: '1.19.0', commit: '06bde939fb1e9c4c8d8641d810f0a916b5bce127', passed: true, checks,
         hardwareUsb: false, note: 'Real loopback HTTP, CLI processes and actual SillyTavern lifecycle; CLI ADB forwarding is simulated. Physical Windows/Android hardware not exercised.' };

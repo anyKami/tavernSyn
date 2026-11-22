@@ -5,7 +5,7 @@ import vm from 'node:vm';
 
 const source = await fs.readFile(new URL('../ui/index.js', import.meta.url), 'utf8');
 const direction = source.slice(source.indexOf('function confirmDirection('), source.indexOf('const target ='));
-const begin = source.slice(source.indexOf('async function begin('), source.indexOf("root.querySelector('.ts-push').onclick"));
+const begin = source.slice(source.indexOf('async function begin('), source.indexOf('async function usbConnect()'));
 
 for (const scoped of [false, true]) for (const action of ['push', 'pull']) {
     for (const accept of [true, false]) test(`${scoped ? 'selected' : 'complete'} ${action} asks once and ${accept ? 'starts' : 'cancels'}`, async () => {

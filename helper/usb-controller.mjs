@@ -152,6 +152,9 @@ export class UsbController {
             await this.tunnel?.close().catch(() => {});
             try { if (this.session?.opened || this.session?.locks?.length) await this.session.close(); }
             catch (error) { failure ??= error; this.error = safeError(error); this.update('failed', { note: 'USB 任务未能释放全部文件锁，请查看恢复日志。' }); }
+            if (this.stoppedByUsb && !this.lifecycle.stopped && !this.lifecycle.closing) {
+                await this.lifecycle.resume().catch(() => {});
+            }
             if (this.stoppedByUsb && this.lifecycle.stopped && !this.lifecycle.closing && !this.session?.opened) {
                 try {
                     const outcome = this.stage;
