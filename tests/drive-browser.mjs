@@ -243,8 +243,11 @@ try {
         && document.querySelector('.ts-usb-overlay .ts-usb-live-stage')?.textContent.includes('校验文件'));
     assert.equal(await page.locator('.ts-usb-overlay').isVisible(), true, '100% bytes does not mean the apply is finished');
     usbOffline = false;
-    usbStatus = { ...usbStatus, stage: 'completed', job: { ...usbStatus.job, phase: 'SUCCEEDED' } };
+    // The real completion receipt removes the transient progress field.
+    usbStatus = { ...usbStatus, stage: 'completed', job: { ...usbStatus.job, phase: 'SUCCEEDED', progress: null } };
     await page.waitForFunction(() => document.querySelector('.ts-usb-status')?.textContent.includes('USB 同步完成'));
+    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay .ts-usb-progress')?.value === 100);
+    assert.match(await page.locator('.ts-usb-overlay .ts-usb-live-bytes').textContent(), /2.00 MiB \/ 2.00 MiB.*100.0%/);
     holdUsbSelect = false; failUsbSelect = false;
     checks.push('100% transfer stays visible through verification and final success after ST returns');
     assert.deepEqual(errors, []);

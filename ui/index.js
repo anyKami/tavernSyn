@@ -221,7 +221,10 @@ function render() {
     const step = phases[job.phase] || (pending ? '正在通知另一端并等待后台确认…'
         : usbNames[usbState.stage] || '正在检查 USB 任务');
     const title = (pending ? '已点击 ' : usbAccepted(usbState.stage) ? '已确认 ' : '') + name;
-    const progressBytes = Number(job.progress?.bytes), total = Number(job.bytes);
+    // Final completion intentionally clears in-flight progress. Keep the
+    // successful transfer at 100% instead of showing an indeterminate bar.
+    const total = Number(job.bytes);
+    const progressBytes = usbState.stage === 'completed' && Number.isSafeInteger(total) ? total : Number(job.progress?.bytes);
     const metered = Number.isSafeInteger(progressBytes) && progressBytes >= 0 && Number.isSafeInteger(total) && total >= 0;
     const percentage = metered && total > 0 ? Math.min(100, Math.max(0, progressBytes / total * 100)) : null;
     const description = metered ? '已传输 ' + usbSize(progressBytes) + ' / ' + usbSize(total)
