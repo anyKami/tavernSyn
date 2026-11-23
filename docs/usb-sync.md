@@ -1,6 +1,6 @@
 # USB 数据线完整同步
 
-USB 模式直接在 Windows 电脑和 Android Termux 手机之间同步酒馆数据，无需 VPS 或 Tailscale。当前指南对应 **TavernSyn 0.6.0**。两端在插件中连接后，在电脑或手机任意一端选择一次方向，即开始完整同步：以来源设备为准替换目标设备的便携数据，包含删除。两端支持时自动使用**文件级增量传输**，只通过数据线发送新增或内容改变的文件。
+USB 模式直接在 Windows 电脑和 Android Termux 手机之间同步酒馆数据，无需 VPS 或 Tailscale。当前指南对应 **TavernSyn 0.6.1**。两端在插件中连接后，在电脑或手机任意一端选择一次方向，即开始完整同步：以来源设备为准替换目标设备的便携数据，包含删除。两端支持时自动使用**文件级增量传输**，只通过数据线发送新增或内容改变的文件。
 
 ## 推荐：直接在插件中操作
 
@@ -40,7 +40,7 @@ USB 模式直接在 Windows 电脑和 Android Termux 手机之间同步酒馆数
 
 ## 使用前准备
 
-1. 两端已安装适配的 SillyTavern 1.19.0、Node.js 20+，建议均使用 **0.6.0 或更新版本 TavernSyn** 以启用增量传输；分别正常启动过酒馆，用户数据目录已初始化。USB 自动连接协议从 0.5.0 起提供，不能与更早版本的 USB 入口混用。
+1. 两端已安装[通过源码指纹检查的 SillyTavern](installation.md#前提与目录)、Node.js 20+，建议均使用 **0.6.0 或更新版本 TavernSyn** 以启用增量传输；分别正常启动过酒馆，用户数据目录已初始化。USB 自动连接协议从 0.5.0 起提供，不能与更早版本的 USB 入口混用。
 2. 两端更新后可继续使用已有的电脑 `USB-TavernSyn.cmd` 和手机 `usb-tavernsyn.sh`。酒馆目录还没有 USB 入口时，再运行 `install.ps1` / `install.sh` 生成；只更新前端扩展不会生成入口。使用过自定义控制目录时，安装时继续指定原目录。
 3. 电脑安装官方 [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools)，把其目录加入自己的 PATH。USB 入口会直接查找 `adb`；安装器不自动下载 ADB。未配置 PATH 时，可按后文的高级命令使用 `--adb` 指定完整路径。
 4. 手机在开发者选项中开启 **USB 调试**，用能传数据的数据线连接电脑，解锁手机并允许这台电脑的调试授权。步骤见 [Android 官方 ADB 文档](https://developer.android.com/tools/adb)。首次连接可能还需要手机厂商的 Windows USB 驱动。
