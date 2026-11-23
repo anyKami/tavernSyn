@@ -119,11 +119,6 @@ dialog.innerHTML = '<h3>同步酒馆</h3><p class="ts-phase"></p><p class="ts-de
 dialog.addEventListener('cancel', event => event.preventDefault());
 dialog.addEventListener('click', event => event.stopPropagation());
 document.body.append(dialog);
-const usbOverlay = document.createElement('div');
-usbOverlay.className = 'ts-usb-overlay'; usbOverlay.hidden = true;
-usbOverlay.setAttribute('role', 'status'); usbOverlay.setAttribute('aria-live', 'polite');
-usbOverlay.innerHTML = '<strong class="ts-usb-live-title"></strong><div class="ts-usb-live-stage"></div><progress class="ts-usb-progress" max="100"></progress><small class="ts-usb-live-bytes"></small>';
-document.body.append(usbOverlay);
 const pairingDialog = document.createElement('dialog'); pairingDialog.className = 'ts-dialog ts-pairing-dialog';
 pairingDialog.innerHTML = '<h3>Google 云盘仓库配对码</h3><p>在另一台设备授权同一个 Google 账号后，粘贴此配对码加入仓库。它包含解密密钥，请保存到你自己的密码管理器；不要发到公开位置。</p><textarea class="text_pole ts-pairing-code" readonly rows="5" aria-label="仓库配对码" spellcheck="false"></textarea><p class="ts-pairing-result" role="status"></p><div class="ts-dialog-actions"><button type="button" class="menu_button ts-pairing-copy">复制配对码</button><button type="button" class="menu_button ts-pairing-close">关闭并隐藏</button></div>';
 document.body.append(pairingDialog);
@@ -239,7 +234,7 @@ function render() {
             : statusText + (usbState.peer?.deviceName ? ' 对端：' + usbState.peer.deviceName : '')
                 + (usbState.error?.message ? ' ' + usbState.error.message : '') + (usbState.note ? ' ' + usbState.note : '');
     if (visible && terminal && !starting) text('.ts-phase', (pending ? 'USB 指令已发起' : 'USB ' + (usbNames[usbState.stage] || '同步中')));
-    for (const holder of [root.querySelector('.ts-usb-live'), usbOverlay]) {
+    for (const holder of [root.querySelector('.ts-usb-live')]) {
         holder.hidden = !visible;
         if (!visible) continue;
         holder.dataset.stage = usbState.stage;

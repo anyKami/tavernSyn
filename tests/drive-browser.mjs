@@ -217,39 +217,41 @@ try {
     await page.locator('.ts-usb-connect').tap();
     await page.locator('.ts-usb-directions').waitFor({ state: 'visible' });
     await page.locator('.ts-usb-push').tap();
-    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay:not([hidden])')?.textContent.includes('已点击 电脑 → 手机'));
+    assert.equal(await page.locator('body > .ts-usb-overlay').count(), 0, 'No global USB overlay should be injected');
+    await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live:not([hidden])')?.textContent.includes('已点击 电脑 → 手机'));
     assert.equal(await page.locator('.ts-usb-directions').isVisible(), false, 'directions disappear immediately after touching');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     checks.push('USB direction tap immediately replaces buttons with visible phone-safe progress even before HTTP acknowledgement');
 
-    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay')?.textContent.includes('正在通知另一端'));
+    await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live')?.textContent.includes('正在通知另一端'));
     usbStatus = { stage: 'transferring', supported: true, watchToken: 'browser-monitor-token',
         peer: { deviceName: 'My phone' }, selection: { direction: 'push' },
         job: { phase: 'DOWNLOADING', bytes: 2097152, files: 7, progress: { stage: 'usb', bytes: 1048576, files: 3 } } };
     usbOffline = true;
-    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay .ts-usb-progress')?.value === 50);
-    assert.match(await page.locator('.ts-usb-overlay .ts-usb-live-bytes').textContent(), /1.00 MiB \/ 2.00 MiB.*50.0%/);
+    await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live .ts-usb-progress')?.value === 50);
+    assert.match(await page.locator('#tavernsyn-panel .ts-usb-live .ts-usb-live-bytes').textContent(), /1.00 MiB \/ 2.00 MiB.*50.0%/);
     assert.match(await page.locator('.ts-usb-live .ts-usb-live-bytes').textContent(), /1.00 MiB \/ 2.00 MiB/);
-    assert.equal(await page.locator('.ts-usb-overlay').isVisible(), true);
+    assert.equal(await page.locator('#tavernsyn-panel .ts-usb-live').isVisible(), true);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     assert.equal(typeof finishUsbSelect, 'function');
     finishUsbSelect();
     await page.waitForTimeout(100);
-    assert.equal(await page.locator('.ts-usb-overlay').isVisible(), true, 'lost direction acknowledgement must not dismiss progress');
+    assert.equal(await page.locator('#tavernsyn-panel .ts-usb-live').isVisible(), true, 'lost direction acknowledgement must not dismiss progress');
     checks.push('while ST is offline the launcher watch token reports authentic 1 MiB / 2 MiB progress, not a fabricated estimate');
 
     usbStatus = { ...usbStatus, job: { ...usbStatus.job, phase: 'VERIFYING', progress: { stage: 'usb', bytes: 2097152, files: 7 } } };
-    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay .ts-usb-progress')?.value === 100
-        && document.querySelector('.ts-usb-overlay .ts-usb-live-stage')?.textContent.includes('校验文件'));
-    assert.equal(await page.locator('.ts-usb-overlay').isVisible(), true, '100% bytes does not mean the apply is finished');
+    await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live .ts-usb-progress')?.value === 100
+        && document.querySelector('#tavernsyn-panel .ts-usb-live .ts-usb-live-stage')?.textContent.includes('校验文件'));
+    assert.equal(await page.locator('#tavernsyn-panel .ts-usb-live').isVisible(), true, '100% bytes does not mean the apply is finished');
     usbOffline = false;
     // The real completion receipt removes the transient progress field.
     usbStatus = { ...usbStatus, stage: 'completed', job: { ...usbStatus.job, phase: 'SUCCEEDED', progress: null } };
     await page.waitForFunction(() => document.querySelector('.ts-usb-status')?.textContent.includes('USB 同步完成'));
-    await page.waitForFunction(() => document.querySelector('.ts-usb-overlay .ts-usb-progress')?.value === 100);
-    assert.match(await page.locator('.ts-usb-overlay .ts-usb-live-bytes').textContent(), /2.00 MiB \/ 2.00 MiB.*100.0%/);
+    await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live .ts-usb-progress')?.value === 100);
+    assert.match(await page.locator('#tavernsyn-panel .ts-usb-live .ts-usb-live-bytes').textContent(), /2.00 MiB \/ 2.00 MiB.*100.0%/);
+    assert.equal(await page.locator('body > .ts-usb-overlay').count(), 0, 'Completed USB sync must never leave a floating overlay');
     holdUsbSelect = false; failUsbSelect = false;
-    checks.push('100% transfer stays visible through verification and final success after ST returns');
+    checks.push('100% transfer stays visible inside the extension through verification and success; no page-level overlay remains');
     assert.deepEqual(errors, []);
     await fs.writeFile(`${root}/drive-ui-browser.json`, JSON.stringify({ checks, errors, passed: checks.length, browser: 'headless Chromium with touch emulation, mocked API; no physical Android, USB or Google account', at: new Date().toISOString() }, null, 2));
     console.log(JSON.stringify({ passed: checks.length, checks, errors }, null, 2));
