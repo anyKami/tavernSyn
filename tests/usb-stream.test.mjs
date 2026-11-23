@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
-import { encodeUsb, receiveUsb, USB_MAX_MANIFEST_BYTES } from '../lib/usb-stream.mjs';
+import { encodeUsb, receiveUsb, planUsb, USB_MAX_MANIFEST_BYTES } from '../lib/usb-stream.mjs';
 import { scan, seal, verify } from '../lib/manifest.mjs';
 import { exists } from '../lib/io.mjs';
 
@@ -24,9 +24,9 @@ async function collect(iterable) {
     for await (const chunk of iterable) chunks.push(chunk);
     return Buffer.concat(chunks);
 }
-function packet(manifest, content = Buffer.alloc(0)) {
+function packet(manifest, content = Buffer.alloc(0), magic = 'TSUSB001') {
     const json = Buffer.from(JSON.stringify(manifest)), header = Buffer.alloc(12);
-    header.write('TSUSB001'); header.writeUInt32BE(json.length, 8);
+    header.write(magic); header.writeUInt32BE(json.length, 8);
     return Buffer.concat([header, json, content]);
 }
 function file(name, content = Buffer.alloc(0)) {
@@ -168,4 +168,193 @@ test('USB progress callback failure closes the stream and preserves isolated sta
     assert.equal(await exists(target), true);
     // The failed file's descriptor has been closed, including on Windows.
     await fs.rename(path.join(target, 'data'), path.join(target, 'closed'));
+});
+
+test('USB delta transfers changed bytes and new files, reuses matching content despite mtime differences, and omits deletions', async t => {
+    const { source, target, root } = await fixture(t), basisPath = path.join(root, 'basis');
+    await fs.mkdir(basisPath);
+    const unchanged = randomBytes(3 * 1024 * 1024 + 17);
+    for (const directory of [source, basisPath]) {
+        await fs.writeFile(path.join(directory, 'unchanged.bin'), unchanged);
+        await fs.writeFile(path.join(directory, 'same-size.txt'), directory === source ? 'new!' : 'old!');
+        await fs.utimes(path.join(directory, 'same-size.txt'), 1700000000, 1700000000);
+    }
+    await fs.utimes(path.join(source, 'unchanged.bin'), 1700000020, 1700000020);
+    await fs.utimes(path.join(basisPath, 'unchanged.bin'), 1700000000, 1700000000);
+    await fs.writeFile(path.join(source, '新增 空.jsonl'), '');
+    await fs.writeFile(path.join(source, 'new.txt'), 'new file');
+    await fs.writeFile(path.join(basisPath, 'deleted.txt'), 'target-only');
+    const manifest = await scan(source), basisManifest = await scan(basisPath), expected = planUsb(manifest, basisManifest);
+    assert.equal(expected.mode, 'incremental'); assert.equal(expected.bytes, 12); assert.equal(expected.files, 3);
+    assert.equal(expected.reusedBytes, unchanged.length); assert.equal(expected.reusedFiles, 1);
+    assert.equal(expected.totalBytes, manifest.bytes); assert.equal(expected.totalFiles, manifest.files.length);
+    assert.equal(planUsb(manifest).mode, 'full'); assert.equal(planUsb(manifest).bytes, manifest.bytes);
+    let sent, received, preflight = false;
+    const wire = await collect(encodeUsb(source, manifest, { basisManifest, onProgress: value => { sent = value; } }));
+    assert.equal(wire.subarray(0, 8).toString(), 'TSUSB002');
+    assert.equal(wire.length - 12 - wire.readUInt32BE(8), expected.bytes);
+    const result = await receiveUsb(Readable.from(fragmented(wire)), target, {
+        basis: { payload: basisPath, manifest: basisManifest },
+        onManifest: async (value, plan) => {
+            assert.equal(await exists(target), false); assert.deepEqual(value, manifest); assert.deepEqual(plan, expected); preflight = true;
+        },
+        onProgress: value => {
+            assert(value.bytes >= (received?.bytes ?? 0)); assert(value.files >= (received?.files ?? 0));
+            assert(value.bytes <= expected.bytes); assert(value.files <= expected.files); received = value;
+        },
+    });
+    assert.equal(preflight, true); assert.deepEqual(result, manifest);
+    assert.deepEqual(sent, { bytes: 12, files: 3 }); assert.deepEqual(received, sent);
+    await verify(target, manifest);
+    assert.equal(await exists(path.join(target, 'deleted.txt')), false);
+    assert.equal(await exists(path.join(basisPath, 'unchanged.bin')), false);
+    assert.equal(await fs.readFile(path.join(basisPath, 'deleted.txt'), 'utf8'), 'target-only');
+    assert.equal(Math.floor((await fs.stat(path.join(target, 'unchanged.bin'))).mtimeMs / 1000), 1700000020);
+    if (process.platform !== 'win32') assert.equal((await fs.stat(path.join(target, 'unchanged.bin'))).mode & 0o777, 0o600);
+});
+
+test('USB delta supports zero transferred bytes, deleted files, and a fully empty final snapshot', async t => {
+    const { source, root, target } = await fixture(t), basisPath = path.join(root, 'basis');
+    await fs.mkdir(basisPath);
+    for (const directory of [source, basisPath]) {
+        await fs.writeFile(path.join(directory, 'shared.txt'), 'identical');
+        await fs.writeFile(path.join(directory, 'empty.txt'), '');
+    }
+    await fs.writeFile(path.join(basisPath, 'delete.txt'), 'removed by source');
+    const manifest = await scan(source), basisManifest = await scan(basisPath);
+    let sent, received;
+    const wire = await collect(encodeUsb(source, manifest, { basisManifest, onProgress: value => { sent = value; } }));
+    assert.equal(wire.length, 12 + wire.readUInt32BE(8)); assert.deepEqual(sent, { bytes: 0, files: 0 });
+    await receiveUsb(Readable.from([wire]), target, { basis: { payload: basisPath, manifest: basisManifest }, onProgress: value => { received = value; } });
+    assert.deepEqual(received, { bytes: 0, files: 0 }); await verify(target, manifest);
+    assert.equal(await exists(path.join(target, 'delete.txt')), false);
+    const empty = seal([]), emptyTarget = path.join(root, 'empty-target');
+    await receiveUsb(Readable.from(encodeUsb(source, empty, { basisManifest: manifest })), emptyTarget,
+        { basis: { payload: target, manifest }, onProgress: value => { received = value; } });
+    assert.deepEqual(await fs.readdir(emptyTarget), []); assert.deepEqual(received, { bytes: 0, files: 0 });
+    assert.equal(await fs.readFile(path.join(target, 'shared.txt'), 'utf8'), 'identical');
+});
+
+test('USB delta recreates file-to-directory and directory-to-file changes without carrying target-only paths', async t => {
+    const { source, target, root } = await fixture(t), basisPath = path.join(root, 'basis');
+    await fs.mkdir(basisPath); await fs.mkdir(path.join(basisPath, 'directory'));
+    await fs.mkdir(path.join(source, 'file'));
+    await fs.writeFile(path.join(basisPath, 'directory/old'), 'old child');
+    await fs.writeFile(path.join(basisPath, 'file'), 'old file');
+    await fs.writeFile(path.join(source, 'directory'), 'new file');
+    await fs.writeFile(path.join(source, 'file/new'), 'new child');
+    const manifest = await scan(source), basisManifest = await scan(basisPath);
+    assert.equal(planUsb(manifest, basisManifest).reusedFiles, 0);
+    await receiveUsb(Readable.from(encodeUsb(source, manifest, { basisManifest })), target, { basis: { payload: basisPath, manifest: basisManifest } });
+    await verify(target, manifest);
+    assert.equal(await fs.readFile(path.join(target, 'directory'), 'utf8'), 'new file');
+    assert.equal(await fs.readFile(path.join(target, 'file/new'), 'utf8'), 'new child');
+    assert.equal(await fs.readFile(path.join(basisPath, 'file'), 'utf8'), 'old file');
+});
+
+test('USB delta rejects corrupted, resized, missing or replaced basis files, including same-size same-mtime corruption', async t => {
+    const { source, root } = await fixture(t); await fs.writeFile(path.join(source, 'data'), 'abcd');
+    const manifest = await scan(source);
+    for (const [index, change] of ['content', 'size', 'missing', 'directory'].entries()) {
+        const basisPath = path.join(root, `basis-${index}`), target = path.join(root, `target-${index}`);
+        await fs.mkdir(basisPath); await fs.writeFile(path.join(basisPath, 'data'), 'abcd');
+        const basisManifest = await scan(basisPath), stat = await fs.stat(path.join(basisPath, 'data'));
+        if (change === 'content' || change === 'size') {
+            await fs.writeFile(path.join(basisPath, 'data'), change === 'content' ? 'efgh' : 'longer');
+            await fs.utimes(path.join(basisPath, 'data'), stat.atime, stat.mtime);
+        } else {
+            await fs.unlink(path.join(basisPath, 'data'));
+            if (change === 'directory') await fs.mkdir(path.join(basisPath, 'data'));
+        }
+        const input = Readable.from(encodeUsb(source, manifest, { basisManifest }));
+        await assert.rejects(receiveUsb(input, target, { basis: { payload: basisPath, manifest: basisManifest } }), { code: 'USB_BASIS_CHANGED' });
+        assert.equal(input.destroyed, true);
+        assert.equal(await fs.readFile(path.join(source, 'data'), 'utf8'), 'abcd');
+    }
+});
+
+test('USB delta validates its envelope, both manifests and basis identity before creating a target', async t => {
+    const { source, root } = await fixture(t), basisPath = path.join(root, 'basis'); await fs.mkdir(basisPath);
+    const manifest = await scan(source), basisManifest = await scan(basisPath), basis = { payload: basisPath, manifest: basisManifest };
+    const envelope = { manifest, basisDigest: basisManifest.digest };
+    const cases = [
+        [null, basis, 'MANIFEST'], [[], basis, 'MANIFEST'], [{ manifest }, basis, 'MANIFEST'],
+        [{ basisDigest: basisManifest.digest }, basis, 'MANIFEST'], [{ ...envelope, extra: true }, basis, 'MANIFEST'],
+        [{ ...envelope, basisDigest: 'bad' }, basis, 'MANIFEST'],
+        [{ ...envelope, manifest: { ...manifest, digest: '0'.repeat(64) } }, basis, 'MANIFEST'],
+        [envelope, null, 'USB_BASIS'], [{ ...envelope, basisDigest: '0'.repeat(64) }, basis, 'USB_BASIS'],
+        [envelope, { ...basis, manifest: { ...basisManifest, digest: '0'.repeat(64) } }, 'MANIFEST'],
+        [envelope, { ...basis, payload: path.join(root, 'missing') }, 'USB_BASIS'],
+    ];
+    for (const [index, [value, candidate, code]] of cases.entries()) {
+        const target = path.join(root, `invalid-${index}`);
+        await assert.rejects(receiveUsb(Readable.from([packet(value, Buffer.alloc(0), 'TSUSB002')]), target, { basis: candidate }), { code });
+        assert.equal(await exists(target), false);
+    }
+    const nested = path.join(basisPath, 'nested');
+    await assert.rejects(receiveUsb(Readable.from([packet(envelope, Buffer.alloc(0), 'TSUSB002')]), nested, { basis }), { code: 'USB_BASIS' });
+    assert.equal(await exists(nested), false);
+    assert.throws(() => planUsb(manifest, seal([file('a'), file('a/b')])), { code: 'FILENAME_COLLISION' });
+});
+
+test('USB delta rejects truncated, corrupt and trailing changed-file bytes', async t => {
+    const { source, root } = await fixture(t), basisPath = path.join(root, 'basis'); await fs.mkdir(basisPath);
+    await fs.writeFile(path.join(source, 'data'), randomBytes(4096));
+    const manifest = await scan(source), basisManifest = await scan(basisPath);
+    const wire = await collect(encodeUsb(source, manifest, { basisManifest })), corrupt = Buffer.from(wire); corrupt[corrupt.length - 1] ^= 1;
+    const cases = [[wire.subarray(0, -1), 'USB_TRUNCATED'], [corrupt, 'INTEGRITY'], [Buffer.concat([wire, Buffer.from('extra')]), 'USB_TRAILING']];
+    for (const [index, [value, code]] of cases.entries()) {
+        let transferred = false;
+        await assert.rejects(receiveUsb(Readable.from(fragmented(value)), path.join(root, `target-${index}`),
+            { basis: { payload: basisPath, manifest: basisManifest }, onTransferred: () => { transferred = true; } }), { code });
+        assert.equal(transferred, false);
+    }
+});
+
+test('USB delta acknowledges a fully verified wire stream before hashing and moving local reuse files', async t => {
+    const { source, target, root } = await fixture(t), basisPath = path.join(root, 'basis'); await fs.mkdir(basisPath);
+    for (const directory of [source, basisPath]) await fs.writeFile(path.join(directory, 'a-reused'), 'same');
+    await fs.writeFile(path.join(source, 'z-changed'), 'new file');
+    const manifest = await scan(source), basisManifest = await scan(basisPath);
+    const wire = await collect(encodeUsb(source, manifest, { basisManifest }));
+    let ended = false, transferred = false;
+    async function* stream() { yield* fragmented(wire); ended = true; }
+    await receiveUsb(stream(), target, { basis: { payload: basisPath, manifest: basisManifest },
+        onTransferred: async (value, plan) => {
+            assert.equal(ended, true); assert.deepEqual(value, manifest); assert.equal(plan.reusedFiles, 1);
+            assert.equal(await fs.readFile(path.join(target, 'z-changed'), 'utf8'), 'new file');
+            assert.equal(await exists(path.join(target, 'a-reused')), false);
+            assert.equal(await fs.readFile(path.join(basisPath, 'a-reused'), 'utf8'), 'same');
+            transferred = true;
+        },
+    });
+    assert.equal(transferred, true); assert.equal(await exists(path.join(basisPath, 'a-reused')), false);
+    await verify(target, manifest);
+});
+
+test('USB full streams still transfer everything when a basis option is present', async t => {
+    const { source, target, root } = await fixture(t), basisPath = path.join(root, 'basis');
+    await fs.mkdir(basisPath); await fs.writeFile(path.join(source, 'data'), 'identical'); await fs.writeFile(path.join(basisPath, 'data'), 'identical');
+    const manifest = await scan(source), basisManifest = await scan(basisPath); let planned, received;
+    await receiveUsb(Readable.from(encodeUsb(source, manifest)), target, { basis: { payload: basisPath, manifest: basisManifest },
+        onManifest: (_value, plan) => { planned = plan; }, onProgress: value => { received = value; } });
+    assert.equal(planned.mode, 'full'); assert.equal(planned.reusedFiles, 0); assert.equal(planned.bytes, manifest.bytes);
+    assert.deepEqual(received, { bytes: manifest.bytes, files: manifest.files.length });
+    assert.equal(await fs.readFile(path.join(basisPath, 'data'), 'utf8'), 'identical'); await verify(target, manifest);
+});
+
+test('USB delta rejects symlinked and hard-linked reuse sources without touching their external files', { skip: process.platform === 'win32' }, async t => {
+    const { source, root } = await fixture(t); await fs.writeFile(path.join(source, 'data'), 'identical');
+    const manifest = await scan(source), external = path.join(root, 'external'); await fs.writeFile(external, 'identical');
+    for (const link of ['symlink', 'hardlink']) {
+        const basisPath = path.join(root, link), target = path.join(root, `${link}-target`); await fs.mkdir(basisPath);
+        await fs.writeFile(path.join(basisPath, 'data'), 'identical'); const basisManifest = await scan(basisPath);
+        await fs.unlink(path.join(basisPath, 'data'));
+        if (link === 'symlink') await fs.symlink(external, path.join(basisPath, 'data'));
+        else await fs.link(external, path.join(basisPath, 'data'));
+        const before = await fs.stat(external);
+        await assert.rejects(receiveUsb(Readable.from(encodeUsb(source, manifest, { basisManifest })), target,
+            { basis: { payload: basisPath, manifest: basisManifest } }), { code: link === 'symlink' ? 'UNSAFE_PATH' : 'USB_BASIS_CHANGED' });
+        assert.equal(await fs.readFile(external, 'utf8'), 'identical'); assert.equal((await fs.stat(external)).mtimeMs, before.mtimeMs);
+    }
 });

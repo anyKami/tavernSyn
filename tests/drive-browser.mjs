@@ -226,18 +226,21 @@ try {
     await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live')?.textContent.includes('正在通知另一端'));
     usbStatus = { stage: 'transferring', supported: true, watchToken: 'browser-monitor-token',
         peer: { deviceName: 'My phone' }, selection: { direction: 'push' },
-        job: { phase: 'DOWNLOADING', bytes: 2097152, files: 7, progress: { stage: 'usb', bytes: 1048576, files: 3 } } };
+        job: { phase: 'DOWNLOADING', bytes: 20971520, files: 100,
+            transfer: { mode: 'incremental', bytes: 2097152, files: 7, reusedBytes: 18874368, reusedFiles: 93, totalBytes: 20971520, totalFiles: 100 },
+            progress: { stage: 'usb', bytes: 1048576, files: 3 } } };
     usbOffline = true;
     await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live .ts-usb-progress')?.value === 50);
     assert.match(await page.locator('#tavernsyn-panel .ts-usb-live .ts-usb-live-bytes').textContent(), /1.00 MiB \/ 2.00 MiB.*50.0%/);
     assert.match(await page.locator('.ts-usb-live .ts-usb-live-bytes').textContent(), /1.00 MiB \/ 2.00 MiB/);
+    assert.match(await page.locator('.ts-usb-live .ts-usb-live-bytes').textContent(), /增量传输.*本次传输 3 \/ 7 个文件.*本地复用 93 个文件（18.00 MiB）.*完整镜像 100 个文件（20.00 MiB）/);
     assert.equal(await page.locator('#tavernsyn-panel .ts-usb-live').isVisible(), true);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     assert.equal(typeof finishUsbSelect, 'function');
     finishUsbSelect();
     await page.waitForTimeout(100);
     assert.equal(await page.locator('#tavernsyn-panel .ts-usb-live').isVisible(), true, 'lost direction acknowledgement must not dismiss progress');
-    checks.push('while ST is offline the launcher watch token reports authentic 1 MiB / 2 MiB progress, not a fabricated estimate');
+    checks.push('offline USB incremental progress uses 1 MiB / 2 MiB wire bytes at 50%, with 18 MiB local reuse and the separate 20 MiB mirror size');
 
     usbStatus = { ...usbStatus, job: { ...usbStatus.job, phase: 'VERIFYING', progress: { stage: 'usb', bytes: 2097152, files: 7 } } };
     await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live .ts-usb-progress')?.value === 100
@@ -249,9 +252,37 @@ try {
     await page.waitForFunction(() => document.querySelector('.ts-usb-status')?.textContent.includes('USB 同步完成'));
     await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live .ts-usb-progress')?.value === 100);
     assert.match(await page.locator('#tavernsyn-panel .ts-usb-live .ts-usb-live-bytes').textContent(), /2.00 MiB \/ 2.00 MiB.*100.0%/);
+    assert.doesNotMatch(await page.locator('#tavernsyn-panel .ts-usb-live .ts-usb-live-bytes').textContent(), /已传输 20.00 MiB/);
     assert.equal(await page.locator('body > .ts-usb-overlay').count(), 0, 'Completed USB sync must never leave a floating overlay');
     holdUsbSelect = false; failUsbSelect = false;
     checks.push('100% transfer stays visible inside the extension through verification and success; no page-level overlay remains');
+
+    // All file content can be reused, while deletion, verification and apply
+    // still need to run. A zero-byte transfer is neither an unknown total nor
+    // permission to claim that the synchronization has completed early.
+    usbStatus = { ...usbStatus, stage: 'transferring', job: { phase: 'VERIFYING', bytes: 20971520, files: 100,
+        transfer: { mode: 'incremental', bytes: 0, files: 0, reusedBytes: 20971520, reusedFiles: 100, totalBytes: 20971520, totalFiles: 100 },
+        progress: { stage: 'usb', bytes: 0, files: 0 } } };
+    await page.waitForFunction(() => document.querySelector('#tavernsyn-panel .ts-usb-live .ts-usb-live-bytes')?.textContent.includes('无需传输文件内容（0 B）'));
+    assert.match(await page.locator('.ts-usb-live-stage').textContent(), /正在校验文件/);
+    assert.doesNotMatch(await page.locator('.ts-usb-status').textContent(), /USB 同步完成/);
+    assert.match(await page.locator('.ts-usb-live-bytes').textContent(), /本次传输 0 \/ 0 个文件.*本地复用 100 个文件（20.00 MiB）/);
+    assert.equal(await page.locator('.ts-usb-progress').getAttribute('value'), '100');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    usbStatus = { ...usbStatus, stage: 'completed', job: { ...usbStatus.job, phase: 'SUCCEEDED', progress: null } };
+    await page.waitForFunction(() => document.querySelector('.ts-usb-status')?.textContent.includes('USB 同步完成'));
+    assert.match(await page.locator('.ts-usb-live-bytes').textContent(), /无需传输文件内容（0 B）/);
+    assert.equal(await page.locator('body > .ts-usb-overlay').count(), 0);
+    checks.push('zero-byte USB reuse remains explicit through verification and completion without a false early success or global overlay');
+
+    // An older peer has no transfer plan and continues to show its original
+    // full snapshot counter until both endpoints support incremental transfer.
+    usbStatus = { ...usbStatus, stage: 'transferring', job: { phase: 'DOWNLOADING', bytes: 2097152, files: 7,
+        progress: { stage: 'usb', bytes: 1048576, files: 3 } } };
+    await page.waitForFunction(() => document.querySelector('.ts-usb-progress')?.value === 50);
+    assert.match(await page.locator('.ts-usb-live-bytes').textContent(), /已传输 1.00 MiB \/ 2.00 MiB.*50.0%/);
+    assert.doesNotMatch(await page.locator('.ts-usb-live-bytes').textContent(), /本地复用/);
+    checks.push('legacy USB status without a transfer plan retains its full-transfer progress display');
     assert.deepEqual(errors, []);
     await fs.writeFile(`${root}/drive-ui-browser.json`, JSON.stringify({ checks, errors, passed: checks.length, browser: 'headless Chromium with touch emulation, mocked API; no physical Android, USB or Google account', at: new Date().toISOString() }, null, 2));
     console.log(JSON.stringify({ passed: checks.length, checks, errors }, null, 2));

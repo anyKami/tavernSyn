@@ -61,7 +61,8 @@ export async function buildPlan(device, prepared, jobRoot) {
     if (prepared.scope) return buildScopedPlan(device, prepared, jobRoot);
     const { candidate, metadata } = prepared;
     const settings = path.join(candidate, 'profile/settings.json'), localSettings = path.join(device.dataRoot, device.profile, 'settings.json');
-    await atomicJson(settings, preserveSettings(await readJson(settings), await readJson(localSettings), device.pointers));
+    await atomicJson(settings, preserveSettings(await readJson(settings),
+        await exists(localSettings) ? await readJson(localSettings) : {}, device.pointers));
     for (const policy of device.preserveJson) {
         const next = path.join(candidate, ...policy.path.split('/'));
         const roots = await rootsFor(device); const root = roots.find(r => policy.path.startsWith(`${r.id}/`));

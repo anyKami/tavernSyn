@@ -5,11 +5,11 @@ import path from 'node:path';
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startUsbServer, connectUsbPeer, syncUsb, USB_PROTOCOL } from '../helper/usb-service.mjs';
-import { encodeUsb, receiveUsb } from '../lib/usb-stream.mjs';
-import { scan } from '../lib/manifest.mjs';
+import { encodeUsb, planUsb, receiveUsb, USB_DELTA_CAPABILITY } from '../lib/usb-stream.mjs';
+import { scan, seal, verify } from '../lib/manifest.mjs';
 
 const tempRoot = fileURLToPath(new URL('../.tmp/', import.meta.url));
 const TOKEN = '01'.repeat(16);
@@ -17,19 +17,43 @@ class Session {
     constructor(root, deviceName, events) {
         this.root = root; this.device = { deviceId: randomUUID(), deviceName }; this.events = events;
         this.stage = 'idle'; this.job = null; this.applyCount = 0;
+        this.manager = { progress: value => { this.progress = value; } };
     }
-    status() { return { protocol: USB_PROTOCOL, ...this.device, stage: this.stage, job: this.job, ...(this.result ? { result: this.result } : {}) }; }
+    status() { return { protocol: USB_PROTOCOL, ...(this.legacy ? {} : { capabilities: [USB_DELTA_CAPABILITY] }),
+        ...this.device, stage: this.stage, job: this.job, ...(this.result ? { result: this.result } : {}) }; }
     async export(peer, id) {
         this.stage = 'exporting'; this.job = { id, phase: 'SNAPSHOT' }; this.peer = peer;
         await this.beforeExport?.();
         this.payload = path.join(this.root, 'source');
         this.frozen = { id, payload: this.payload, manifest: await scan(this.payload), metadata: {} };
+        this.transfer = planUsb(this.frozen.manifest);
         this.stage = 'exported'; this.events.push(`${this.device.deviceName}:export`); return this.frozen;
     }
-    async receive(readable, peer, id) {
+    async setTransfer(basis) {
+        this.transferBasis = basis; this.transfer = planUsb(this.frozen.manifest, basis);
+        const { transfer, reused, ...summary } = this.transfer;
+        return summary;
+    }
+    async prepareReceive(peer, id) {
+        this.stage = 'preparing-basis'; this.job = { id, phase: 'SNAPSHOT' }; this.peer = peer;
+        const payload = path.join(this.root, 'basis');
+        await fs.cp(path.join(this.root, 'source'), payload, { recursive: true });
+        this.basis = { payload, manifest: await scan(payload) };
+        await this.beforeBasisReady?.();
+        this.stage = 'receive-ready'; return { id, manifest: this.basis.manifest };
+    }
+    async receive(readable, peer, id, { onTransferred = async () => {} } = {}) {
         this.stage = 'receiving'; this.job = { id, phase: 'DOWNLOADING' }; this.peer = peer;
         this.payload = path.join(this.root, 'received');
-        this.manifest = await receiveUsb(readable, this.payload);
+        this.manifest = await receiveUsb(readable, this.payload, { basis: this.basis,
+            onManifest: (_manifest, plan) => { this.transfer = plan; },
+            onProgress: value => this.manager.progress(value),
+            onTransferred: async (manifest, plan) => {
+                await onTransferred({ id, digest: manifest.digest, files: manifest.files.length, bytes: manifest.bytes }, plan);
+                await this.afterTransferred?.();
+            },
+        });
+        await verify(this.payload, this.manifest);
         this.stage = 'received'; this.events.push(`${this.device.deviceName}:receive`);
         return { id, digest: this.manifest.digest, files: this.manifest.files.length, bytes: this.manifest.bytes };
     }
@@ -385,3 +409,131 @@ test('USB rejects oversized JSON control bodies and responses', async t => {
     t.after(() => new Promise(resolve => bad.close(resolve)));
     await assert.rejects(syncUsb(pc, { origin: `http://127.0.0.1:${bad.address().port}`, token: TOKEN, direction: 'push' }), { code: 'USB_JSON_SIZE' });
 });
+
+for (const direction of ['push', 'pull']) {
+    test(`USB HTTP ${direction} negotiates file deltas, transfers same-size edits, and mirrors deletions`, async t => {
+        const { pc, phone } = await fixtures(t);
+        const source = direction === 'push' ? pc : phone, target = direction === 'push' ? phone : pc;
+        const asset = Buffer.alloc(2 * 1024 * 1024, 0x61);
+        for (const endpoint of [pc, phone]) {
+            await fs.writeFile(path.join(endpoint.root, 'source/unchanged.bin'), asset);
+            await fs.writeFile(path.join(endpoint.root, 'source/edited.txt'), endpoint === source ? 'NEW!' : 'OLD!');
+            await fs.utimes(path.join(endpoint.root, 'source/edited.txt'), 1700000000, 1700000000);
+        }
+        await fs.writeFile(path.join(target.root, 'source/deleted.txt'), 'target only');
+        const server = await serve(t, phone);
+        const result = await syncUsb(pc, { origin: server.origin, token: TOKEN, direction, pollMs: 5 });
+        assert.equal(result.result.applied, true);
+        for (const endpoint of [pc, phone]) {
+            assert.equal(endpoint.transfer.mode, 'incremental');
+            assert.equal(endpoint.transfer.reusedBytes, asset.length);
+            assert.equal(endpoint.transfer.reusedFiles, 1);
+            assert.equal(endpoint.progress.bytes, endpoint.transfer.bytes);
+            assert.ok(endpoint.transfer.bytes < 100);
+        }
+        assert.equal(await fs.readFile(path.join(target.payload, 'edited.txt'), 'utf8'), 'NEW!');
+        assert.equal(await fs.stat(path.join(target.payload, 'deleted.txt')).then(() => true, () => false), false);
+        assert.deepEqual(await fs.readFile(path.join(target.payload, 'unchanged.bin')), asset);
+        await server.closed;
+    });
+
+    test(`USB HTTP ${direction} sends zero file-content bytes for matching snapshots`, async t => {
+        const { pc, phone } = await fixtures(t);
+        await fs.copyFile(path.join(pc.root, 'source/settings.json'), path.join(phone.root, 'source/settings.json'));
+        const server = await serve(t, phone);
+        await syncUsb(pc, { origin: server.origin, token: TOKEN, direction, pollMs: 5 });
+        for (const endpoint of [pc, phone]) {
+            assert.equal(endpoint.transfer.bytes, 0); assert.equal(endpoint.transfer.files, 0);
+            assert.equal(endpoint.transfer.reusedFiles, 1); assert.equal(endpoint.progress.bytes, 0);
+            assert.equal(endpoint.stage, 'completed');
+        }
+        await server.closed;
+    });
+
+    for (const oldEndpoint of ['pc', 'phone']) {
+        test(`USB HTTP ${direction} falls back to full transfer when ${oldEndpoint} lacks delta support`, async t => {
+            const { pc, phone } = await fixtures(t);
+            (oldEndpoint === 'pc' ? pc : phone).legacy = true;
+            const server = await serve(t, phone);
+            await syncUsb(pc, { origin: server.origin, token: TOKEN, direction, pollMs: 5 });
+            for (const endpoint of [pc, phone]) {
+                assert.equal(endpoint.transfer.mode, 'full'); assert.equal(endpoint.basis, undefined);
+                assert.equal(endpoint.transfer.bytes, endpoint.transfer.totalBytes);
+            }
+            await server.closed;
+        });
+    }
+
+    test(`USB HTTP ${direction} exchanges a valid manifest larger than the normal control limit`, async t => {
+        const { pc, phone } = await fixtures(t), target = direction === 'push' ? phone : pc;
+        const empty = createHash('sha256').update('').digest('hex');
+        target.beforeBasisReady = () => {
+            const extra = Array.from({ length: 8000 }, (_, i) => ({ path: `z-target-only-${String(i).padStart(5, '0')}.txt`,
+                size: 0, mtime: 1700000000, sha256: empty }));
+            target.basis.manifest = seal([...target.basis.manifest.files, ...extra]);
+            assert.ok(Buffer.byteLength(JSON.stringify(target.basis.manifest)) > 1024 * 1024);
+        };
+        const server = await serve(t, phone);
+        const result = await syncUsb(pc, { origin: server.origin, token: TOKEN, direction, pollMs: 5 });
+        assert.equal(result.result.applied, true); assert.equal(target.transfer.mode, 'incremental');
+        assert.equal(target.transfer.files, 1); await server.closed;
+    });
+}
+
+test('USB incremental upload polls local reconstruction after the wire is finished, without early apply or HTTP idle timeout', async t => {
+    const { pc, phone } = await fixtures(t);
+    await fs.copyFile(path.join(pc.root, 'source/settings.json'), path.join(phone.root, 'source/settings.json'));
+    let rebuilding = false, finished = false;
+    phone.afterTransferred = async () => {
+        rebuilding = true;
+        await delay(180);
+        assert.equal(phone.applyCount, 0); finished = true;
+    };
+    phone.beforeApply = () => { assert.equal(finished, true); };
+    const server = await serve(t, phone);
+    const result = await syncUsb(pc, { origin: server.origin, token: TOKEN, direction: 'push', pollMs: 5, requestTimeoutMs: 100 });
+    assert.equal(rebuilding, true); assert.equal(result.result.applied, true);
+    await server.closed;
+});
+
+test('USB corrupt reused files fail after upload acknowledgement without replacing or applying target data', async t => {
+    const { pc, phone } = await fixtures(t);
+    await fs.copyFile(path.join(pc.root, 'source/settings.json'), path.join(phone.root, 'source/settings.json'));
+    phone.afterTransferred = () => fs.writeFile(path.join(phone.basis.payload, 'settings.json'), 'damaged');
+    const server = await serve(t, phone);
+    await assert.rejects(syncUsb(pc, { origin: server.origin, token: TOKEN, direction: 'push', pollMs: 5 }), { code: 'USB_BASIS_CHANGED' });
+    assert.equal(phone.applyCount, 0); assert.equal(phone.stage, 'failed'); assert.equal(pc.stage, 'failed');
+    assert.equal(await fs.readFile(path.join(phone.root, 'source/settings.json'), 'utf8'), '{"source":"电脑"}');
+});
+
+test('USB basis and delta negotiation bind the selected job and reject other stages', async t => {
+    const { pc, phone } = await fixtures(t), server = await serve(t, phone);
+    const { id } = await select(server, pc, 'push');
+    assert.equal((await raw(server, 'GET', '/basis', { headers: { 'x-tavernsyn-job': id } })).status, 409);
+    assert.equal((await raw(server, 'POST', '/basis', { json: { peer: pc.device, id: randomUUID() } })).status, 409);
+    assert.equal((await raw(server, 'POST', '/basis', { json: { peer: pc.device, id } })).status, 202);
+    await until(() => phone.stage === 'receive-ready');
+    assert.equal((await raw(server, 'GET', '/basis', { headers: { 'x-tavernsyn-job': randomUUID() } })).status, 409);
+    assert.equal((await raw(server, 'GET', '/basis', { headers: { 'x-tavernsyn-job': id } })).status, 200);
+    assert.equal((await raw(server, 'POST', '/delta', { json: { id, basis: phone.basis.manifest } })).status, 409);
+    assert.equal(phone.applyCount, 0);
+});
+
+for (const direction of ['push', 'pull']) {
+    test(`USB ${direction} waits for ready-stage journal writes before starting the next operation`, async t => {
+        const { pc, phone } = await fixtures(t);
+        for (const method of direction === 'push' ? ['prepareReceive', 'receive'] : ['export']) {
+            const original = phone[method].bind(phone);
+            phone[method] = async (...args) => {
+                const value = await original(...args);
+                // The public ready stage is already visible, while run() still
+                // owns the task until its final journal writes have completed.
+                await delay(40); return value;
+            };
+        }
+        const server = await serve(t, phone);
+        const result = await syncUsb(pc, { origin: server.origin, token: TOKEN, direction, pollMs: 1 });
+        assert.equal(result.result.applied, true); assert.equal(pc.applyCount + phone.applyCount, 1);
+        await server.closed;
+    });
+}
