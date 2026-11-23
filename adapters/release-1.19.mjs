@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { readJson, requireThat } from '../lib/io.mjs';
+import { requireThat } from '../lib/io.mjs';
 
 const SOURCE = {
     'src/server-main.js': '567d8a9d52e70816e74f119409933f2b42ad03132d7ef01f8db3ae145c2fe7bf',
@@ -13,7 +13,6 @@ const SOURCE = {
     'public/scripts/st-context.js': '5a91ce36a343041c81351953baba10a54a7576f15571c01ef1af8c19bcc0e30d',
 };
 export async function checkCompatibility(install) {
-    requireThat((await readJson(path.join(install, 'package.json'))).version === '1.19.0', 'UNSUPPORTED_VERSION', '自动重启适配当前只支持 SillyTavern 1.19.0。');
     for (const [file, expected] of Object.entries(SOURCE)) {
         const source = (await fs.readFile(path.join(install, file), 'utf8')).replaceAll('\r\n', '\n');
         requireThat(createHash('sha256').update(source).digest('hex') === expected, 'UNSUPPORTED_VERSION', '酒馆生命周期源码与已验证版本不同，已停用自动替换。');
