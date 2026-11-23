@@ -1,0 +1,63 @@
+name: Publish TavernSyn v0.6.1 stable
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v0.6.1.yml']
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-tavernsyn-v0-6-1
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'anyKami/tavernSyn' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TARGET_SHA: 37e42e97de3a642a45d15d48ace170560af3672f
+      TEST_RUN: '45195613206'
+      RELEASE_TAG: v0.6.1
+      PREVIOUS_SHA: 3a44b7c98002d97c61938e55f536c5648adb7390
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 37e42e97de3a642a45d15d48ace170560af3672f
+          persist-credentials: false
+      - name: Verify tested source and publish stable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          node -e 'const v="0.6.1"; for(const x of [require("./package.json").version,require("./manifest.json").version,require("./package-lock.json").version,require("./package-lock.json").packages[""].version]) if(x!==v) process.exit(1)'
+          gh api "repos/$GH_REPO/actions/runs/$TEST_RUN" > "$RUNNER_TEMP/test-run.json"
+          jq -e --arg sha "$TARGET_SHA" '.head_sha == $sha and .head_branch == "main" and .event == "push" and .name == "Test" and .status == "completed" and .conclusion == "success"' "$RUNNER_TEMP/test-run.json"
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/v0.6.0" --jq .object.sha)" = "$PREVIOUS_SHA"
+          existing_tags="$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")"
+          if [ -n "$existing_tags" ]; then
+            test "$existing_tags" = "$(printf '%s\trefs/tags/%s' "$TARGET_SHA" "$RELEASE_TAG")"
+          fi
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq ".[].tag_name" > "$RUNNER_TEMP/release-tags.txt"
+          if grep -Fxq "$RELEASE_TAG" "$RUNNER_TEMP/release-tags.txt"; then
+            echo "A release for $RELEASE_TAG already exists; refusing to mutate it"
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          ## TavernSyn v0.6.1
+
+          - 不再按 SillyTavern 版本号拒绝安装、受控启动或自动应用。仍逐一核对七个关键源码文件的 SHA-256 指纹；文件缺失或指纹变化时仍拒绝。
+          - 快照记录实际来源版本；无法读取时标为 `unknown`，不作为兼容门槛。
+          - USB 文件级增量的协议、传输逻辑及对兼容旧端的全量回退行为不变。
+
+          SillyTavern 1.19.0 和 1.19.1 均通过隔离的生命周期和 USB 集成测试。测试使用真实 SillyTavern 进程和本地连接，ADB 转发为模拟，未覆盖 Windows/Android 实体数据线或线上 VPS；不保证任意未来版本兼容。
+
+          GitHub Actions： https://github.com/anyKami/tavernSyn/actions/runs/45195613206
+          NOTES
+          if [ -z "$existing_tags" ]; then
+            gh api --method POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$RELEASE_TAG" -f sha="$TARGET_SHA" >/dev/null
+          fi
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$TARGET_SHA"
+          gh release create "$RELEASE_TAG" --verify-tag --title "TavernSyn v0.6.1 — SillyTavern 兼容性改为源码指纹校验" --notes-file "$RUNNER_TEMP/release-notes.md" --latest
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$TARGET_SHA"
