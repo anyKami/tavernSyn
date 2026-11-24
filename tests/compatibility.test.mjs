@@ -29,7 +29,7 @@ test('all seven guarded files still reject modifications and absence', async t =
     for (const file of guarded) {
         const target = path.join(root, file), original = await fs.readFile(target);
         await fs.appendFile(target, '\n// synthetic fingerprint mismatch\n');
-        await assert.rejects(checkCompatibility(root), { code: 'UNSUPPORTED_VERSION' });
+        await assert.rejects(checkCompatibility(root), { code: 'UNSUPPORTED_VERSION', message: `酒馆生命周期源码与已验证版本不同（${file}），已停用自动替换。` });
         await fs.unlink(target);
         await assert.rejects(checkCompatibility(root), { code: 'ENOENT' });
         await fs.writeFile(target, original);

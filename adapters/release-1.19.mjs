@@ -15,6 +15,6 @@ const SOURCE = {
 export async function checkCompatibility(install) {
     for (const [file, expected] of Object.entries(SOURCE)) {
         const source = (await fs.readFile(path.join(install, file), 'utf8')).replaceAll('\r\n', '\n');
-        requireThat(createHash('sha256').update(source).digest('hex') === expected, 'UNSUPPORTED_VERSION', '酒馆生命周期源码与已验证版本不同，已停用自动替换。');
+        requireThat(createHash('sha256').update(source).digest('hex') === expected, 'UNSUPPORTED_VERSION', `酒馆生命周期源码与已验证版本不同（${file}），已停用自动替换。`);
     }
 }
