@@ -332,6 +332,28 @@ test('USB delta acknowledges a fully verified wire stream before hashing and mov
     await verify(target, manifest);
 });
 
+test('USB delta reuses a read-only Windows file and applies the sender timestamp', { skip: process.platform !== 'win32' }, async t => {
+    const { source, target, root } = await fixture(t);
+    const basisPath = path.join(root, 'basis'), basisFile = path.join(basisPath, 'git-object');
+    const sourceFile = path.join(source, 'git-object'), targetFile = path.join(target, 'git-object');
+    const senderTime = 1730000000;
+    await fs.mkdir(basisPath);
+    await fs.writeFile(sourceFile, 'same git object');
+    await fs.utimes(sourceFile, senderTime, senderTime);
+    await fs.writeFile(basisFile, 'same git object');
+    await fs.chmod(basisFile, 0o400);
+    const manifest = await scan(source), basisManifest = await scan(basisPath);
+
+    const input = Readable.from(encodeUsb(source, manifest, { basisManifest }));
+    await receiveUsb(input, target, { basis: { payload: basisPath, manifest: basisManifest } });
+
+    assert.equal(await fs.readFile(targetFile, 'utf8'), 'same git object');
+    const stat = await fs.stat(targetFile);
+    assert.equal(Math.floor(stat.mtimeMs / 1000), senderTime);
+    assert.equal(stat.mode & 0o200, 0o200);
+    assert.equal(await exists(basisFile), false);
+});
+
 test('USB full streams still transfer everything when a basis option is present', async t => {
     const { source, target, root } = await fixture(t), basisPath = path.join(root, 'basis');
     await fs.mkdir(basisPath); await fs.writeFile(path.join(source, 'data'), 'identical'); await fs.writeFile(path.join(basisPath, 'data'), 'identical');
