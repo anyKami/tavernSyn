@@ -332,7 +332,7 @@ test('USB delta acknowledges a fully verified wire stream before hashing and mov
     await verify(target, manifest);
 });
 
-test('USB delta reuses a read-only Windows file and applies the sender timestamp', { skip: process.platform !== 'win32' }, async t => {
+test('USB delta reuses a read-only file and applies the sender timestamp', async t => {
     const { source, target, root } = await fixture(t);
     const basisPath = path.join(root, 'basis'), basisFile = path.join(basisPath, 'git-object');
     const sourceFile = path.join(source, 'git-object'), targetFile = path.join(target, 'git-object');
