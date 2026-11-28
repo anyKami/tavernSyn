@@ -64,14 +64,14 @@ async function flush() {
 const root = document.createElement('div'); root.id = 'tavernsyn-panel'; root.className = 'extension_container';
 root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>TavernSyn 跨设备同步</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
 <div class="inline-drawer-content"><p class="ts-device"></p><p class="ts-phase" role="status">正在连接同步助手……</p>
-<details class="ts-usb ts-section" open><summary><span class="ts-section-icon ts-usb-icon" aria-hidden="true">USB</span><span class="ts-section-heading"><strong>USB 数据线完整同步</strong><small>电脑 ⇄ 安卓手机 · 增量传输，完整镜像</small></span><span class="ts-section-chevron" aria-hidden="true"></span></summary>
+<details class="ts-usb ts-section" open><summary><span class="ts-section-icon ts-usb-icon" aria-hidden="true">USB</span><span class="ts-section-heading"><strong>USB 数据线完整同步</strong><small>电脑 ⇄ 安卓手机 · 全量传输</small></span><span class="ts-section-chevron" aria-hidden="true"></span></summary>
 <div class="ts-section-content"><p class="ts-usb-status" role="status">正在检测本机 USB 能力……</p>
 <div class="ts-actions ts-usb-connection"><button type="button" class="menu_button ts-usb-connect">连接 USB</button><button type="button" class="menu_button ts-usb-cancel" hidden>取消连接</button></div>
 <div class="ts-actions ts-usb-directions" hidden><button type="button" class="menu_button ts-usb-push">电脑 → 手机</button><button type="button" class="menu_button ts-usb-pull">手机 → 电脑</button></div>
 <div class="ts-usb-live" hidden role="status" aria-live="polite"><strong class="ts-usb-live-title"></strong><div class="ts-usb-live-stage"></div><progress class="ts-usb-progress" max="100"></progress><small class="ts-usb-live-bytes"></small></div>
 <p class="ts-hint">两端连接后，任选一端点击方向，自动完成关闭、同步和重启。</p>
 <details class="ts-usb-help"><summary>连接方法与同步范围</summary><p>在电脑与手机上分别打开受控酒馆，点击“连接 USB”。电脑需要安装 ADB，并通过数据线连接已允许 USB 调试的手机。无需启动额外脚本、输入配对码或再次确认。</p>
-<p>传输只走数据线，不使用 VPS 或 Google Drive。两端支持时，只传新增或内容变化的文件，未变文件在接收端复用；仍以选定来源完整覆盖接收端，包含删除，并保留最近一次恢复备份。大文件有变化时会重传整个文件。</p>
+<p>通过数据线发送来源设备的完整快照。接收端校验后按快照覆盖便携数据，删除来源已没有的文件，并保留最近一次恢复备份。</p>
 <a href="https://github.com/anyKami/tavernSyn/blob/main/docs/usb-sync.md" target="_blank" rel="noopener noreferrer">查看 USB 使用指南</a></details></div></details>
 <details class="ts-settings ts-section"><summary><span class="ts-section-icon" aria-hidden="true">⚙</span><span class="ts-section-heading"><strong>设置与检查 · 同步仓库</strong><small>Google 云盘 / VPS · 配置与连接检查</small></span><span class="ts-section-chevron" aria-hidden="true"></span></summary><div class="ts-section-content">
 <form class="ts-config"><fieldset disabled><legend>同步仓库</legend>
@@ -210,15 +210,16 @@ function render() {
     const direction = usbState.selection?.direction || usbIntent?.direction || usbState.job?.direction;
     const name = usbLabel(direction);
     const job = usbState.job ?? {};
-    const phases = { SNAPSHOT: '正在扫描文件并制作快照', UPLOADING: '正在发送文件', DOWNLOADING: '正在接收文件',
+    const phases = { PREFLIGHT: '正在检查本机数据', SNAPSHOT: '正在制作快照', UPLOADING: '正在发送文件', DOWNLOADING: '正在接收文件',
         VERIFYING: '正在校验文件', PREPARING: '正在准备插件', APPLYING: '正在覆盖目标数据',
         STARTING: '正在检查目标酒馆', SUCCEEDED: '数据已应用并校验', FAILED: '同步未完成' };
-    const step = phases[job.phase] || (pending ? '正在通知另一端并等待后台确认…'
+    const step = usbState.stage === 'restarting' ? usbNames.restarting : phases[job.phase] || (pending ? '正在通知另一端并等待后台确认…'
         : usbNames[usbState.stage] || '正在检查 USB 任务');
     const title = (pending ? '已点击 ' : usbAccepted(usbState.stage) ? '已确认 ' : '') + name;
-    // The mirror size includes locally reused files. Only the negotiated wire
-    // bytes belong in the transfer meter, including after progress is cleared.
+    // Older job records can include files reused locally. Keep their meter on
+    // the transmitted bytes when progress is cleared on completion.
     const transfer = job.transfer;
+    const incremental = transfer?.mode === 'incremental';
     const planned = transfer && Number.isSafeInteger(transfer.bytes) && transfer.bytes >= 0;
     const total = Number(planned ? transfer.bytes : job.bytes);
     const finishedBytes = usbState.stage === 'completed' || ['VERIFYING', 'PREPARING', 'APPLYING', 'STARTING', 'SUCCEEDED'].includes(job.phase);
@@ -227,13 +228,15 @@ function render() {
     const percentage = metered ? total === 0 ? 100 : Math.min(100, Math.max(0, progressBytes / total * 100)) : null;
     let description = metered ? total === 0 ? '无需传输文件内容（0 B）。' : '已传输 ' + usbSize(progressBytes) + ' / ' + usbSize(total)
         + '（' + percentage.toFixed(1) + '%）'
-        : planned ? '本次待传输 ' + usbSize(total) : pending ? '操作已发起，请勿重复点击。' : '正在扫描并比较文件，暂未确定本次传输大小。';
+        : planned ? '本次待传输 ' + usbSize(total) : pending ? '操作已发起，请勿重复点击。' : '正在准备传输，暂未取得快照大小。';
     if (planned) {
-        description = (transfer.mode === 'incremental' ? '增量传输 · ' : '全量传输 · ') + description;
+        description = (incremental ? '增量传输 · ' : '全量传输 · ') + description;
         const sentFiles = finishedBytes ? transfer.files : job.progress?.files;
         if (Number.isSafeInteger(transfer.files)) description += ' · 本次传输 ' + (Number.isSafeInteger(sentFiles) ? sentFiles + ' / ' : '') + transfer.files + ' 个文件';
-        if (Number.isSafeInteger(transfer.reusedFiles) && Number.isSafeInteger(transfer.reusedBytes)) description += ' · 本地复用 ' + transfer.reusedFiles + ' 个文件（' + usbSize(transfer.reusedBytes) + '）';
-        if (Number.isSafeInteger(transfer.totalFiles) && Number.isSafeInteger(transfer.totalBytes)) description += ' · 完整镜像 ' + transfer.totalFiles + ' 个文件（' + usbSize(transfer.totalBytes) + '）';
+        if (incremental) {
+            if (Number.isSafeInteger(transfer.reusedFiles) && Number.isSafeInteger(transfer.reusedBytes)) description += ' · 本地复用 ' + transfer.reusedFiles + ' 个文件（' + usbSize(transfer.reusedBytes) + '）';
+            if (Number.isSafeInteger(transfer.totalFiles) && Number.isSafeInteger(transfer.totalBytes)) description += ' · 完整镜像 ' + transfer.totalFiles + ' 个文件（' + usbSize(transfer.totalBytes) + '）';
+        }
     } else if (metered && Number.isSafeInteger(job.files)) description += ' · 共 ' + job.files + ' 个文件';
     const visible = !!usbIntent || ['selected', 'stopping', 'transferring', 'restarting', 'completed', 'failed'].includes(usbState.stage);
     const statusText = pending ? '已点击“' + name + '”，正在通知另一端，无需再次确认。'

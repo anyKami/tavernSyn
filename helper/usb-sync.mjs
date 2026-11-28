@@ -4,14 +4,14 @@ import net from 'node:net';
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
-import { atomicJson, exists, noLinks, readJson, requireThat, removeOwned, SyncError } from '../lib/io.mjs';
+import { atomicJson, exists, noLinks, readJson, requireThat, SyncError } from '../lib/io.mjs';
 import { uuidPattern } from '../lib/device.mjs';
 import { portableState, snapshot } from '../lib/snapshot.mjs';
-import { seal, verify } from '../lib/manifest.mjs';
+import { usbLocalState } from '../lib/usb-local-state.mjs';
 import { enoughSpace, validateContent, validatePayloadPaths } from '../lib/content.mjs';
-import { planUsb, receiveUsb, USB_DELTA_CAPABILITY } from '../lib/usb-stream.mjs';
-import { prepare, buildPlan, applyPlan, commitPlan, retireRecovery, rollback, validatePlan } from './apply.mjs';
-import { Manager, stateDifference } from './manager.mjs';
+import { planUsb, receiveUsb, USB_FULL_CAPABILITY } from '../lib/usb-stream.mjs';
+import { prepare, buildPlan, applyPlan, commitPlan, rollback, validatePlan } from './apply.mjs';
+import { Manager } from './manager.mjs';
 import { Lifecycle } from './lifecycle.mjs';
 
 export const USB_PROTOCOL = 'tavernsyn-usb-v2';
@@ -139,8 +139,9 @@ export class UsbSession {
         this.manager.busy = true;
         this.manager.job = { id, direction, transport: 'usb', peerDeviceId: peer.deviceId, peerDeviceName: peer.deviceName,
             started: new Date().toISOString(), phase: 'PREFLIGHT', snapshotReady: false };
+        this.manager.phaseStarted = Date.now();
         await this.manager.write('PREFLIGHT', { note: 'USB 离线完整同步：以所选来源覆盖接收端，包含删除。' });
-        this.before = await portableState(this.device);
+        this.beforeStamp = await usbLocalState(this.device);
     }
     async recordJob() {
         if (this.manager.job) await atomicJson(path.join(this.root, 'job.json'), this.manager.job);
@@ -150,9 +151,8 @@ export class UsbSession {
         try {
             await this.begin('push', peer, id);
             await this.manager.write('SNAPSHOT');
-            this.frozen = await snapshot(this.device, this.payload);
-            requireThat((await portableState(this.device)).digest === this.before.digest
-                && this.frozen.metadata.sourceState.digest === this.before.digest, 'SOURCE_CHANGED', '制作 USB 快照期间来源发生变化，未发送，请关闭写入程序后重试。');
+            this.frozen = await snapshot(this.device, this.payload, { hashOnCopy: true });
+            requireThat((await usbLocalState(this.device)).digest === this.beforeStamp.digest, 'SOURCE_CHANGED', '制作 USB 快照期间来源发生变化，未发送，请关闭写入程序后重试。');
             await atomicJson(path.join(this.root, 'manifest.json'), this.frozen.manifest);
             this.stage = 'exported';
             this.transfer = transferInfo(planUsb(this.frozen.manifest));
@@ -163,42 +163,14 @@ export class UsbSession {
             return { id, payload: this.payload, ...this.frozen };
         } catch (error) { await this.fail(error); throw error; }
     }
-    async setTransfer(basisManifest = null) {
-        requireThat(this.opened && this.stage === 'exported', 'USB_STAGE', 'USB 来源快照尚未准备好，不能比较文件清单。');
-        this.transfer = transferInfo(planUsb(this.frozen.manifest, basisManifest));
-        this.transferBasis = basisManifest;
-        await this.manager.write('UPLOADING', { transfer: this.transfer, progress: null,
-            note: basisManifest ? `文件比较完成：传输 ${this.transfer.files} 个新增或变更文件，复用 ${this.transfer.reusedFiles} 个相同文件。`
-                : '对端使用完整快照传输；两端更新后可自动使用文件级增量。' });
-        await this.recordJob();
-        return this.transfer;
-    }
     async prepareReceive(peer, id) {
         requireThat(this.opened && this.stage === 'idle', 'USB_SESSION', '本次 USB 会话已有任务，请重新启动 USB 服务。');
         try {
             await this.begin('pull', peer, id);
-            this.stage = 'preparing-basis';
-            await this.manager.write('SNAPSHOT', { note: '正在扫描本机文件，准备复用内容相同的文件。' });
-            const payload = path.join(this.root, 'usb-basis');
-            let basis;
-            try { basis = await snapshot(this.device, payload); }
-            catch (error) {
-                // A receiver may be empty or contain a broken chat/JSON file
-                // that the healthy source will replace. Such a target has no
-                // usable basis; transfer all source files without blocking repair.
-                if (!['EMPTY_SOURCE', 'EMPTY_EXTRA_ROOT', 'INVALID_JSON', 'INVALID_CHAT'].includes(error.code)) throw error;
-                if (await exists(payload)) await removeOwned(this.root, payload);
-                await fs.mkdir(payload, { mode: 0o700 });
-                basis = { manifest: seal([]), metadata: null };
-            }
-            requireThat((await portableState(this.device)).digest === this.before.digest
-                && (!basis.metadata || basis.metadata.sourceState.digest === this.before.digest),
-            'LOCAL_CHANGED', '准备 USB 增量基准期间本机数据发生变化，未覆盖，请关闭写入程序后重试。');
-            this.basis = { payload, ...basis };
             this.stage = 'receive-ready';
-            await this.manager.write('DOWNLOADING', { note: '本机文件清单已就绪，正在比较两端内容。' });
+            await this.manager.write('DOWNLOADING', { note: '本机准备完成，等待接收完整快照。' });
             await this.recordJob();
-            return { id, manifest: basis.manifest };
+            return { id };
         } catch (error) { await this.fail(error); throw error; }
     }
     async receive(readable, peer, id, { onTransferred = async () => {} } = {}) {
@@ -206,30 +178,27 @@ export class UsbSession {
         try {
             if (this.stage === 'idle') await this.begin('pull', peer, id);
             else requireThat(id === this.manager.job.id && peer?.deviceId === this.peer.deviceId
-                && peer.deviceName === this.peer.deviceName, 'USB_JOB', 'USB 增量传输与本机准备的任务不一致。');
+                && peer.deviceName === this.peer.deviceName, 'USB_JOB', 'USB 全量传输与本机准备的任务不一致。');
             this.stage = 'receiving';
             await this.manager.write('DOWNLOADING', { note: '正在通过 USB 接收文件，尚未覆盖本机。' });
             const manifest = await receiveUsb(readable, this.payload, {
-                basis: this.basis,
+                // The candidate is flushed once, just before the apply journal.
+                // A failed or interrupted receive only leaves disposable staging.
+                flushFiles: false,
                 onManifest: async (value, plan) => {
+                    requireThat(plan.mode === 'full', 'USB_PROTOCOL', 'USB 同步仅接受完整快照。');
                     validatePayloadPaths(value);
                     this.transfer = transferInfo(plan);
-                    // Reused files move within private staging. Check incoming
-                    // bytes here; prepare() checks the full candidate after the
-                    // unused basis is removed, before consuming any recovery point.
                     await enoughSpace(this.device.state, plan.bytes, 1);
                     await this.manager.write('DOWNLOADING', { bytes: value.bytes, files: value.files.length,
-                        transfer: this.transfer, note: plan.mode === 'incremental'
-                            ? `增量接收 ${plan.files} 个文件，复用本机 ${plan.reusedFiles} 个文件。`
-                            : '正在接收完整快照；两端更新后可自动使用文件级增量。' });
+                        transfer: this.transfer, note: `全量接收 ${plan.files} 个文件；传输时逐个校验内容。` });
                 },
                 onProgress: value => this.manager.progress({ stage: 'usb', ...value }),
                 onTransferred: async (value, plan) => {
-                    await this.manager.write('VERIFYING', { note: 'USB 文件内容已接收，正在校验并复用本机文件。' });
+                    await this.manager.write('VERIFYING', { note: 'USB 文件内容已接收并通过逐文件校验，正在检查数据格式。' });
                     await onTransferred({ id, digest: value.digest, files: value.files.length, bytes: value.bytes }, plan);
                 },
             });
-            if (this.basis) await removeOwned(this.root, this.basis.payload);
             await this.manager.write('VERIFYING', { files: manifest.files.length, bytes: manifest.bytes });
             await validateContent(this.payload, manifest);
             const metadata = await readJson(path.join(this.payload, 'environment.json'));
@@ -246,16 +215,15 @@ export class UsbSession {
         requireThat(this.opened && this.stage === 'received', 'USB_STAGE', '没有已校验且待应用的 USB 快照。');
         this.stage = 'applying';
         try {
-            const { manifest, metadata } = this.frozen;
-            await this.manager.write('PREPARING', { summary: stateDifference(this.before, metadata.sourceState), note: '正在准备插件；目标平台依赖可能需要网络或本机缓存。' });
-            const prepared = await prepare(this.device, this.payload, manifest, this.root);
-            requireThat((await portableState(this.device)).digest === this.before.digest, 'LOCAL_CHANGED', 'USB 同步期间本机数据发生变化，未覆盖，请关闭写入程序后重试。');
-            await verify(this.payload, manifest);
-            // Preparation and integrity checks complete before consuming the old
-            // recovery point. buildPlan then moves this target's current roots.
-            await retireRecovery(this.device);
-            this.plan = await buildPlan(this.device, prepared, this.root);
+            const { manifest } = this.frozen;
+            await this.manager.write('PREPARING', { note: '正在核验接收副本并准备插件；目标平台依赖可能需要网络或本机缓存。' });
+            const prepared = await prepare(this.device, this.payload, manifest, this.root, { verifyWhileCopy: true });
+            requireThat((await usbLocalState(this.device)).digest === this.beforeStamp.digest, 'LOCAL_CHANGED', 'USB 同步期间本机数据发生变化，未覆盖，请关闭写入程序后重试。');
+            // Finish candidate preparation and durable flush before consuming
+            // the old recovery point or moving any live root.
+            this.plan = await buildPlan(this.device, prepared, this.root, { replaceRecovery: true });
             await this.manager.write('APPLYING'); await applyPlan(this.device, this.plan);
+            await this.manager.write('APPLYING', { note: '数据已替换，正在记录接收端实际状态。' });
             const applied = await portableState(this.device);
             await this.manager.write('STARTING', { note: '临时启动接收端检查实例和插件，检查后自动快速关闭。' });
             await this.releasePort();
@@ -287,7 +255,7 @@ export class UsbSession {
         const { bytes, files, reusedBytes, reusedFiles } = this.transfer ?? transferInfo(planUsb(this.frozen.manifest));
         return { sentBytes: this.manager.job.direction === 'push' ? bytes : 0, receivedBytes: this.manager.job.direction === 'pull' ? bytes : 0,
             literalBytes: bytes, matchedBytes: reusedBytes, transferredFiles: files, reusedFiles,
-            note: 'USB 实际传输文件内容字节；复用内容不经 USB，不含 HTTP 和清单开销。' };
+            note: 'USB 全量传输文件内容字节，不含 HTTP 和清单开销。' };
     }
     async acknowledge(result) {
         requireThat(this.stage === 'exported' && result?.applied === true && result.jobId === this.manager.job.id
@@ -309,7 +277,7 @@ export class UsbSession {
     }
     status() {
         const job = this.manager.job;
-        return { protocol: USB_PROTOCOL, capabilities: [USB_DELTA_CAPABILITY], deviceId: this.device.deviceId, deviceName: this.device.deviceName, stage: this.stage,
+        return { protocol: USB_PROTOCOL, capabilities: [USB_FULL_CAPABILITY], deviceId: this.device.deviceId, deviceName: this.device.deviceName, stage: this.stage,
             ...(job ? { job: { id: job.id, phase: job.phase, direction: job.direction, note: job.note, files: job.files, bytes: job.bytes,
                 transfer: job.transfer, progress: job.progress, error: job.error, maintenancePending: job.maintenancePending } } : {}), ...(this.result ? { result: this.result } : {}) };
     }

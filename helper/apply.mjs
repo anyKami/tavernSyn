@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicJson, exists, inside, noLinks, readJson, requireThat, removeOwned, renamePath } from '../lib/io.mjs';
-import { copyTree, verify } from '../lib/manifest.mjs';
+import { copyTree, difference, seal, verify } from '../lib/manifest.mjs';
+import { copyManifestTree } from '../lib/copy-manifest.mjs';
 import { preserveSettings } from '../lib/settings.mjs';
 import { CONFIG_POINTERS } from '../lib/device.mjs';
 import { restoreRepositories, rootsFor, preparePluginDependencies } from '../lib/snapshot.mjs';
@@ -25,16 +26,30 @@ async function flushTree(directory) {
     }
 }
 
-export async function prepare(device, payload, manifest, jobRoot, { scope = null } = {}) {
+export async function prepare(device, payload, manifest, jobRoot, { scope = null, verifyWhileCopy = false } = {}) {
     scope = normalizeScope(scope);
-    await verify(payload, manifest);
-    await validateContent(payload, manifest, { scope }); await enoughSpace(device.state, manifest.bytes, 1);
-    const environment = await readJson(path.join(payload, 'environment.json'));
-    requireThat(sameScope(environment.scope, scope), 'PAYLOAD_SCOPE', '下载范围与任务不一致，未应用。');
+    requireThat(!verifyWhileCopy || !scope, 'PAYLOAD_SCOPE', '复制时校验仅支持 USB 完整同步。');
+    if (!verifyWhileCopy) {
+        await verify(payload, manifest);
+        await validateContent(payload, manifest, { scope });
+    }
+    await enoughSpace(device.state, manifest.bytes, 1);
     const candidate = path.join(jobRoot, 'candidate');
     requireThat(!await exists(candidate), 'CANDIDATE_EXISTS', '候选目录已存在，请先处理之前的恢复记录。');
-    await copyTree(payload, candidate, { exclude: p => p === 'repositories' || p.startsWith('repositories/') });
-    const metadata = scope ? environment : await restoreRepositories(device, payload, candidate);
+    if (verifyWhileCopy) {
+        // Hash exactly the bytes written to independent candidate files. This
+        // replaces separate pre/post-copy scans and severs hard links or stale
+        // write handles into the received staging tree.
+        const files = await copyManifestTree(payload, candidate, { prefix: '', exclude: () => false, onFile: () => {} });
+        files.sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
+        requireThat(difference(manifest, seal(files)).equal, 'INTEGRITY', '候选文件完整性校验未通过，尚未覆盖本机。');
+        await validateContent(candidate, manifest, { scope });
+    } else await copyTree(payload, candidate, { exclude: p => p === 'repositories' || p.startsWith('repositories/') });
+    const source = verifyWhileCopy ? candidate : payload;
+    const environment = await readJson(path.join(source, 'environment.json'));
+    requireThat(sameScope(environment.scope, scope), 'PAYLOAD_SCOPE', '下载范围与任务不一致，未应用。');
+    const metadata = scope ? environment : await restoreRepositories(device, source, candidate, { moveGit: verifyWhileCopy });
+    if (verifyWhileCopy && await exists(path.join(candidate, 'repositories'))) await removeOwned(candidate, path.join(candidate, 'repositories'));
     // Legacy snapshots have no execution metadata. Git index modes can still
     // recover tracked scripts; arbitrary legacy files cannot be inferred safely.
     metadata.executables = metadata.executables === undefined
@@ -57,7 +72,8 @@ async function syncDirectories(root) {
     const entries = await fs.readdir(root, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
     return entries.filter(entry => entry.isDirectory() && entry.name.toLowerCase() === 'tavernsyn').map(entry => entry.name);
 }
-export async function buildPlan(device, prepared, jobRoot) {
+export async function buildPlan(device, prepared, jobRoot, { replaceRecovery = false } = {}) {
+    requireThat(!replaceRecovery || !prepared.scope, 'PAYLOAD_SCOPE', 'USB 恢复点替换仅支持完整同步。');
     if (prepared.scope) return buildScopedPlan(device, prepared, jobRoot);
     const { candidate, metadata } = prepared;
     const settings = path.join(candidate, 'profile/settings.json'), localSettings = path.join(device.dataRoot, device.profile, 'settings.json');
@@ -83,7 +99,7 @@ export async function buildPlan(device, prepared, jobRoot) {
     const nextAttributes = path.join(candidate, ATTRIBUTES);
     await atomicJson(nextAttributes, { format: 1, executables: metadata.executables });
     const recovery = path.join(device.state, 'recovery');
-    requireThat(!await exists(recovery), 'RECOVERY_EXISTS', '存在上一次恢复数据，请完成上次任务或明确归档后重试。');
+    if (!replaceRecovery) requireThat(!await exists(recovery), 'RECOVERY_EXISTS', '存在上一次恢复数据，请完成上次任务或明确归档后重试。');
     const steps = [];
     for (const root of await rootsFor(device)) {
         const next = path.join(candidate, ...root.id.split('/'));
@@ -95,6 +111,10 @@ export async function buildPlan(device, prepared, jobRoot) {
     steps.push({ live: device.yamlPath, next: nextConfig, old: path.join(recovery, 'config.yaml'), hadOld: true, phase: 'planned' });
     steps.push({ live: path.join(device.state, ATTRIBUTES), next: nextAttributes, old: path.join(recovery, ATTRIBUTES), hadOld: await exists(path.join(device.state, ATTRIBUTES)), phase: 'planned' });
     await flushTree(candidate);
+    // USB receive defers fsync to this durable independent candidate. Preserve
+    // the prior recovery point if validation or delayed writeback fails.
+    if (replaceRecovery) await retireRecovery(device);
+    requireThat(!await exists(recovery), 'RECOVERY_EXISTS', '存在上一次恢复数据，请完成上次任务或明确归档后重试。');
     await fs.mkdir(recovery, { mode: 0o700 });
     const journal = { format: 2, jobRoot, candidate, recovery, phase: 'prepared', steps };
     await atomicJson(path.join(device.state, 'apply.json'), journal); return journal;

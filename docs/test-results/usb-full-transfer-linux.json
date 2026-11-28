@@ -1,0 +1,397 @@
+{
+  "version": "0.7.0",
+  "date": "2026-11-28T12:16:15.116Z",
+  "platform": "linux",
+  "node": "v24.22.3",
+  "unit": {
+    "total": 507,
+    "passed": 503,
+    "failed": 0,
+    "skipped": 4,
+    "command": "npm test"
+  },
+  "vps_python": {
+    "passed": 40,
+    "command": "python -m unittest discover -s tests -p 'test_vps*.py' -v"
+  },
+  "usb_integration": {
+    "date": "2026-11-28T12:16:15.116Z",
+    "platform": "linux",
+    "node": "v24.22.3",
+    "sillyTavern": "1.19.0",
+    "commit": "06bde939fb1e9c4c8d8641d810f0a916b5bce127",
+    "passed": true,
+    "checks": [
+      "computer_to_phone_real_http_full_mirror_and_actual_st_health",
+      "usb_backup_restores_original_target",
+      "phone_to_computer_real_http_full_mirror_and_actual_st_health",
+      "both_directions_preserve_local_fields_and_recover_latest_backup",
+      "repeat_full_push_resends_unchanged_asset_and_preserves_latest_restore",
+      "repeat_full_pull_resends_unchanged_asset_and_mirrors_deletion",
+      "real_cli_computer_choice_auto_connects_and_applies_without_token_or_confirmation",
+      "real_cli_phone_choice_controls_waiting_computer_with_same_direction_meaning",
+      "plugin_ui_pc_selects_direction_with_both_real_st_servers_running_then_restarts_both",
+      "plugin_ui_phone_selects_direction_with_both_real_st_servers_running_then_restarts_both"
+    ],
+    "transfers": [
+      {
+        "scenario": "baseline",
+        "direction": "push",
+        "mode": "full",
+        "bytes": 1073426,
+        "files": 7,
+        "reusedBytes": 0,
+        "reusedFiles": 0,
+        "totalBytes": 1073426,
+        "totalFiles": 7
+      },
+      {
+        "scenario": "baseline",
+        "direction": "pull",
+        "mode": "full",
+        "bytes": 24738,
+        "files": 7,
+        "reusedBytes": 0,
+        "reusedFiles": 0,
+        "totalBytes": 24738,
+        "totalFiles": 7
+      },
+      {
+        "scenario": "baseline",
+        "direction": "push",
+        "mode": "full",
+        "bytes": 5268351,
+        "files": 10,
+        "reusedBytes": 0,
+        "reusedFiles": 0,
+        "totalBytes": 5268351,
+        "totalFiles": 10
+      },
+      {
+        "scenario": "repeat-push-small-chat",
+        "direction": "push",
+        "mode": "full",
+        "bytes": 5268426,
+        "files": 10,
+        "reusedBytes": 0,
+        "reusedFiles": 0,
+        "totalBytes": 5268426,
+        "totalFiles": 10
+      },
+      {
+        "scenario": "baseline",
+        "direction": "pull",
+        "mode": "full",
+        "bytes": 21413328,
+        "files": 204,
+        "reusedBytes": 0,
+        "reusedFiles": 0,
+        "totalBytes": 21413328,
+        "totalFiles": 204
+      },
+      {
+        "scenario": "repeat-pull-small-chat",
+        "direction": "pull",
+        "mode": "full",
+        "bytes": 21413209,
+        "files": 203,
+        "reusedBytes": 0,
+        "reusedFiles": 0,
+        "totalBytes": 21413209,
+        "totalFiles": 203
+      }
+    ],
+    "hardwareUsb": false,
+    "note": "Real loopback HTTP, CLI processes and actual SillyTavern lifecycle; CLI ADB forwarding is simulated. Physical Windows/Android hardware not exercised."
+  },
+  "benchmark": {
+    "base_commit": "e61b2fd2ab53e0b5ecaf5685ca9327941f8b93c0",
+    "runs": [
+      {
+        "label": "before-1",
+        "ms": 8105.85,
+        "transfer": {
+          "mode": "incremental",
+          "bytes": 483543,
+          "files": 6,
+          "reusedBytes": 133890400,
+          "reusedFiles": 1024,
+          "totalBytes": 134373943,
+          "totalFiles": 1030
+        },
+        "phases": [
+          {
+            "device": "target",
+            "phase": "PREFLIGHT",
+            "ms": 575.11
+          },
+          {
+            "device": "source",
+            "phase": "PREFLIGHT",
+            "ms": 586.25
+          },
+          {
+            "device": "target",
+            "phase": "SNAPSHOT",
+            "ms": 1614.5
+          },
+          {
+            "device": "source",
+            "phase": "SNAPSHOT",
+            "ms": 1637
+          },
+          {
+            "device": "target",
+            "phase": "DOWNLOADING",
+            "ms": 148.3
+          },
+          {
+            "device": "target",
+            "phase": "VERIFYING",
+            "ms": 3105.79
+          },
+          {
+            "device": "target",
+            "phase": "PREPARING",
+            "ms": 2133.85
+          },
+          {
+            "device": "target",
+            "phase": "APPLYING",
+            "ms": 417.58
+          },
+          {
+            "device": "target",
+            "phase": "STARTING",
+            "ms": 48.21
+          },
+          {
+            "device": "source",
+            "phase": "UPLOADING",
+            "ms": 5859.87
+          }
+        ],
+        "platform": "linux",
+        "node": "v24.22.3",
+        "fileBytes": 134217728,
+        "note": "Real loopback HTTP and filesystem; synthetic 1025 assets, 5 changed; fake ST lifecycle; no physical USB."
+      },
+      {
+        "label": "after-1",
+        "ms": 5367.39,
+        "transfer": {
+          "mode": "full",
+          "bytes": 134373943,
+          "files": 1030,
+          "reusedBytes": 0,
+          "reusedFiles": 0,
+          "totalBytes": 134373943,
+          "totalFiles": 1030
+        },
+        "phases": [
+          {
+            "device": "source",
+            "phase": "PREFLIGHT",
+            "ms": 57.57
+          },
+          {
+            "device": "target",
+            "phase": "PREFLIGHT",
+            "ms": 59.78
+          },
+          {
+            "device": "source",
+            "phase": "SNAPSHOT",
+            "ms": 666.25
+          },
+          {
+            "device": "target",
+            "phase": "DOWNLOADING",
+            "ms": 2192.67
+          },
+          {
+            "device": "target",
+            "phase": "VERIFYING",
+            "ms": 18.46
+          },
+          {
+            "device": "target",
+            "phase": "PREPARING",
+            "ms": 2346.58
+          },
+          {
+            "device": "target",
+            "phase": "APPLYING",
+            "ms": 642.23
+          },
+          {
+            "device": "target",
+            "phase": "STARTING",
+            "ms": 53.3
+          },
+          {
+            "device": "source",
+            "phase": "UPLOADING",
+            "ms": 4622.52
+          }
+        ],
+        "platform": "linux",
+        "node": "v24.22.3",
+        "fileBytes": 134217728,
+        "note": "Real loopback HTTP and filesystem; synthetic 1025 assets, 5 changed; fake ST lifecycle; no physical USB."
+      },
+      {
+        "label": "after-2",
+        "ms": 5582.68,
+        "transfer": {
+          "mode": "full",
+          "bytes": 134373943,
+          "files": 1030,
+          "reusedBytes": 0,
+          "reusedFiles": 0,
+          "totalBytes": 134373943,
+          "totalFiles": 1030
+        },
+        "phases": [
+          {
+            "device": "target",
+            "phase": "PREFLIGHT",
+            "ms": 208.14
+          },
+          {
+            "device": "source",
+            "phase": "PREFLIGHT",
+            "ms": 212.4
+          },
+          {
+            "device": "source",
+            "phase": "SNAPSHOT",
+            "ms": 686.2
+          },
+          {
+            "device": "target",
+            "phase": "DOWNLOADING",
+            "ms": 2301.48
+          },
+          {
+            "device": "target",
+            "phase": "VERIFYING",
+            "ms": 37.53
+          },
+          {
+            "device": "target",
+            "phase": "PREPARING",
+            "ms": 2347.72
+          },
+          {
+            "device": "target",
+            "phase": "APPLYING",
+            "ms": 562.27
+          },
+          {
+            "device": "target",
+            "phase": "STARTING",
+            "ms": 62.92
+          },
+          {
+            "device": "source",
+            "phase": "UPLOADING",
+            "ms": 4662.1
+          }
+        ],
+        "platform": "linux",
+        "node": "v24.22.3",
+        "fileBytes": 134217728,
+        "note": "Real loopback HTTP and filesystem; synthetic 1025 assets, 5 changed; fake ST lifecycle; no physical USB."
+      },
+      {
+        "label": "before-2",
+        "ms": 8067.53,
+        "transfer": {
+          "mode": "incremental",
+          "bytes": 483543,
+          "files": 6,
+          "reusedBytes": 133890400,
+          "reusedFiles": 1024,
+          "totalBytes": 134373943,
+          "totalFiles": 1030
+        },
+        "phases": [
+          {
+            "device": "target",
+            "phase": "PREFLIGHT",
+            "ms": 492.82
+          },
+          {
+            "device": "source",
+            "phase": "PREFLIGHT",
+            "ms": 504.49
+          },
+          {
+            "device": "target",
+            "phase": "SNAPSHOT",
+            "ms": 1414.57
+          },
+          {
+            "device": "source",
+            "phase": "SNAPSHOT",
+            "ms": 1423.26
+          },
+          {
+            "device": "target",
+            "phase": "DOWNLOADING",
+            "ms": 122.2
+          },
+          {
+            "device": "target",
+            "phase": "VERIFYING",
+            "ms": 3188.24
+          },
+          {
+            "device": "target",
+            "phase": "PREPARING",
+            "ms": 2404.89
+          },
+          {
+            "device": "target",
+            "phase": "APPLYING",
+            "ms": 349.89
+          },
+          {
+            "device": "target",
+            "phase": "STARTING",
+            "ms": 40.8
+          },
+          {
+            "device": "source",
+            "phase": "UPLOADING",
+            "ms": 6118.63
+          }
+        ],
+        "platform": "linux",
+        "node": "v24.22.3",
+        "fileBytes": 134217728,
+        "note": "Real loopback HTTP and filesystem; synthetic 1025 assets, 5 changed; fake ST lifecycle; no physical USB."
+      }
+    ],
+    "constraints": [
+      "Synthetic 128 MiB asset fixture; 1025 assets plus metadata/core JSON, 5 edited assets",
+      "Real loopback HTTP and filesystem; SillyTavern lifecycle stubbed in this benchmark only",
+      "Alternating order before/after/after/before; two runs per version; not a statistical performance guarantee",
+      "Not physical Windows/Android USB throughput or duration"
+    ]
+  },
+  "review_regressions": [
+    "effective Git origin external config changes are detected",
+    "independent candidate does not retain external hard-link aliases",
+    "writes through a pre-preparation staging handle cannot affect prepared data",
+    "delayed candidate fsync failure preserves previous recovery and live data",
+    "same-size staging corruption with restored mtime is rejected",
+    "large full manifest over control JSON limit succeeds in both directions"
+  ],
+  "limitations": [
+    "Physical Windows/Android USB cable and the user dataset were not exercised",
+    "Local Chromium executable unavailable; browser CI remains the verification gate",
+    "Old v2 peers use legacy full transfer and retain their local scanning and idle timeout limitations; update both endpoints"
+  ]
+}

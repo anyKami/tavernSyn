@@ -63,7 +63,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: USB protocol, ADB selection and entry points
-        run: node --test tests/usb-adb.test.mjs tests/usb-stream.test.mjs tests/usb-service.test.mjs tests/usb-launchers.test.mjs tests/usb-interaction.test.mjs tests/usb-connect-wait.test.mjs
+        run: node --test tests/usb-adb.test.mjs tests/usb-stream.test.mjs tests/usb-service.test.mjs tests/usb-launchers.test.mjs tests/usb-interaction.test.mjs tests/usb-connect-wait.test.mjs tests/usb-local-state.test.mjs tests/usb-snapshot.test.mjs
       - name: Fast shutdown and automatic UI handoff
         run: node --test tests/lifecycle-interruption.test.mjs tests/usb-controller.test.mjs tests/direction-confirmation.test.mjs tests/quick-save-ui.test.mjs tests/launcher-refresh.test.mjs
       - name: Google Drive protocol, encryption, authorization and settings

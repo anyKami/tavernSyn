@@ -61,21 +61,23 @@ async function pair(computer, phone, direction, scenario = 'baseline') {
     const result = await syncUsb(host, { origin: `http://127.0.0.1:${server.port}`, token: server.token, direction,
         confirmPeer: async identity => { assert.equal(identity.deviceId, phone.deviceId); } });
     assert.equal(result.result.applied, true); assert.equal(result.result.maintenancePending, false);
-    // Both sides must expose real file-content progress, not a synthetic timer.
+    // Both sides must report all source file content crossing the tunnel.
     for (const session of [host, peer]) {
         const job = session.manager.job;
+        const transfer = job.transfer;
         assert.ok(job.bytes > 0 && Number.isSafeInteger(observedBytes.get(session)),
             'send and receive must each report real file content bytes before completion');
-        const transferredBytes = job.transfer?.bytes ?? job.bytes;
-        assert.equal(observedBytes.get(session), transferredBytes, 'transfer counter must count only bytes actually sent over USB');
-        assert.equal(job.stats.literalBytes, transferredBytes);
-        if (job.transfer) {
-            assert.equal(job.transfer.mode, 'incremental');
-            assert.equal(job.transfer.bytes + job.transfer.reusedBytes, job.bytes);
-            assert.equal(job.transfer.files + job.transfer.reusedFiles, job.files);
-            assert.equal(job.stats.matchedBytes, job.transfer.reusedBytes);
-            assert.equal(job.stats.transferredFiles, job.transfer.files);
-        }
+        assert.equal(transfer.mode, 'full');
+        assert.equal(transfer.bytes, job.bytes);
+        assert.equal(transfer.totalBytes, job.bytes);
+        assert.equal(transfer.files, job.files);
+        assert.equal(transfer.totalFiles, job.files);
+        assert.equal(transfer.reusedBytes, 0);
+        assert.equal(transfer.reusedFiles, 0);
+        assert.equal(observedBytes.get(session), job.bytes, 'transfer counter must count all bytes actually sent over USB');
+        assert.equal(job.stats.literalBytes, job.bytes);
+        assert.equal(job.stats.matchedBytes, 0);
+        assert.equal(job.stats.transferredFiles, job.files);
     }
     const source = direction === 'push' ? host : peer, target = direction === 'push' ? peer : host;
     assert.deepEqual(source.manager.job.transfer, target.manager.job.transfer);
@@ -161,11 +163,10 @@ try {
     checks.push('phone_to_computer_real_http_full_mirror_and_actual_st_health');
     checks.push('both_directions_preserve_local_fields_and_recover_latest_backup');
 
-    // Establish a shared snapshot, then change only a small chat. The large
-    // resource must stay in the complete mirror without crossing the tunnel
-    // again. Use real server processes and real HTTP in both directions.
-    const largeAsset = 'images/USB 增量复用.bin', assetBytes = 4 * 1024 * 1024;
-    const chatPath = 'chats/USB 增量.jsonl';
+    // Establish a shared snapshot and edit a small chat. A repeat transfer
+    // must send the full source snapshot, including the unchanged large file.
+    const largeAsset = 'images/USB 全量资源.bin', assetBytes = 4 * 1024 * 1024;
+    const chatPath = 'chats/USB 全量.jsonl';
     const firstChat = JSON.stringify({ user_name: 'fixture', character_name: 'USB', chat_metadata: {} }) + '\n'
         + JSON.stringify({ name: 'fixture', is_user: true, mes: 'initial message' }) + '\n';
     await fs.mkdir(path.join(profile(computer), 'chats'), { recursive: true });
@@ -176,39 +177,36 @@ try {
     const assetHash = await hashFile(path.join(profile(computer), largeAsset));
     const changedChat = firstChat + JSON.stringify({ name: 'fixture', is_user: true, mes: 'a small change from the computer' }) + '\n';
     await fs.writeFile(path.join(profile(computer), chatPath), changedChat);
-    await fs.writeFile(path.join(profile(phone), 'target-only-after-baseline.txt'), 'delete even when all large files are reused');
-    const beforeIncrementalPhone = await portableState(phone);
-    const incrementalPush = await pair(computer, phone, 'push', 'repeat-push-small-chat');
+    await fs.writeFile(path.join(profile(phone), 'target-only-after-baseline.txt'), 'delete on a repeat full transfer');
+    const beforeRepeatPhone = await portableState(phone);
+    const repeatPush = await pair(computer, phone, 'push', 'repeat-push-small-chat');
     assert.equal(await fs.readFile(path.join(profile(phone), chatPath), 'utf8'), changedChat);
     assert.equal(await exists(path.join(profile(phone), 'target-only-after-baseline.txt')), false);
     assert.equal(await hashFile(path.join(profile(phone), largeAsset)), assetHash);
-    assert.ok(incrementalPush.host.manager.job.transfer.reusedBytes >= assetBytes);
-    assert.ok(incrementalPush.host.manager.job.transfer.bytes < assetBytes / 4,
-        'a small chat edit must not retransmit the large asset');
-    assert.equal((await readJson(path.join(phone.state, 'apply.json'))).jobRoot, incrementalPush.peer.root);
+    assert.ok(repeatPush.host.manager.job.transfer.bytes >= assetBytes,
+        'a repeat push must transmit the unchanged large asset');
+    assert.equal((await readJson(path.join(phone.state, 'apply.json'))).jobRoot, repeatPush.peer.root);
     await rollback(phone, await readJson(path.join(phone.state, 'apply.json')));
-    assert.equal((await portableState(phone)).digest, beforeIncrementalPhone.digest);
-    checks.push('incremental_push_transfers_small_chat_reuses_large_asset_and_preserves_latest_restore');
+    assert.equal((await portableState(phone)).digest, beforeRepeatPhone.digest);
+    checks.push('repeat_full_push_resends_unchanged_asset_and_preserves_latest_restore');
 
-    // ST's first health startup creates bundled default content on the phone.
-    // Establish the reverse baseline as well so this measurement isolates a
-    // subsequent chat edit instead of legitimately new first-start content.
+    // Establish the reverse baseline, including the phone's default content
+    // from its first health startup, before a repeat pull with a chat edit.
     await pair(computer, phone, 'pull');
     const reverseChat = firstChat + JSON.stringify({ name: 'USB', is_user: false, mes: 'a small change from the phone' }) + '\n';
     await fs.writeFile(path.join(profile(phone), chatPath), reverseChat);
     await fs.unlink(path.join(profile(phone), 'remove-on-reverse.txt'));
-    const beforeIncrementalComputer = await portableState(computer);
-    const incrementalPull = await pair(computer, phone, 'pull', 'repeat-pull-small-chat');
+    const beforeRepeatComputer = await portableState(computer);
+    const repeatPull = await pair(computer, phone, 'pull', 'repeat-pull-small-chat');
     assert.equal(await fs.readFile(path.join(profile(computer), chatPath), 'utf8'), reverseChat);
     assert.equal(await exists(path.join(profile(computer), 'remove-on-reverse.txt')), false);
     assert.equal(await hashFile(path.join(profile(computer), largeAsset)), assetHash);
-    assert.ok(incrementalPull.peer.manager.job.transfer.reusedBytes >= assetBytes);
-    assert.ok(incrementalPull.peer.manager.job.transfer.bytes < assetBytes / 4,
-        'reverse sync must also avoid resending the large asset');
-    assert.equal((await readJson(path.join(computer.state, 'apply.json'))).jobRoot, incrementalPull.host.root);
+    assert.ok(repeatPull.peer.manager.job.transfer.bytes >= assetBytes,
+        'a repeat pull must also transmit the unchanged large asset');
+    assert.equal((await readJson(path.join(computer.state, 'apply.json'))).jobRoot, repeatPull.host.root);
     await rollback(computer, await readJson(path.join(computer.state, 'apply.json')));
-    assert.equal((await portableState(computer)).digest, beforeIncrementalComputer.digest);
-    checks.push('incremental_pull_transfers_small_chat_reuses_large_asset_and_mirrors_deletion');
+    assert.equal((await portableState(computer)).digest, beforeRepeatComputer.digest);
+    checks.push('repeat_full_pull_resends_unchanged_asset_and_mirrors_deletion');
     if (process.platform !== 'win32') {
         await fs.writeFile(path.join(profile(computer), 'cli-computer.txt'), 'chosen on computer');
         await cliPair(computer, phone, 'push', 'computer');

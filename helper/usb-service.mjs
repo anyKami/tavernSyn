@@ -3,14 +3,13 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { encodeUsb, USB_DELTA_CAPABILITY, USB_MAX_MANIFEST_BYTES } from '../lib/usb-stream.mjs';
+import { encodeUsb, USB_FULL_CAPABILITY } from '../lib/usb-stream.mjs';
 import { requireThat, SyncError } from '../lib/io.mjs';
 
 export const USB_PROTOCOL = 'tavernsyn-usb-v2';
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const SHA = /^[a-f0-9]{64}$/;
 const JSON_LIMIT = 1024 * 1024;
-const MANIFEST_JSON_LIMIT = USB_MAX_MANIFEST_BYTES + 1024;
 const IO_TIMEOUT = 120000;
 const UPGRADE_MESSAGE = 'USB 服务版本不兼容，请将电脑和手机都更新至最新版本，再重新打开两端的 USB 同步入口。';
 
@@ -162,15 +161,6 @@ export async function startUsbServer(session, { port = 17653, token = randomByte
                 requireThat(!request.headers['transfer-encoding'] && (!request.headers['content-length'] || request.headers['content-length'] === '0'), 'USB_INPUT', 'USB 查询不能包含请求正文。');
                 reply(response, 200, status()); return;
             }
-            if (route === 'GET /basis') {
-                expectStage('receive-ready'); matchJob(request.headers['x-tavernsyn-job']);
-                requireThat(!request.headers['transfer-encoding'] && (!request.headers['content-length'] || request.headers['content-length'] === '0'),
-                    'USB_INPUT', 'USB 文件清单查询不能包含请求正文。');
-                const value = { id: status().job.id, manifest: session.basis?.manifest };
-                requireThat(value.manifest && Buffer.byteLength(JSON.stringify(value)) <= MANIFEST_JSON_LIMIT,
-                    'USB_JSON_SIZE', 'USB 本机文件清单无效或过大。');
-                reply(response, 200, value); return;
-            }
             if (route === 'GET /payload') {
                 expectStage('exported'); matchJob(request.headers['x-tavernsyn-job']);
                 const frozen = session.frozen;
@@ -179,7 +169,6 @@ export async function startUsbServer(session, { port = 17653, token = randomByte
                     response.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store', 'connection': 'close',
                         'x-tavernsyn-job': status().job.id, 'x-tavernsyn-digest': frozen.manifest.digest });
                     await pipeline(Readable.from(encodeUsb(frozen.payload || session.payload, frozen.manifest, {
-                        basisManifest: session.transferBasis,
                         onProgress: progress => session.manager?.progress?.({ stage: 'usb', ...progress }),
                     })), response);
                 }); return;
@@ -194,22 +183,23 @@ export async function startUsbServer(session, { port = 17653, token = randomByte
                 catch { throw new SyncError('USB_PEER', 'USB 来源设备身份无效。'); }
                 const id = jobId(request.headers['x-tavernsyn-job']);
                 const source = matchSelection('push', id, peer);
-                if (status().stage === 'receive-ready') matchJob(id);
+                const preparedFull = status().stage === 'receive-ready';
+                if (preparedFull) matchJob(id);
                 const staged = await run(async () => {
                     await beforeTransfer();
                     return session.receive(request, source, id, { onTransferred: async (value, plan) => {
-                        // All network bytes have arrived, but local reuse can
-                        // still take minutes. The new client polls until the
-                        // complete snapshot is verified before requesting apply.
-                        if (plan.mode === 'incremental') reply(response, 202, value);
+                        // Only clients that prepared this full job may receive
+                        // an early wire receipt. They poll for validation; older
+                        // v2 clients still get 200 only when receive is complete.
+                        if (preparedFull) reply(response, 202, value);
                     } });
                 });
                 if (!response.headersSent) reply(response, 200, staged);
                 return;
             }
-            requireThat(['POST /select', 'POST /export', 'POST /basis', 'POST /delta', 'POST /apply', 'POST /ack', 'POST /finish'].includes(route), 'USB_ROUTE', '不支持的 USB 操作。');
+            requireThat(['POST /select', 'POST /export', 'POST /prepare', 'POST /apply', 'POST /ack', 'POST /finish'].includes(route), 'USB_ROUTE', '不支持的 USB 操作。');
             requireThat(request.headers['content-type']?.split(';')[0] === 'application/json', 'USB_INPUT', 'USB 控制请求必须使用 JSON。');
-            const body = await jsonBody(request, route === 'POST /delta' ? MANIFEST_JSON_LIMIT : JSON_LIMIT);
+            const body = await jsonBody(request);
             if (route === 'POST /select') {
                 onlyKeys(body, ['peer', 'direction']); directionValue(body.direction);
                 if (!selected) expectStage('idle');
@@ -222,19 +212,12 @@ export async function startUsbServer(session, { port = 17653, token = randomByte
                 void run(async () => { await beforeTransfer(); return session.export(target, id); }).catch(() => {});
                 reply(response, 202, { accepted: true, id }); return;
             }
-            if (route === 'POST /basis') {
+            if (route === 'POST /prepare') {
                 expectStage('idle'); onlyKeys(body, ['peer', 'id']);
                 const id = jobId(body.id), source = matchSelection('push', id, body.peer);
                 requireThat(typeof session.prepareReceive === 'function', 'USB_PROTOCOL', UPGRADE_MESSAGE);
                 void run(async () => { await beforeTransfer(); return session.prepareReceive(source, id); }).catch(() => {});
                 reply(response, 202, { accepted: true, id }); return;
-            }
-            if (route === 'POST /delta') {
-                expectStage('exported'); onlyKeys(body, ['id', 'basis']); matchJob(body.id);
-                requireThat(typeof session.setTransfer === 'function' && selected?.direction === 'pull', 'USB_PROTOCOL', UPGRADE_MESSAGE);
-                requireThat(body.basis, 'MANIFEST', 'USB 增量同步缺少接收端文件清单。');
-                const transfer = await run(() => session.setTransfer(body.basis));
-                reply(response, 200, { id: body.id, transfer }); return;
             }
             if (route === 'POST /apply') {
                 expectStage('received'); onlyKeys(body, ['id']); matchJob(body.id);
@@ -393,9 +376,8 @@ export async function syncUsb(session, { origin, token, direction, confirmPeer =
         requireThat(hello.protocol === USB_PROTOCOL, 'USB_PROTOCOL', UPGRADE_MESSAGE);
         requireThat(hello.stage === 'idle', 'USB_STAGE', '对方 USB 已有任务，请等待任务结束后重新打开两端入口。');
         peer = peerIdentity(hello, session.device.deviceId);
-        const incremental = Array.isArray(hello.capabilities) && hello.capabilities.includes(USB_DELTA_CAPABILITY)
-            && session.status().capabilities?.includes(USB_DELTA_CAPABILITY)
-            && typeof session.prepareReceive === 'function' && typeof session.setTransfer === 'function';
+        const fullPreparation = Array.isArray(hello.capabilities) && hello.capabilities.includes(USB_FULL_CAPABILITY)
+            && session.status().capabilities?.includes(USB_FULL_CAPABILITY);
         // Snapshot creation and target-side dependency preparation are local
         // operations; keep the connected service alive while they take place.
         heartbeat = setInterval(() => {
@@ -426,32 +408,23 @@ export async function syncUsb(session, { origin, token, direction, confirmPeer =
         };
         let digest, localResult;
         if (direction === 'push') {
-            // Start both isolated snapshots together, without holding an HTTP
-            // request open while the phone scans a large local data set.
-            if (incremental) await connection.json('POST', '/basis', { peer: local, id });
+            // Prepare the receiver alongside the source snapshot, outside the
+            // payload request. No local copy or basis manifest is needed.
+            if (fullPreparation) await connection.json('POST', '/prepare', { peer: local, id });
             await onProgress({ stage: 'exporting' });
             const frozen = await session.export(peer, id); digest = frozen.manifest.digest;
-            let basisManifest = null;
-            if (incremental) {
-                await poll('receive-ready');
-                const basis = await connection.json('GET', '/basis', undefined, { limit: MANIFEST_JSON_LIMIT,
-                    headers: { 'x-tavernsyn-job': id } });
-                requireThat(basis.id === id && basis.manifest, 'USB_JOB', 'USB 对端文件清单不属于当前任务。');
-                basisManifest = basis.manifest;
-                await session.setTransfer(basisManifest);
-            }
+            if (fullPreparation) await poll('receive-ready');
             const transfer = session.transfer ?? { bytes: frozen.manifest.bytes, files: frozen.manifest.files.length };
             await onProgress({ stage: 'sending', bytes: transfer.bytes, files: transfer.files });
             const response = await connection.request('POST', '/receive', {
                 stream: encodeUsb(frozen.payload || session.payload, frozen.manifest, {
-                    basisManifest,
                     onProgress: progress => session.manager?.progress?.({ stage: 'usb', ...progress }),
                 }), headers: { 'content-type': 'application/octet-stream',
                     'x-tavernsyn-peer': Buffer.from(JSON.stringify(local)).toString('base64url'), 'x-tavernsyn-job': id },
             });
             const staged = await jsonBody(response);
             requireThat(staged.id === id && staged.digest === digest, 'USB_RESULT', 'USB 目标暂存回执与发送快照不一致。');
-            if (incremental) await poll('received');
+            await poll('received');
             remoteApplyRequested = true;
             await connection.json('POST', '/apply', { id });
             const completed = await poll('completed');
@@ -459,12 +432,8 @@ export async function syncUsb(session, { origin, token, direction, confirmPeer =
             localResult = await session.acknowledge(confirmedResult);
         } else {
             await connection.json('POST', '/export', { peer: local, id });
-            const basis = incremental ? await session.prepareReceive(peer, id) : null;
+            if (typeof session.prepareReceive === 'function') await session.prepareReceive(peer, id);
             await poll('exported');
-            if (incremental) {
-                const planned = await connection.json('POST', '/delta', { id, basis: basis.manifest });
-                requireThat(planned.id === id, 'USB_JOB', 'USB 增量计划不属于当前任务。');
-            }
             const response = await connection.request('GET', '/payload', { headers: { 'x-tavernsyn-job': id } });
             requireThat(response.headers['content-type'] === 'application/octet-stream' && response.headers['x-tavernsyn-job'] === id
                 && SHA.test(response.headers['x-tavernsyn-digest'] ?? ''), 'USB_PROTOCOL', 'USB 来源快照响应不匹配。');
